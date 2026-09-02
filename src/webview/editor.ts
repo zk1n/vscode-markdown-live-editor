@@ -31,6 +31,15 @@ declare function acquireVsCodeApi(): VsCodeApi;
 
 const remoteUpdate = Annotation.define<boolean>();
 
+const vscodeEditorTheme = EditorView.theme({
+  ".cm-content": {
+    caretColor: "var(--vscode-editorCursor-foreground)",
+  },
+  "&.cm-focused .cm-cursor, .cm-dropCursor": {
+    borderLeftColor: "var(--vscode-editorCursor-foreground)",
+  },
+});
+
 class MarkdownWebviewController {
   private readonly editable = new Compartment();
   private readonly livePreview: LivePreviewEngine;
@@ -59,6 +68,7 @@ class MarkdownWebviewController {
         doc: bootstrap.text,
         extensions: [
           markdown(),
+          vscodeEditorTheme,
           this.livePreview.extension,
           this.editable.of(EditorView.editable.of(true)),
           Prec.highest(

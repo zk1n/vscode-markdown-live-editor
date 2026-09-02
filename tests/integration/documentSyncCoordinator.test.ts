@@ -139,6 +139,44 @@ function edit(
   };
 }
 
+function fullReplacementEdit(
+  sequence: number,
+  documentVersion: number,
+  expectedText: string,
+  text: string,
+): ClientEditMessage {
+  return {
+    kind: "edit",
+    protocolVersion: PROTOCOL_VERSION,
+    documentUri: DOCUMENT_URI,
+    sessionId: "session-a",
+    sequence,
+    documentVersion,
+    changes: [
+      {
+        range: {
+          start: { line: 0, character: 0 },
+          end: positionAt(expectedText, expectedText.length),
+        },
+        expectedText,
+        text,
+      },
+    ],
+  };
+}
+
+function positionAt(
+  text: string,
+  offset: number,
+): { readonly line: number; readonly character: number } {
+  const prefix = text.slice(0, offset);
+  const lastNewline = prefix.lastIndexOf("\n");
+  return {
+    line: lastNewline === -1 ? 0 : prefix.split("\n").length - 1,
+    character: offset - lastNewline - 1,
+  };
+}
+
 function barrier(
   kind: "save" | "undo" | "redo",
   sequence: number,
@@ -159,6 +197,53 @@ function barrier(
 }
 
 describe("DocumentSyncCoordinator", () => {
+  it("acknowledges valid first insertions at middle, beginning, EOF, and an empty document", async () => {
+    const cases = [
+      { initial: "abc", expected: "aXbc" },
+      { initial: "abc", expected: "Xabc" },
+      { initial: "abc", expected: "abcX" },
+      { initial: "", expected: "X" },
+      { initial: "日本😀", expected: "日本X😀" },
+    ] as const;
+
+    for (const testCase of cases) {
+      const port = new FakeDocumentPort(testCase.initial);
+      const coordinator = new DocumentSyncCoordinator(port);
+      const endpoint = new RecordingEndpoint();
+      await coordinator.openSession(DOCUMENT_URI, "session-a", endpoint);
+
+      await coordinator.receive(
+        fullReplacementEdit(1, 1, testCase.initial, testCase.expected),
+        endpoint,
+      );
+
+      expect(endpoint.messages.some((message) => message.kind === "resync")).toBe(false);
+      expect(endpoint.messages).toContainEqual(
+        expect.objectContaining({
+          kind: "operation-ack",
+          operation: "edit",
+          sequence: 1,
+          text: testCase.expected,
+        }),
+      );
+    }
+  });
+
+  it("keeps sequential full-document edits FIFO and authoritative", async () => {
+    const port = new FakeDocumentPort("");
+    const coordinator = new DocumentSyncCoordinator(port);
+    const endpoint = new RecordingEndpoint();
+    await coordinator.openSession(DOCUMENT_URI, "session-a", endpoint);
+
+    await coordinator.receive(fullReplacementEdit(1, 1, "", "A"), endpoint);
+    await coordinator.receive(fullReplacementEdit(2, 2, "A", "A日"), endpoint);
+    await coordinator.receive(fullReplacementEdit(3, 3, "A日", "A日😀"), endpoint);
+
+    expect(port.calls).toEqual(["replace:A", "replace:A日", "replace:A日😀"]);
+    expect(endpoint.messages.filter((message) => message.kind === "operation-ack")).toHaveLength(3);
+    expect(endpoint.messages.some((message) => message.kind === "resync")).toBe(false);
+  });
+
   it("serializes queued edits, acknowledges each one, and broadcasts authority", async () => {
     const port = new FakeDocumentPort("");
     const coordinator = new DocumentSyncCoordinator(port);

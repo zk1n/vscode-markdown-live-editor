@@ -2,10 +2,19 @@ import assert from "node:assert/strict";
 import { TextDecoder, TextEncoder } from "node:util";
 import * as vscode from "vscode";
 
+import {
+  DocumentSyncCoordinator,
+  type WebviewEndpoint,
+} from "../../src/core/sync/documentSyncCoordinator.js";
+import { PROTOCOL_VERSION, type HostToWebviewMessage } from "../../src/protocol/messages.js";
+import { VscodeDocumentPort } from "../../src/extension/sync/VscodeDocumentPort.js";
+
 const COMMAND_ID = "vscodeMarkdownLiveEditor.showProjectInfo";
 const VIEW_TYPE = "vscodeMarkdownLiveEditor.editor";
 const EXTENSION_ID = "local-dev.vscode-markdown-live-editor";
 const SMOKE_FILE_NAME = "extension-host-smoke.md";
+const FIRST_EDIT_FILE_NAME = "extension-host-first-edit.md";
+const FIRST_EDIT_LF_FILE_NAME = "extension-host-first-edit-lf.md";
 
 export async function run(): Promise<void> {
   const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
@@ -58,6 +67,151 @@ export async function run(): Promise<void> {
   } finally {
     await removeSmokeFile(documentUri);
   }
+
+  await verifyFirstEditProtocolPath(workspaceFolder.uri);
+}
+
+async function verifyFirstEditProtocolPath(workspaceUri: vscode.Uri): Promise<void> {
+  await verifyProtocolFirstEdit(workspaceUri, {
+    fileName: FIRST_EDIT_FILE_NAME,
+    initialDocumentText: "abc\r\n",
+    requestedProtocolText: "aXbc\n",
+    expectedDocumentText: "aXbc\r\n",
+  });
+  await verifyProtocolFirstEdit(workspaceUri, {
+    fileName: FIRST_EDIT_LF_FILE_NAME,
+    initialDocumentText: "abc",
+    requestedProtocolText: "aXbc",
+    expectedDocumentText: "aXbc",
+  });
+}
+
+interface FirstEditScenario {
+  readonly fileName: string;
+  readonly initialDocumentText: string;
+  readonly requestedProtocolText: string;
+  readonly expectedDocumentText: string;
+}
+
+async function verifyProtocolFirstEdit(
+  workspaceUri: vscode.Uri,
+  scenario: FirstEditScenario,
+): Promise<void> {
+  const documentUri = vscode.Uri.joinPath(workspaceUri, scenario.fileName);
+  await removeSmokeFile(documentUri);
+
+  try {
+    await vscode.workspace.fs.writeFile(
+      documentUri,
+      new TextEncoder().encode(scenario.initialDocumentText),
+    );
+    const document = await vscode.workspace.openTextDocument(documentUri);
+    const coordinator = new DocumentSyncCoordinator(new VscodeDocumentPort());
+    const endpoint = new RecordingEndpoint();
+    const observedChanges: vscode.TextDocumentChangeEvent[] = [];
+    const changeSubscription = vscode.workspace.onDidChangeTextDocument((event): void => {
+      if (event.document.uri.toString() === documentUri.toString()) {
+        observedChanges.push(event);
+        void coordinator.publishExternalChange(documentUri.toString());
+      }
+    });
+
+    try {
+      const opened = await coordinator.openSession(documentUri.toString(), "first-edit", endpoint);
+      assert.ok(opened.ok, "Initial document session did not open.");
+
+      await coordinator.receive(
+        {
+          kind: "edit",
+          protocolVersion: PROTOCOL_VERSION,
+          documentUri: documentUri.toString(),
+          sessionId: "first-edit",
+          sequence: 1,
+          documentVersion: opened.snapshot.documentVersion,
+          changes: [
+            {
+              range: {
+                start: { line: 0, character: 0 },
+                end: positionAt(opened.snapshot.text, opened.snapshot.text.length),
+              },
+              expectedText: opened.snapshot.text,
+              text: scenario.requestedProtocolText,
+            },
+          ],
+        },
+        endpoint,
+      );
+      await coordinator.flush(documentUri.toString());
+    } finally {
+      changeSubscription.dispose();
+    }
+
+    const resync = endpoint.messages.find((message) => message.kind === "resync");
+    assert.equal(
+      resync,
+      undefined,
+      diagnostic(
+        "First edit unexpectedly entered recovery.",
+        document,
+        scenario.requestedProtocolText,
+      ),
+    );
+    assert.ok(
+      endpoint.messages.some(
+        (message) =>
+          message.kind === "operation-ack" &&
+          message.operation === "edit" &&
+          message.text === scenario.requestedProtocolText,
+      ),
+      "The protocol acknowledgement did not use canonical LF text.",
+    );
+    assert.ok(
+      observedChanges.length > 0,
+      "The first edit did not emit a TextDocument change event.",
+    );
+    assert.equal(
+      document.getText(),
+      scenario.expectedDocumentText,
+      diagnostic(
+        "First edit did not preserve the document EOL projection.",
+        document,
+        scenario.expectedDocumentText,
+      ),
+    );
+    assert.equal(await document.save(), true, "The first edit did not save.");
+    assert.equal(
+      new TextDecoder().decode(await vscode.workspace.fs.readFile(documentUri)),
+      scenario.expectedDocumentText,
+      "Disk text differs from the authoritative TextDocument after the first edit.",
+    );
+  } finally {
+    await removeSmokeFile(documentUri);
+  }
+}
+
+class RecordingEndpoint implements WebviewEndpoint {
+  public readonly messages: HostToWebviewMessage[] = [];
+
+  public postMessage(message: HostToWebviewMessage): void {
+    this.messages.push(message);
+  }
+}
+
+function positionAt(
+  text: string,
+  offset: number,
+): { readonly line: number; readonly character: number } {
+  const prefix = text.slice(0, offset);
+  const lastNewline = prefix.lastIndexOf("\n");
+  return {
+    line: lastNewline === -1 ? 0 : prefix.split("\n").length - 1,
+    character: offset - lastNewline - 1,
+  };
+}
+
+function diagnostic(label: string, document: vscode.TextDocument, expectedText: string): string {
+  const actualText = document.getText();
+  return `${label} expected=${JSON.stringify(expectedText)} actual=${JSON.stringify(actualText)} eol=${document.eol === vscode.EndOfLine.CRLF ? "CRLF" : "LF"}`;
 }
 
 function fullDocumentRange(document: vscode.TextDocument): vscode.Range {

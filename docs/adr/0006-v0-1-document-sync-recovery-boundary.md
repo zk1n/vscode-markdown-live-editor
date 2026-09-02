@@ -27,6 +27,11 @@ For v0.1:
   sequenced Save, Undo, or Redo request cannot overtake a received edit.
 - The host rereads `TextDocument` after every mutation and acknowledges only
   the resulting authoritative snapshot.
+- Protocol text uses LF as its canonical line-separator representation, matching
+  CodeMirror's document model. `VscodeDocumentPort` projects replacement text
+  to `TextDocument.eol` only at the VS Code boundary and converts snapshots
+  back to canonical LF before exact expected-result comparison. This preserves
+  the TextDocument/disk EOL convention while keeping protocol comparisons exact.
 - A stale version, sequence gap, mismatched source, rejected port operation,
   or inconsistent result produces an explicit resync/recovery message. It is
   never applied positionally against newer text.

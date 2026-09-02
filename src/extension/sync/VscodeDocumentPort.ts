@@ -35,7 +35,11 @@ export class VscodeDocumentPort implements DocumentPort {
     }
 
     const workspaceEdit = new vscode.WorkspaceEdit();
-    workspaceEdit.replace(document.uri, fullDocumentRange(document), text);
+    workspaceEdit.replace(
+      document.uri,
+      fullDocumentRange(document),
+      toDocumentText(text, document.eol),
+    );
 
     // WorkspaceEdit has no compare-and-swap version API. Checking immediately
     // before apply is the strongest public guard available; the coordinator
@@ -102,7 +106,7 @@ export class VscodeDocumentPort implements DocumentPort {
     return {
       documentUri: document.uri.toString(),
       documentVersion: document.version,
-      text: document.getText(),
+      text: toProtocolText(document.getText()),
     };
   }
 
@@ -118,4 +122,18 @@ export class VscodeDocumentPort implements DocumentPort {
 function fullDocumentRange(document: vscode.TextDocument): vscode.Range {
   const lastLine = document.lineAt(document.lineCount - 1);
   return new vscode.Range(0, 0, lastLine.lineNumber, lastLine.text.length);
+}
+
+/**
+ * CodeMirror's document model uses LF line separators. The synchronization
+ * protocol deliberately uses that same canonical representation so exact
+ * expected-result checks do not compare a CodeMirror LF string with VS Code's
+ * CRLF projection of the same edit.
+ */
+function toProtocolText(text: string): string {
+  return text.replaceAll("\r\n", "\n");
+}
+
+function toDocumentText(text: string, eol: vscode.EndOfLine): string {
+  return eol === vscode.EndOfLine.CRLF ? text.replaceAll("\n", "\r\n") : text;
 }
