@@ -10,6 +10,10 @@ import {
   type WebviewToHostMessage,
   type WirePosition,
 } from "../protocol/messages.js";
+import {
+  createLivePreviewEngine,
+  type LivePreviewEngine,
+} from "./livePreview/LivePreviewEngine.js";
 
 interface VsCodeApi {
   postMessage(message: WebviewToHostMessage): void;
@@ -29,6 +33,7 @@ const remoteUpdate = Annotation.define<boolean>();
 
 class MarkdownWebviewController {
   private readonly editable = new Compartment();
+  private readonly livePreview: LivePreviewEngine;
   private readonly view: EditorView;
   private authoritativeText: string;
   private documentVersion: number;
@@ -48,11 +53,13 @@ class MarkdownWebviewController {
     this.authoritativeText = bootstrap.text;
     this.documentVersion = bootstrap.documentVersion;
     this.nextSequence = bootstrap.nextSequence;
+    this.livePreview = createLivePreviewEngine();
     this.view = new EditorView({
       state: EditorState.create({
         doc: bootstrap.text,
         extensions: [
           markdown(),
+          this.livePreview.extension,
           this.editable.of(EditorView.editable.of(true)),
           Prec.highest(
             keymap.of(
@@ -90,6 +97,7 @@ class MarkdownWebviewController {
     }
     this.disposed = true;
     this.view.destroy();
+    this.livePreview.dispose();
   }
 
   private handleUpdate(update: ViewUpdateLike): void {

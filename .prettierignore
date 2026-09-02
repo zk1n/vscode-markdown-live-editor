@@ -1,5 +1,5 @@
 dist
 node_modules
-.vscode-test
+.vscode-test/
 coverage
 package-lock.json

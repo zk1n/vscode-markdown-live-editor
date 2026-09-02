@@ -122,9 +122,15 @@ npm run lint
 npm test
 npm run build
 npm run check
+npm run test:extension-host
 ```
 
 `npm run check` is the pre-integration baseline.
+
+`npm run test:extension-host` is the separately runnable public-API smoke
+suite. It uses a pinned VS Code test instance and may download it on its first
+run; keep it outside the fast `check` path while it remains an integration
+environment dependency.
 
 ## 7. Release manual evidence
 

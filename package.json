@@ -45,10 +45,11 @@
     "watch": "node ./scripts/build.mjs --watch",
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
-    "format": "prettier --write .",
-    "format:check": "prettier --check .",
+    "format": "prettier --write CHANGELOG.md CONTRIBUTING.md README.md SECURITY.md package.json tsconfig.json vitest.config.ts eslint.config.mjs src tests scripts docs .vscode",
+    "format:check": "prettier --check CHANGELOG.md CONTRIBUTING.md README.md SECURITY.md package.json tsconfig.json vitest.config.ts eslint.config.mjs src tests scripts docs .vscode",
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:extension-host": "npm run build && node ./scripts/run-extension-host-tests.mjs",
     "check": "npm run typecheck && npm run lint && npm run test && npm run build && npm run format:check"
   },
   "dependencies": {
