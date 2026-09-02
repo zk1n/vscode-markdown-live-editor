@@ -41,4 +41,17 @@ describe("CompositionBuffer", () => {
     expect(buffer.isActive).toBe(false);
     expect(buffer.finish("authoritative local preedit")).toBeUndefined();
   });
+
+  it("retains the explicit stable base when preedit has already changed the view", () => {
+    const buffer = new CompositionBuffer();
+    buffer.begin(9, "AB");
+    buffer.update("ABk");
+    buffer.update("ABka");
+
+    expect(buffer.finish("ABか")).toMatchObject({
+      baseDocumentVersion: 9,
+      baseText: "AB",
+      finalText: "ABか",
+    });
+  });
 });

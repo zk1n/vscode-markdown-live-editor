@@ -14,11 +14,33 @@ import type {
  */
 export class VscodeDocumentPort implements DocumentPort {
   private readonly savesInProgress = new Set<string>();
+  private readonly replacementsInProgress = new Map<string, PendingReplacement>();
 
   public constructor(private readonly diagnostics: DiagnosticLog = disabledDiagnosticLog) {}
 
   public isSaving(documentUri: string): boolean {
     return this.savesInProgress.has(documentUri);
+  }
+
+  /**
+   * Classifies only the exact TextDocument update currently expected from this
+   * port's WorkspaceEdit.  All other changes, including a concurrent update,
+   * remain external and must be broadcast to sessions.
+   */
+  public classifyDocumentChange(event: vscode.TextDocumentChangeEvent): "own" | "external" {
+    const document = event.document;
+    const pending = this.replacementsInProgress.get(document.uri.toString());
+    const change = event.contentChanges.length === 1 ? event.contentChanges[0] : undefined;
+    if (
+      pending !== undefined &&
+      document.version === pending.expectedVersion + 1 &&
+      toProtocolText(document.getText()) === pending.targetText &&
+      change !== undefined &&
+      toProtocolText(change.text) === pending.targetText
+    ) {
+      return "own";
+    }
+    return "external";
   }
 
   public readDocument(documentUri: string): Promise<DocumentSnapshot> {
@@ -61,8 +83,18 @@ export class VscodeDocumentPort implements DocumentPort {
       );
     }
 
-    const applied = await vscode.workspace.applyEdit(workspaceEdit);
-    const snapshot = await this.readDocument(documentUri);
+    const pending: PendingReplacement = { expectedVersion, targetText: text };
+    this.replacementsInProgress.set(documentUri, pending);
+    let applied: boolean;
+    let snapshot: DocumentSnapshot;
+    try {
+      applied = await vscode.workspace.applyEdit(workspaceEdit);
+      snapshot = await this.readDocument(documentUri);
+    } finally {
+      if (this.replacementsInProgress.get(documentUri) === pending) {
+        this.replacementsInProgress.delete(documentUri);
+      }
+    }
     this.diagnostics.record("port.replace.result", {
       applied,
       dirty: document.isDirty,
@@ -176,6 +208,11 @@ export class VscodeDocumentPort implements DocumentPort {
       note,
     });
   }
+}
+
+interface PendingReplacement {
+  readonly expectedVersion: number;
+  readonly targetText: string;
 }
 
 function saveFailureNote(saved: boolean, clean: boolean, diskMatches: boolean): string {

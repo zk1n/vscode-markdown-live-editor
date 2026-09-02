@@ -19,6 +19,7 @@ const FIRST_EDIT_LF_FILE_NAME = "extension-host-first-edit-lf.md";
 const COMPOSITION_HISTORY_FILE_NAME = "extension-host-composition-history.md";
 const COMPOSITION_GROUPING_FILE_NAME = "extension-host-composition-grouping.md";
 const SAVE_PROBE_FILE_NAME = "extension-host-save-probe.md";
+const OWN_CHANGE_FILE_NAME = "extension-host-own-change.md";
 
 export async function run(): Promise<void> {
   const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
@@ -76,6 +77,47 @@ export async function run(): Promise<void> {
   await verifyCompositionHistoryPath(workspaceFolder.uri);
   await verifyWorkspaceEditUndoGrouping(workspaceFolder.uri);
   await verifySaveSemantics(workspaceFolder.uri);
+  await verifyOwnChangeClassification(workspaceFolder.uri);
+}
+
+async function verifyOwnChangeClassification(workspaceUri: vscode.Uri): Promise<void> {
+  const documentUri = vscode.Uri.joinPath(workspaceUri, OWN_CHANGE_FILE_NAME);
+  await removeSmokeFile(documentUri);
+
+  try {
+    await vscode.workspace.fs.writeFile(documentUri, new TextEncoder().encode("before"));
+    const document = await vscode.workspace.openTextDocument(documentUri);
+    const port = new VscodeDocumentPort();
+    const classifications: ("own" | "external")[] = [];
+    const subscription = vscode.workspace.onDidChangeTextDocument((event): void => {
+      if (event.document.uri.toString() === documentUri.toString()) {
+        classifications.push(port.classifyDocumentChange(event));
+      }
+    });
+
+    try {
+      assertPortApplied(
+        await port.replaceDocument(documentUri.toString(), document.version, "owned"),
+        "Port-owned WorkspaceEdit was rejected.",
+      );
+      await replaceWholeDocument(document, documentUri, "external");
+    } finally {
+      subscription.dispose();
+    }
+
+    assert.equal(
+      classifications.filter((classification) => classification === "own").length,
+      1,
+      "Only the exact port replacement may be classified as own.",
+    );
+    assert.equal(
+      classifications.at(-1),
+      "external",
+      "A later external WorkspaceEdit was incorrectly suppressed as own.",
+    );
+  } finally {
+    await removeSmokeFile(documentUri);
+  }
 }
 
 async function verifyWorkspaceEditUndoGrouping(workspaceUri: vscode.Uri): Promise<void> {

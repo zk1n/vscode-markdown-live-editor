@@ -31,6 +31,8 @@ composition相当commit 2回にも適用すると同じ結果だった（VS Code
   正確なauthoritative editを1回だけ発行する。
 - composition中のSave / Undo / RedoはFIFO barrierに残し、content DOMの再構成、強制commit、
   focus移動を行わない。
+- compositionがactiveの状態でbarrierを要求しても、そのcompositionを完了するtransactionは
+  barrier filterで拒否しない。composition完了後に開始される通常入力だけをFIFOの後ろへ止める。
 - 隣接したauthoritative editのUndo groupingはVS Code host semanticsに従う。compositionごとに
   異なるUndo unitとなることはpublic APIでは保証しない。
 - composition中のauthoritative external updateは、local preeditを黙って上書きせずvisible
@@ -53,9 +55,17 @@ Windows ATOKの手動結果は必須であり、Microsoft IMEの結果で代替�
 ## Implementation notes
 
 webviewは`compositionstart`でauthoritative versionとlocal textを記録する。preedit transactionは
-local bufferだけを更新する。意味的な`compositionend`後、前のordinary editがあればacknowledgeを
-待ち、authorityが記録したbaseと一致することを検証してから既存FIFOの`edit`を送る。不一致なら
-local compositionを可視のままrecoveryへ入る。
+local bufferだけを更新する。composition開始前のordinary editをflushする必要があれば、送信targetは
+captured base textとして明示的に保持し、mutableなEditorView textを再読しない。したがってpreedit
+(`ABk`、`ABka`など)をpersistent authorityへ送らない。意味的な`compositionend`後、前のordinary
+editがあればacknowledgeを待ち、authorityが記録したbaseと一致することを検証してから最終textだけを
+既存FIFOの`edit`として送る。不一致ならlocal compositionを可視のままrecoveryへ入る。
+
+Save barrierはcomposition active時にqueueする。filterはその時点で既にactiveだったcompositionの
+continuation/final transactionを許可し、final authoritative editのacknowledgement後にbarrierを送る。
+barrier完了後は必ずfreezeを解除する。freeze中にqueue、barrier in-flight、composition completion、
+または先行edit in-flightのいずれも存在しない状態はinternal invariant violationとしてvisible recoveryに
+遷移し、入力だけを黙って捨てる状態を作らない。
 
 compositionendのmicrotaskはCodeMirrorの同期処理をsettleさせる目的だけであり、Undo groupingを
 変えるdelayではない。

@@ -49,11 +49,16 @@ export function activate(context: vscode.ExtensionContext): void {
     if (event.document.languageId !== "markdown") {
       return;
     }
+    const changeClassification = documentPort.classifyDocumentChange(event);
     diagnostics.record("extension.document.changed", {
+      classification: changeClassification,
       dirty: event.document.isDirty,
       documentVersion: event.document.version,
       textLength: event.document.getText().length,
     });
+    if (changeClassification === "own") {
+      return;
+    }
     void coordinator.publishExternalChange(event.document.uri.toString());
   });
 
