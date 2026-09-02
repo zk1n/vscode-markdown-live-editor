@@ -353,6 +353,61 @@ describe("DocumentSyncCoordinator", () => {
     });
   });
 
+  it("keeps local edit, acknowledgement, and Save identical for plain and supported Markdown syntax", async () => {
+    const cases = ["plain text", "# ATX heading", "**strong**", "*emphasis*"] as const;
+
+    for (const text of cases) {
+      const port = new FakeDocumentPort("");
+      const coordinator = new DocumentSyncCoordinator(port);
+      const endpoint = new RecordingEndpoint();
+      await coordinator.openSession(DOCUMENT_URI, "session-a", endpoint);
+
+      await coordinator.receive(fullReplacementEdit(1, 1, "", text), endpoint);
+      await coordinator.receive(barrier("save", 2), endpoint);
+
+      expect(port.calls).toEqual([`replace:${text}`, "save"]);
+      expect(endpoint.messages).toContainEqual(
+        expect.objectContaining({
+          kind: "operation-ack",
+          operation: "edit",
+          sequence: 1,
+          text,
+        }),
+      );
+      expect(endpoint.messages).toContainEqual(
+        expect.objectContaining({
+          kind: "operation-ack",
+          operation: "save",
+          sequence: 2,
+          text,
+        }),
+      );
+      expect(endpoint.messages.some((message) => message.kind === "resync")).toBe(false);
+    }
+  });
+
+  it("applies only the authoritative Undo result and restores the same text on Redo", async () => {
+    const port = new FakeDocumentPort("あいう");
+    const coordinator = new DocumentSyncCoordinator(port);
+    const endpoint = new RecordingEndpoint();
+    await coordinator.openSession(DOCUMENT_URI, "session-a", endpoint);
+
+    await coordinator.receive(fullReplacementEdit(1, 1, "あいう", "あいうかきく"), endpoint);
+    await coordinator.receive(barrier("undo", 2), endpoint);
+    await coordinator.receive(barrier("redo", 3), endpoint);
+
+    const acknowledgements = endpoint.messages.filter(
+      (message): message is Extract<typeof message, { readonly kind: "operation-ack" }> =>
+        message.kind === "operation-ack",
+    );
+    expect(acknowledgements.map(({ operation, text }) => ({ operation, text }))).toEqual([
+      { operation: "edit", text: "あいうかきく" },
+      { operation: "undo", text: "あいう" },
+      { operation: "redo", text: "あいうかきく" },
+    ]);
+    expect(port.calls).toEqual(["replace:あいうかきく", "undo", "redo"]);
+  });
+
   it("enters recovery when a Save barrier reports an actual rejection", async () => {
     const port = new FakeDocumentPort("unsaved");
     port.rejectSave = true;

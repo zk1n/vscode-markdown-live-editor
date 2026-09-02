@@ -93,4 +93,15 @@ describe("webview IME Save sequence state", () => {
     expect(barriers.completeIfIdle()).toBe(true);
     expect(barriers.hasDeterministicProgress(false, false)).toBe(true);
   });
+
+  it("Case F: rejects a frozen queued barrier with no execution path", () => {
+    const barriers = new BarrierInputGate();
+
+    barriers.enqueue("save", undefined);
+
+    expect(barriers.isFrozen).toBe(true);
+    expect(barriers.queueLength).toBe(1);
+    expect(barriers.barrierInFlightSequence).toBeUndefined();
+    expect(barriers.hasDeterministicProgress(false, false)).toBe(false);
+  });
 });

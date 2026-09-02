@@ -331,6 +331,53 @@ async function verifySaveSemantics(workspaceUri: vscode.Uri): Promise<void> {
       "dirtyかきく",
       "Immediate Save did not persist the final authoritative composition text.",
     );
+
+    for (const [name, text] of [
+      ["plain-text", "plain text"],
+      ["atx-heading", "# ATX heading"],
+      ["strong", "**strong**"],
+      ["emphasis", "*emphasis*"],
+    ] as const) {
+      const syntaxEndpoint = new RecordingEndpoint();
+      const syntaxSessionId = `save-syntax-${name}`;
+      const syntaxOpened = await coordinator.openSession(
+        documentUri.toString(),
+        syntaxSessionId,
+        syntaxEndpoint,
+      );
+      assert.ok(syntaxOpened.ok, `Save syntax session '${name}' did not open.`);
+      await coordinator.receive(
+        fullReplacementMessage(
+          documentUri.toString(),
+          syntaxSessionId,
+          1,
+          syntaxOpened.snapshot.documentVersion,
+          syntaxOpened.snapshot.text,
+          text,
+        ),
+        syntaxEndpoint,
+      );
+      await coordinator.receive(
+        barrierMessage(documentUri.toString(), syntaxSessionId, "save", 2),
+        syntaxEndpoint,
+      );
+
+      assert.equal(
+        syntaxEndpoint.messages.some((message) => message.kind === "resync"),
+        false,
+        `Immediate Save for '${name}' entered recovery.`,
+      );
+      assert.equal(
+        document.isDirty,
+        false,
+        `Immediate Save for '${name}' left the document dirty.`,
+      );
+      assert.equal(
+        await readDiskText(documentUri),
+        text,
+        `Immediate Save for '${name}' did not persist the authoritative text.`,
+      );
+    }
   } finally {
     await removeSmokeFile(documentUri);
   }

@@ -77,7 +77,6 @@ export class BarrierInputGate {
   ): boolean {
     return (
       !this.inputFrozen ||
-      this.queue.length !== 0 ||
       this.inFlightSequence !== undefined ||
       compositionActive ||
       precedingEditInFlight

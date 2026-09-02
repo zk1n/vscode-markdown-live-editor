@@ -31,16 +31,22 @@ export class VscodeDocumentPort implements DocumentPort {
     const document = event.document;
     const pending = this.replacementsInProgress.get(document.uri.toString());
     const change = event.contentChanges.length === 1 ? event.contentChanges[0] : undefined;
-    if (
+    const classification =
       pending !== undefined &&
       document.version === pending.expectedVersion + 1 &&
       toProtocolText(document.getText()) === pending.targetText &&
       change !== undefined &&
       toProtocolText(change.text) === pending.targetText
-    ) {
-      return "own";
-    }
-    return "external";
+        ? "own"
+        : "external";
+    this.diagnostics.record("port.document-change.classified", {
+      classification,
+      contentChangeCount: event.contentChanges.length,
+      documentVersion: document.version,
+      pendingExpectedVersion: pending?.expectedVersion ?? -1,
+      pendingTargetMatches: pending?.targetText === toProtocolText(document.getText()),
+    });
+    return classification;
   }
 
   public readDocument(documentUri: string): Promise<DocumentSnapshot> {
@@ -120,7 +126,9 @@ export class VscodeDocumentPort implements DocumentPort {
       const clean = !document.isDirty;
       const diskMatches = diskText === snapshot.text;
       this.diagnostics.record("port.save.result", {
+        authorityTextLength: snapshot.text.length,
         clean,
+        diskTextLength: diskText.length,
         diskMatches,
         dirty: document.isDirty,
         documentVersion: snapshot.documentVersion,

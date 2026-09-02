@@ -467,6 +467,7 @@ class MarkdownWebviewController {
       return;
     }
     this.applyAuthoritativeSnapshot(message);
+    this.assertBarrierLiveness();
   }
 
   private applyAuthoritativeSnapshot(snapshot: DocumentSnapshotMessage): void {
