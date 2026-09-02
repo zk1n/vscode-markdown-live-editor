@@ -1,0 +1,179 @@
+import { randomUUID } from "node:crypto";
+
+import * as vscode from "vscode";
+
+import type {
+  DocumentSyncCoordinator,
+  WebviewEndpoint,
+} from "../../core/sync/documentSyncCoordinator.js";
+
+interface MarkdownEditorBootstrap {
+  readonly documentUri: string;
+  readonly documentVersion: number;
+  readonly sessionId: string;
+  readonly nextSequence: number;
+  readonly text: string;
+}
+
+export interface MarkdownEditorProviderOptions {
+  readonly webviewScriptPath: vscode.Uri;
+}
+
+/**
+ * Bridges VS Code's custom-text-editor lifecycle to the project-owned sync
+ * session. The session, rather than this provider, owns all TextDocument
+ * mutations and ordering decisions.
+ */
+export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
+  public constructor(
+    private readonly coordinator: DocumentSyncCoordinator,
+    private readonly options: MarkdownEditorProviderOptions,
+  ) {}
+
+  public resolveCustomTextEditor(
+    document: vscode.TextDocument,
+    webviewPanel: vscode.WebviewPanel,
+    cancellationToken: vscode.CancellationToken,
+  ): Promise<void> {
+    const { webview } = webviewPanel;
+    webview.options = {
+      enableScripts: true,
+      localResourceRoots: [vscode.Uri.joinPath(this.options.webviewScriptPath, "..")],
+    };
+
+    const documentUri = document.uri.toString();
+    const sessionId = randomUUID();
+    const endpoint: WebviewEndpoint = {
+      postMessage: (message): void => {
+        void webview.postMessage(message);
+      },
+    };
+
+    return this.openSession(
+      webview,
+      documentUri,
+      sessionId,
+      endpoint,
+      webviewPanel,
+      cancellationToken,
+    );
+  }
+
+  private async openSession(
+    webview: vscode.Webview,
+    documentUri: string,
+    sessionId: string,
+    endpoint: WebviewEndpoint,
+    webviewPanel: vscode.WebviewPanel,
+    cancellationToken: vscode.CancellationToken,
+  ): Promise<void> {
+    const lifecycle = { disposed: false };
+    let receiveDisposable: vscode.Disposable = vscode.Disposable.from();
+    const disposeSession = (): void => {
+      lifecycle.disposed = true;
+      receiveDisposable.dispose();
+      this.coordinator.closeSession(documentUri, sessionId);
+    };
+    const panelDispose = webviewPanel.onDidDispose(disposeSession);
+    const cancellationDispose = cancellationToken.onCancellationRequested(disposeSession);
+
+    const opened = await this.coordinator.openSession(documentUri, sessionId, endpoint);
+    if (lifecycle.disposed) {
+      this.coordinator.closeSession(documentUri, sessionId);
+      panelDispose.dispose();
+      cancellationDispose.dispose();
+      return;
+    }
+    if (!opened.ok) {
+      webview.html = createFailureHtml(webview, opened.error);
+      panelDispose.dispose();
+      cancellationDispose.dispose();
+      return;
+    }
+
+    const bootstrap: MarkdownEditorBootstrap = {
+      documentUri,
+      documentVersion: opened.snapshot.documentVersion,
+      sessionId,
+      nextSequence: 1,
+      text: opened.snapshot.text,
+    };
+    webview.html = createWebviewHtml(
+      webview,
+      webview.asWebviewUri(this.options.webviewScriptPath),
+      bootstrap,
+    );
+
+    receiveDisposable = webview.onDidReceiveMessage((value: unknown) => {
+      void this.coordinator.receive(value, endpoint);
+    });
+  }
+}
+
+function createWebviewHtml(
+  webview: vscode.Webview,
+  scriptUri: vscode.Uri,
+  bootstrap: MarkdownEditorBootstrap,
+): string {
+  const nonce = randomUUID().replaceAll("-", "");
+  const contentSecurityPolicy = [
+    "default-src 'none'",
+    `img-src ${webview.cspSource} data:`,
+    `style-src ${webview.cspSource} 'unsafe-inline'`,
+    `script-src 'nonce-${nonce}'`,
+    `font-src ${webview.cspSource}`,
+    "connect-src 'none'",
+  ].join("; ");
+  const bootstrapJson = JSON.stringify(bootstrap).replaceAll("<", "\\u003c");
+
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="Content-Security-Policy" content="${escapeHtmlAttribute(contentSecurityPolicy)}">
+  <title>Markdown Live Editor</title>
+  <style>
+    html, body, #editor-root { height: 100%; margin: 0; }
+    body { color: var(--vscode-editor-foreground); background: var(--vscode-editor-background); }
+    #editor-root { min-height: 0; }
+    #editor-status { position: fixed; right: 0.75rem; bottom: 0.5rem; max-width: min(34rem, 90vw); color: var(--vscode-editorWarning-foreground); background: var(--vscode-editorWarning-background); padding: 0.35rem 0.5rem; border-radius: 3px; font: 12px var(--vscode-font-family); }
+    #editor-status[hidden] { display: none; }
+  </style>
+</head>
+<body>
+  <main id="editor-root" aria-label="Markdown editor"></main>
+  <div id="editor-status" role="status" aria-live="polite" hidden></div>
+  <script id="markdown-live-editor-bootstrap" type="application/json">${bootstrapJson}</script>
+  <script nonce="${nonce}" src="${escapeHtmlAttribute(scriptUri.toString())}"></script>
+</body>
+</html>`;
+}
+
+function escapeHtmlAttribute(value: string): string {
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;");
+}
+
+function createFailureHtml(webview: vscode.Webview, note: string): string {
+  const contentSecurityPolicy = "default-src 'none'; style-src 'unsafe-inline'";
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta http-equiv="Content-Security-Policy" content="${escapeHtmlAttribute(contentSecurityPolicy)}">
+  <title>Markdown Live Editor</title>
+</head>
+<body>
+  <p>${escapeHtmlText(`Unable to open the Markdown editor: ${note}`)}</p>
+</body>
+</html>`;
+}
+
+function escapeHtmlText(value: string): string {
+  return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
+}

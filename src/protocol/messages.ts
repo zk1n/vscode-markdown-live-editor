@@ -1,0 +1,374 @@
+export const PROTOCOL_VERSION = 1 as const;
+
+export interface WirePosition {
+  readonly line: number;
+  readonly character: number;
+}
+
+export interface WireRange {
+  readonly start: WirePosition;
+  readonly end: WirePosition;
+}
+
+/**
+ * A change is expressed against the complete authoritative text at
+ * `documentVersion`. `expectedText` makes positional edits fail closed.
+ */
+export interface WireChange {
+  readonly range: WireRange;
+  readonly expectedText: string;
+  readonly text: string;
+}
+
+interface ClientOperationBase {
+  readonly protocolVersion: typeof PROTOCOL_VERSION;
+  readonly documentUri: string;
+  readonly sessionId: string;
+  readonly sequence: number;
+}
+
+export interface ClientEditMessage extends ClientOperationBase {
+  readonly kind: "edit";
+  readonly documentVersion: number;
+  readonly changes: readonly WireChange[];
+}
+
+export interface ClientBarrierMessage extends ClientOperationBase {
+  readonly kind: "save" | "undo" | "redo";
+}
+
+export type WebviewToHostMessage = ClientEditMessage | ClientBarrierMessage;
+
+export interface DocumentSnapshotMessage {
+  readonly documentUri: string;
+  readonly documentVersion: number;
+  readonly text: string;
+}
+
+export interface OperationAcknowledgement extends DocumentSnapshotMessage {
+  readonly kind: "operation-ack";
+  readonly operation: WebviewToHostMessage["kind"];
+  readonly sequence: number;
+}
+
+export interface DocumentUpdateMessage extends DocumentSnapshotMessage {
+  readonly kind: "document-update";
+  readonly reason: "opened" | "edit" | "save" | "undo" | "redo" | "external";
+}
+
+export interface ResyncMessage extends DocumentSnapshotMessage {
+  readonly kind: "resync";
+  readonly reason:
+    "sequence-gap" | "stale-version" | "change-mismatch" | "port-rejected" | "port-inconsistent";
+  readonly nextSequence: number;
+  readonly note: string;
+}
+
+export interface ProtocolErrorMessage {
+  readonly kind: "protocol-error";
+  readonly note: string;
+}
+
+export type HostToWebviewMessage =
+  OperationAcknowledgement | DocumentUpdateMessage | ResyncMessage | ProtocolErrorMessage;
+
+export type ProtocolDecodeResult<T> =
+  { readonly ok: true; readonly value: T } | { readonly ok: false; readonly error: string };
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function readNonEmptyString(value: unknown, field: string): ProtocolDecodeResult<string> {
+  if (typeof value !== "string" || value.length === 0) {
+    return { ok: false, error: `${field} must be a non-empty string.` };
+  }
+
+  return { ok: true, value };
+}
+
+function readNonNegativeInteger(value: unknown, field: string): ProtocolDecodeResult<number> {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
+    return { ok: false, error: `${field} must be a non-negative safe integer.` };
+  }
+
+  return { ok: true, value };
+}
+
+function decodePosition(value: unknown, field: string): ProtocolDecodeResult<WirePosition> {
+  if (!isRecord(value)) {
+    return { ok: false, error: `${field} must be an object.` };
+  }
+
+  const line = readNonNegativeInteger(value["line"], `${field}.line`);
+  if (!line.ok) {
+    return line;
+  }
+
+  const character = readNonNegativeInteger(value["character"], `${field}.character`);
+  if (!character.ok) {
+    return character;
+  }
+
+  return { ok: true, value: { line: line.value, character: character.value } };
+}
+
+function comparePositions(left: WirePosition, right: WirePosition): number {
+  if (left.line !== right.line) {
+    return left.line - right.line;
+  }
+
+  return left.character - right.character;
+}
+
+function decodeRange(value: unknown, field: string): ProtocolDecodeResult<WireRange> {
+  if (!isRecord(value)) {
+    return { ok: false, error: `${field} must be an object.` };
+  }
+
+  const start = decodePosition(value["start"], `${field}.start`);
+  if (!start.ok) {
+    return start;
+  }
+
+  const end = decodePosition(value["end"], `${field}.end`);
+  if (!end.ok) {
+    return end;
+  }
+
+  if (comparePositions(start.value, end.value) > 0) {
+    return { ok: false, error: `${field}.start must not follow ${field}.end.` };
+  }
+
+  return { ok: true, value: { start: start.value, end: end.value } };
+}
+
+function decodeChange(value: unknown, index: number): ProtocolDecodeResult<WireChange> {
+  const field = `changes[${String(index)}]`;
+  if (!isRecord(value)) {
+    return { ok: false, error: `${field} must be an object.` };
+  }
+
+  const range = decodeRange(value["range"], `${field}.range`);
+  if (!range.ok) {
+    return range;
+  }
+
+  if (typeof value["expectedText"] !== "string") {
+    return { ok: false, error: `${field}.expectedText must be a string.` };
+  }
+
+  if (typeof value["text"] !== "string") {
+    return { ok: false, error: `${field}.text must be a string.` };
+  }
+
+  return {
+    ok: true,
+    value: {
+      range: range.value,
+      expectedText: value["expectedText"],
+      text: value["text"],
+    },
+  };
+}
+
+function decodeOperationBase(
+  value: Record<string, unknown>,
+): ProtocolDecodeResult<Omit<ClientOperationBase, "protocolVersion">> {
+  if (value["protocolVersion"] !== PROTOCOL_VERSION) {
+    return {
+      ok: false,
+      error: `protocolVersion must be ${String(PROTOCOL_VERSION)}.`,
+    };
+  }
+
+  const documentUri = readNonEmptyString(value["documentUri"], "documentUri");
+  if (!documentUri.ok) {
+    return documentUri;
+  }
+
+  const sessionId = readNonEmptyString(value["sessionId"], "sessionId");
+  if (!sessionId.ok) {
+    return sessionId;
+  }
+
+  const sequence = readNonNegativeInteger(value["sequence"], "sequence");
+  if (!sequence.ok) {
+    return sequence;
+  }
+
+  return {
+    ok: true,
+    value: {
+      documentUri: documentUri.value,
+      sessionId: sessionId.value,
+      sequence: sequence.value,
+    },
+  };
+}
+
+export function decodeWebviewToHostMessage(
+  value: unknown,
+): ProtocolDecodeResult<WebviewToHostMessage> {
+  if (!isRecord(value)) {
+    return { ok: false, error: "Message must be an object." };
+  }
+
+  const base = decodeOperationBase(value);
+  if (!base.ok) {
+    return base;
+  }
+
+  const kind = value["kind"];
+  if (kind === "edit") {
+    const documentVersion = readNonNegativeInteger(value["documentVersion"], "documentVersion");
+    if (!documentVersion.ok) {
+      return documentVersion;
+    }
+
+    if (!Array.isArray(value["changes"]) || value["changes"].length === 0) {
+      return { ok: false, error: "changes must be a non-empty array." };
+    }
+
+    const changes: WireChange[] = [];
+    for (const [index, change] of value["changes"].entries()) {
+      const decodedChange = decodeChange(change, index);
+      if (!decodedChange.ok) {
+        return decodedChange;
+      }
+      changes.push(decodedChange.value);
+    }
+
+    return {
+      ok: true,
+      value: {
+        kind,
+        protocolVersion: PROTOCOL_VERSION,
+        ...base.value,
+        documentVersion: documentVersion.value,
+        changes,
+      },
+    };
+  }
+
+  if (kind === "save" || kind === "undo" || kind === "redo") {
+    return {
+      ok: true,
+      value: { kind, protocolVersion: PROTOCOL_VERSION, ...base.value },
+    };
+  }
+
+  return { ok: false, error: "kind must be edit, save, undo, or redo." };
+}
+
+function decodeSnapshot(
+  value: Record<string, unknown>,
+): ProtocolDecodeResult<DocumentSnapshotMessage> {
+  const documentUri = readNonEmptyString(value["documentUri"], "documentUri");
+  if (!documentUri.ok) {
+    return documentUri;
+  }
+  const documentVersion = readNonNegativeInteger(value["documentVersion"], "documentVersion");
+  if (!documentVersion.ok) {
+    return documentVersion;
+  }
+  if (typeof value["text"] !== "string") {
+    return { ok: false, error: "text must be a string." };
+  }
+
+  return {
+    ok: true,
+    value: {
+      documentUri: documentUri.value,
+      documentVersion: documentVersion.value,
+      text: value["text"],
+    },
+  };
+}
+
+export function decodeHostToWebviewMessage(
+  value: unknown,
+): ProtocolDecodeResult<HostToWebviewMessage> {
+  if (!isRecord(value)) {
+    return { ok: false, error: "Message must be an object." };
+  }
+
+  if (value["kind"] === "protocol-error") {
+    if (typeof value["note"] !== "string") {
+      return { ok: false, error: "note must be a string." };
+    }
+    return { ok: true, value: { kind: "protocol-error", note: value["note"] } };
+  }
+
+  const snapshot = decodeSnapshot(value);
+  if (!snapshot.ok) {
+    return snapshot;
+  }
+
+  if (value["kind"] === "operation-ack") {
+    const sequence = readNonNegativeInteger(value["sequence"], "sequence");
+    if (!sequence.ok) {
+      return sequence;
+    }
+    const operation = value["operation"];
+    if (
+      operation !== "edit" &&
+      operation !== "save" &&
+      operation !== "undo" &&
+      operation !== "redo"
+    ) {
+      return { ok: false, error: "operation is invalid." };
+    }
+    return {
+      ok: true,
+      value: { kind: "operation-ack", ...snapshot.value, sequence: sequence.value, operation },
+    };
+  }
+
+  if (value["kind"] === "document-update") {
+    const reason = value["reason"];
+    if (
+      reason !== "opened" &&
+      reason !== "edit" &&
+      reason !== "save" &&
+      reason !== "undo" &&
+      reason !== "redo" &&
+      reason !== "external"
+    ) {
+      return { ok: false, error: "document-update reason is invalid." };
+    }
+    return { ok: true, value: { kind: "document-update", ...snapshot.value, reason } };
+  }
+
+  if (value["kind"] === "resync") {
+    const nextSequence = readNonNegativeInteger(value["nextSequence"], "nextSequence");
+    if (!nextSequence.ok) {
+      return nextSequence;
+    }
+    const reason = value["reason"];
+    if (
+      reason !== "sequence-gap" &&
+      reason !== "stale-version" &&
+      reason !== "change-mismatch" &&
+      reason !== "port-rejected" &&
+      reason !== "port-inconsistent"
+    ) {
+      return { ok: false, error: "resync reason is invalid." };
+    }
+    if (typeof value["note"] !== "string") {
+      return { ok: false, error: "resync note must be a string." };
+    }
+    return {
+      ok: true,
+      value: {
+        kind: "resync",
+        ...snapshot.value,
+        nextSequence: nextSequence.value,
+        reason,
+        note: value["note"],
+      },
+    };
+  }
+
+  return { ok: false, error: "Host message kind is invalid." };
+}

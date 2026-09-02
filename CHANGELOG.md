@@ -7,4 +7,5 @@ The project follows semantic versioning once public releases begin.
 ## [Unreleased]
 
 ### Added
+
 - Initial project scaffold and engineering specifications.

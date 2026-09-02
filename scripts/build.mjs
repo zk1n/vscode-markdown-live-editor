@@ -2,10 +2,10 @@ import * as esbuild from "esbuild";
 
 const watch = process.argv.includes("--watch");
 
-const context = await esbuild.context({
+const extensionContext = await esbuild.context({
   entryPoints: ["src/extension/extension.ts"],
   bundle: true,
-  outfile: "dist/extension.js",
+  outfile: "dist/extension.cjs",
   external: ["vscode"],
   format: "cjs",
   platform: "node",
@@ -14,10 +14,21 @@ const context = await esbuild.context({
   logLevel: "info",
 });
 
+const webviewContext = await esbuild.context({
+  entryPoints: ["src/webview/editor.ts"],
+  bundle: true,
+  outfile: "dist/webview.js",
+  format: "iife",
+  platform: "browser",
+  target: "es2022",
+  sourcemap: true,
+  logLevel: "info",
+});
+
 if (watch) {
-  await context.watch();
+  await Promise.all([extensionContext.watch(), webviewContext.watch()]);
   console.log("Watching extension bundle...");
 } else {
-  await context.rebuild();
-  await context.dispose();
+  await Promise.all([extensionContext.rebuild(), webviewContext.rebuild()]);
+  await Promise.all([extensionContext.dispose(), webviewContext.dispose()]);
 }

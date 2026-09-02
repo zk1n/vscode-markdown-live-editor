@@ -13,15 +13,29 @@
   "categories": [
     "Other"
   ],
-  "main": "./dist/extension.js",
+  "type": "module",
+  "main": "./dist/extension.cjs",
   "activationEvents": [
-    "onCommand:vscodeMarkdownLiveEditor.showProjectInfo"
+    "onCommand:vscodeMarkdownLiveEditor.showProjectInfo",
+    "onCustomEditor:vscodeMarkdownLiveEditor.editor"
   ],
   "contributes": {
     "commands": [
       {
         "command": "vscodeMarkdownLiveEditor.showProjectInfo",
         "title": "Markdown Live Editor: Show Project Info"
+      }
+    ],
+    "customEditors": [
+      {
+        "viewType": "vscodeMarkdownLiveEditor.editor",
+        "displayName": "Markdown Live Editor",
+        "selector": [
+          {
+            "filenamePattern": "*.md"
+          }
+        ],
+        "priority": "option"
       }
     ]
   },
