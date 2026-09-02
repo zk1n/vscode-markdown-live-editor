@@ -1,4 +1,5 @@
 import * as vscode from "vscode";
+import { TextDecoder } from "node:util";
 
 import { disabledDiagnosticLog, type DiagnosticLog } from "../../core/diagnostics/diagnosticLog.js";
 import type {
@@ -83,19 +84,29 @@ export class VscodeDocumentPort implements DocumentPort {
     try {
       const saved = await document.save();
       const snapshot = await this.readDocument(documentUri);
+      const diskText = await this.readDiskText(document);
+      const clean = !document.isDirty;
+      const diskMatches = diskText === snapshot.text;
       this.diagnostics.record("port.save.result", {
+        clean,
+        diskMatches,
         dirty: document.isDirty,
         documentVersion: snapshot.documentVersion,
         saved,
         textLength: snapshot.text.length,
       });
-      return saved
-        ? { kind: "applied", snapshot }
-        : {
-            kind: "rejected",
-            snapshot,
-            note: "VS Code did not save the document.",
-          };
+      if (clean && diskMatches) {
+        // `TextDocument.save()` can complete after another save has already
+        // made the document clean. The persistent postcondition, rather than
+        // its boolean alone, decides whether this FIFO Save barrier succeeded.
+        return { kind: "applied", snapshot };
+      }
+
+      return {
+        kind: "rejected",
+        snapshot,
+        note: saveFailureNote(saved, clean, diskMatches),
+      };
     } finally {
       this.savesInProgress.delete(documentUri);
     }
@@ -153,6 +164,11 @@ export class VscodeDocumentPort implements DocumentPort {
     };
   }
 
+  private async readDiskText(document: vscode.TextDocument): Promise<string> {
+    const bytes = await vscode.workspace.fs.readFile(document.uri);
+    return toProtocolText(new TextDecoder().decode(bytes));
+  }
+
   private rejected(document: vscode.TextDocument, note: string): Promise<DocumentPortResult> {
     return Promise.resolve({
       kind: "rejected",
@@ -160,6 +176,17 @@ export class VscodeDocumentPort implements DocumentPort {
       note,
     });
   }
+}
+
+function saveFailureNote(saved: boolean, clean: boolean, diskMatches: boolean): string {
+  if (!clean) {
+    return saved
+      ? "VS Code reported Save success, but the document is still dirty."
+      : "VS Code did not save the dirty document.";
+  }
+  return diskMatches
+    ? "VS Code save result was inconsistent with the verified disk state."
+    : "The document is clean, but disk text differs from the authoritative TextDocument.";
 }
 
 function isActiveCustomEditorDocument(documentUri: string): boolean {

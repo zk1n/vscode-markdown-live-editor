@@ -1,63 +1,61 @@
-# ADR 0008: IME composition has one authoritative commit boundary
+# ADR 0008: IME composition の永続commit境界
 
-Status: Accepted for ATOK remediation
-Date: 2026-09-02
+Status: Accepted — guarantee level B
+Date: 2026-09-03
 
 ## Context
 
-ADR 0002 and ADR 0006 establish VS Code `TextDocument` as persistent authority
-and originally describe forwarding stable CodeMirror edits immediately. ATOK
-manual testing found that its romaji/preedit changes can become many persistent
-`WorkspaceEdit` operations. This exposes internal IME states to VS Code Undo
-and makes Save/Undo/Redo ordering unsafe to change by timing heuristics.
+ADR 0002 / ADR 0006 は VS Code `TextDocument` を永続authorityとする。ATOKでは
+ローマ字・preeditの内部更新が多数発生し得るため、これを個別の`WorkspaceEdit`として
+渡すと、ユーザーに見えない状態がUndo historyへ露出する。
 
-The public VS Code API has no `WorkspaceEdit` undo-group identifier or
-equivalent atomic grouping control. `TextEditor.edit` undo-stop options do not
-apply to this Custom Text Editor architecture, and proposed/internal APIs are
-out of scope.
+`WorkspaceEdit`には公開されたundo-group ID / undo-stop指定がない。公開APIの
+`TextEditor.edit(..., { undoStopBefore, undoStopAfter })`は存在するが、Custom Editor
+のみを開いた実Extension Hostでは対象documentのvisible `TextEditor`が存在しなかった。
+これを使うには通常Text Editorの表示・active editor依存・split editorへの依存、または
+hidden editorが必要となり、本製品の安全境界に反する。
+
+実Extension Hostのprobeでは、初期`X`に対する`WorkspaceEdit A: XA`、続く
+`WorkspaceEdit B: XAB`は、連続実行、Aの`TextDocument` change event確認後、microtask
+境界後のいずれでも、1回のUndoで`XA`、Redoで`XAB`となった。同じ順序をcoordinator経由の
+composition相当commit 2回にも適用すると同じ結果だった（VS Code 1.120.0 / 1.135.0）。
+ただしこれは実測であり、公開API契約としてcomposition間のUndo stopを保証するものではない。
+実機ATOKでは隣接compositionが1単位に併合される観測もある。
 
 ## Decision
 
-For an IME composition recognized by CodeMirror's composition lifecycle:
+保証は次のLevel Bとする。
 
-- CodeMirror keeps the preedit transient and local.
-- The sync client sends no persistent edit for intermediate preedit updates.
-- At the completed composition boundary, it sends one exact replacement from
-  the last acknowledged authoritative text to the final CodeMirror text.
-- The resulting one `WorkspaceEdit` is the composition's persistent Undo unit.
-- Save, Undo, and Redo requested while composition is active remain queued;
-  they do not reconfigure the content DOM, force a commit, or overtake the
-  final composition edit.
-- An authoritative external update during composition enters visible recovery
-  without silently overwriting the local preedit.
+- IME preedit内部の更新はpersistent Undo historyへ露出しない。
+- composition完了時に、最後にacknowledgeされたauthorityから最終CodeMirror textへの
+  正確なauthoritative editを1回だけ発行する。
+- composition中のSave / Undo / RedoはFIFO barrierに残し、content DOMの再構成、強制commit、
+  focus移動を行わない。
+- 隣接したauthoritative editのUndo groupingはVS Code host semanticsに従う。compositionごとに
+  異なるUndo unitとなることはpublic APIでは保証しない。
+- composition中のauthoritative external updateは、local preeditを黙って上書きせずvisible
+  recoveryに入る。
 
-The implementation must use semantic composition state (`compositionStarted`
-and input/composition events corroborated by the development trace), never an
-arbitrary timeout. It must preserve the ADR 0006 FIFO, exact-text verification,
-and explicit recovery rules.
+実装は`compositionStarted`およびinput / composition eventsで裏付けた意味的な状態だけを使う。
+timeout、dummy edit、whitespace / newline、hidden editor、internal / proposed APIは使わない。
 
 ## Consequences
 
-The `TextDocument` can temporarily lag CodeMirror only during an uncommitted
-composition. This is intentional and tightly bounded. Save/close/external
-update/recovery behavior must be regression-tested before this ADR is marked
-implemented.
+`TextDocument`は未確定compositionの間だけCodeMirrorより遅れ得る。これは意図した限定状態で
+あり、Save / Undo / Redoは最終editのacknowledgement後に進む。
 
-The current Windows target is ATOK. Microsoft IME requires its own recorded
-manual result and cannot substitute for ATOK release-gate evidence.
+v0.1の既知制約は、ATOKを含むhostが隣接compositionのauthoritative editを同じUndo unitに
+併合する可能性である。これはpreeditをローマ字単位Undoへ戻す理由にはならない。source text、
+caret、focus、入力継続、Redoの正しさを優先する。
+
+Windows ATOKの手動結果は必須であり、Microsoft IMEの結果で代替しない。
 
 ## Implementation notes
 
-The webview records the authoritative document version and local text at
-`compositionstart`. CodeMirror preedit transactions update only that local
-buffer. At semantic `compositionend`, after an earlier ordinary edit (if any)
-has acknowledged, the client verifies that the authoritative text still equals
-the recorded base and sends one existing FIFO `edit` operation for the final
-text. An authority mismatch while the buffer is active enters recovery and
-leaves the local composition visible.
+webviewは`compositionstart`でauthoritative versionとlocal textを記録する。preedit transactionは
+local bufferだけを更新する。意味的な`compositionend`後、前のordinary editがあればacknowledgeを
+待ち、authorityが記録したbaseと一致することを検証してから既存FIFOの`edit`を送る。不一致なら
+local compositionを可視のままrecoveryへ入る。
 
-Save, Undo, and Redo requests made during composition remain in the existing
-barrier queue until that final edit acknowledges. The implementation does not
-use a timeout; its microtask only allows CodeMirror's synchronous
-composition-end processing to settle before the semantic end boundary is
-evaluated.
+compositionendのmicrotaskはCodeMirrorの同期処理をsettleさせる目的だけであり、Undo groupingを
+変えるdelayではない。

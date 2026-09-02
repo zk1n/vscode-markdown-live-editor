@@ -23,6 +23,7 @@ class FakeDocumentPort implements DocumentPort {
 
   public readonly calls: string[] = [];
   public replacementTextOverride: string | undefined;
+  public rejectSave = false;
 
   public constructor(initialText: string) {
     this.history = [initialText];
@@ -56,6 +57,13 @@ class FakeDocumentPort implements DocumentPort {
 
   public saveDocument(documentUri: string): Promise<DocumentPortResult> {
     this.calls.push("save");
+    if (this.rejectSave) {
+      return Promise.resolve({
+        kind: "rejected",
+        snapshot: this.snapshot(documentUri),
+        note: "The dirty document was not saved.",
+      });
+    }
     return Promise.resolve({ kind: "applied", snapshot: this.snapshot(documentUri) });
   }
 
@@ -342,6 +350,24 @@ describe("DocumentSyncCoordinator", () => {
       kind: "document-update",
       reason: "undo",
       text: "",
+    });
+  });
+
+  it("enters recovery when a Save barrier reports an actual rejection", async () => {
+    const port = new FakeDocumentPort("unsaved");
+    port.rejectSave = true;
+    const coordinator = new DocumentSyncCoordinator(port);
+    const endpoint = new RecordingEndpoint();
+    await coordinator.openSession(DOCUMENT_URI, "session-a", endpoint);
+
+    await coordinator.receive(barrier("save", 1), endpoint);
+
+    expect(port.calls).toEqual(["save"]);
+    expect(endpoint.messages.at(-1)).toMatchObject({
+      kind: "resync",
+      reason: "port-rejected",
+      text: "unsaved",
+      nextSequence: 2,
     });
   });
 

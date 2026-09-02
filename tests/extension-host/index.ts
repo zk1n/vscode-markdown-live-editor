@@ -4,6 +4,7 @@ import * as vscode from "vscode";
 
 import {
   DocumentSyncCoordinator,
+  type DocumentPortResult,
   type WebviewEndpoint,
 } from "../../src/core/sync/documentSyncCoordinator.js";
 import { PROTOCOL_VERSION, type HostToWebviewMessage } from "../../src/protocol/messages.js";
@@ -16,6 +17,8 @@ const SMOKE_FILE_NAME = "extension-host-smoke.md";
 const FIRST_EDIT_FILE_NAME = "extension-host-first-edit.md";
 const FIRST_EDIT_LF_FILE_NAME = "extension-host-first-edit-lf.md";
 const COMPOSITION_HISTORY_FILE_NAME = "extension-host-composition-history.md";
+const COMPOSITION_GROUPING_FILE_NAME = "extension-host-composition-grouping.md";
+const SAVE_PROBE_FILE_NAME = "extension-host-save-probe.md";
 
 export async function run(): Promise<void> {
   const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
@@ -71,6 +74,224 @@ export async function run(): Promise<void> {
 
   await verifyFirstEditProtocolPath(workspaceFolder.uri);
   await verifyCompositionHistoryPath(workspaceFolder.uri);
+  await verifyWorkspaceEditUndoGrouping(workspaceFolder.uri);
+  await verifySaveSemantics(workspaceFolder.uri);
+}
+
+async function verifyWorkspaceEditUndoGrouping(workspaceUri: vscode.Uri): Promise<void> {
+  const variants: readonly UndoGroupingVariant[] = [
+    { name: "consecutive", betweenEdits: (): Promise<void> => Promise.resolve() },
+    {
+      name: "acknowledged-change",
+      betweenEdits: async (changeAfterFirstEdit): Promise<void> => {
+        assert.ok(changeAfterFirstEdit, "The change acknowledgement probe was not prepared.");
+        await changeAfterFirstEdit;
+      },
+    },
+    { name: "microtask", betweenEdits: async (): Promise<void> => Promise.resolve() },
+  ];
+
+  for (const variant of variants) {
+    const documentUri = vscode.Uri.joinPath(
+      workspaceUri,
+      `extension-host-workspace-edit-undo-${variant.name}.md`,
+    );
+    await removeSmokeFile(documentUri);
+
+    try {
+      await vscode.workspace.fs.writeFile(documentUri, new TextEncoder().encode("X"));
+      const document = await vscode.workspace.openTextDocument(documentUri);
+      const changeAfterFirstEdit =
+        variant.name === "acknowledged-change"
+          ? waitForDocumentChange(documentUri, document.version)
+          : undefined;
+      await replaceWholeDocument(document, documentUri, "XA");
+      await variant.betweenEdits(changeAfterFirstEdit);
+      await replaceWholeDocument(document, documentUri, "XAB");
+
+      await vscode.commands.executeCommand("vscode.openWith", documentUri, VIEW_TYPE);
+      assertCustomEditorOpened(documentUri);
+      assert.equal(
+        vscode.window.visibleTextEditors.some(
+          (editor) => editor.document.uri.toString() === documentUri.toString(),
+        ),
+        false,
+        "A custom editor must not depend on a visible TextEditor for undo stops.",
+      );
+
+      const port = new VscodeDocumentPort();
+      assertPortApplied(
+        await port.undoDocument(documentUri.toString()),
+        "WorkspaceEdit Undo was rejected.",
+      );
+      assert.equal(
+        document.getText(),
+        "XA",
+        `WorkspaceEdit variant '${variant.name}' did not keep adjacent authoritative edits as separate Undo units.`,
+      );
+      assertPortApplied(
+        await port.redoDocument(documentUri.toString()),
+        "WorkspaceEdit Redo was rejected.",
+      );
+      assert.equal(document.getText(), "XAB", "Redo did not restore both authoritative edits.");
+    } finally {
+      await removeSmokeFile(documentUri);
+    }
+  }
+
+  await verifySeparateCompositionCommitsFollowHostGrouping(workspaceUri);
+}
+
+interface UndoGroupingVariant {
+  readonly name: string;
+  readonly betweenEdits: (changeAfterFirstEdit: Promise<void> | undefined) => Promise<void>;
+}
+
+async function verifySeparateCompositionCommitsFollowHostGrouping(
+  workspaceUri: vscode.Uri,
+): Promise<void> {
+  const documentUri = vscode.Uri.joinPath(workspaceUri, COMPOSITION_GROUPING_FILE_NAME);
+  await removeSmokeFile(documentUri);
+
+  try {
+    await vscode.workspace.fs.writeFile(documentUri, new TextEncoder().encode("X"));
+    const document = await vscode.workspace.openTextDocument(documentUri);
+    const coordinator = new DocumentSyncCoordinator(new VscodeDocumentPort());
+    const endpoint = new RecordingEndpoint();
+    const opened = await coordinator.openSession(
+      documentUri.toString(),
+      "composition-grouping",
+      endpoint,
+    );
+    assert.ok(opened.ok, "Composition grouping session did not open.");
+
+    await coordinator.receive(
+      fullReplacementMessage(
+        documentUri.toString(),
+        "composition-grouping",
+        1,
+        opened.snapshot.documentVersion,
+        opened.snapshot.text,
+        "Xあいう",
+      ),
+      endpoint,
+    );
+    const firstCommit = endpoint.messages.find(isEditAcknowledgement);
+    assert.ok(firstCommit, "The first composition-equivalent commit was not acknowledged.");
+
+    await coordinator.receive(
+      fullReplacementMessage(
+        documentUri.toString(),
+        "composition-grouping",
+        2,
+        firstCommit.documentVersion,
+        firstCommit.text,
+        "Xあいうかきく",
+      ),
+      endpoint,
+    );
+    assert.equal(
+      document.getText(),
+      "Xあいうかきく",
+      "The second composition-equivalent edit failed.",
+    );
+
+    await vscode.commands.executeCommand("vscode.openWith", documentUri, VIEW_TYPE);
+    assertCustomEditorOpened(documentUri);
+    await coordinator.receive(
+      barrierMessage(documentUri.toString(), "composition-grouping", "undo", 3),
+      endpoint,
+    );
+    assert.equal(
+      document.getText(),
+      "Xあいう",
+      "Separate composition-equivalent WorkspaceEdits did not remain separate Undo units.",
+    );
+    await coordinator.receive(
+      barrierMessage(documentUri.toString(), "composition-grouping", "redo", 4),
+      endpoint,
+    );
+    assert.equal(
+      document.getText(),
+      "Xあいうかきく",
+      "Redo did not restore both composition commits.",
+    );
+  } finally {
+    await removeSmokeFile(documentUri);
+  }
+}
+
+async function verifySaveSemantics(workspaceUri: vscode.Uri): Promise<void> {
+  const documentUri = vscode.Uri.joinPath(workspaceUri, SAVE_PROBE_FILE_NAME);
+  await removeSmokeFile(documentUri);
+
+  try {
+    await vscode.workspace.fs.writeFile(documentUri, new TextEncoder().encode("base"));
+    const document = await vscode.workspace.openTextDocument(documentUri);
+    await vscode.commands.executeCommand("vscode.openWith", documentUri, VIEW_TYPE);
+    assertCustomEditorOpened(documentUri);
+    const port = new VscodeDocumentPort();
+
+    assert.equal(
+      document.isDirty,
+      false,
+      "The clean Save probe fixture unexpectedly started dirty.",
+    );
+    assertPortApplied(await port.saveDocument(documentUri.toString()), "Clean Save was rejected.");
+    await replaceWholeDocument(document, documentUri, "dirty");
+    assert.equal(document.isDirty, true, "WorkspaceEdit did not make the Save probe dirty.");
+    assertPortApplied(await port.saveDocument(documentUri.toString()), "Dirty Save was rejected.");
+    assert.equal(document.isDirty, false, "Dirty Save did not make the document clean.");
+    assert.equal(
+      await readDiskText(documentUri),
+      "dirty",
+      "Dirty Save did not persist the document.",
+    );
+
+    assertPortApplied(
+      await port.saveDocument(documentUri.toString()),
+      "Repeated Save after the document became clean was rejected.",
+    );
+    assert.equal(document.isDirty, false, "Repeated Save changed the clean document state.");
+    assert.equal(await readDiskText(documentUri), "dirty", "Repeated Save changed persisted text.");
+
+    const coordinator = new DocumentSyncCoordinator(port);
+    const endpoint = new RecordingEndpoint();
+    const opened = await coordinator.openSession(
+      documentUri.toString(),
+      "save-after-commit",
+      endpoint,
+    );
+    assert.ok(opened.ok, "Immediate Save session did not open.");
+    await coordinator.receive(
+      fullReplacementMessage(
+        documentUri.toString(),
+        "save-after-commit",
+        1,
+        opened.snapshot.documentVersion,
+        opened.snapshot.text,
+        "dirtyかきく",
+      ),
+      endpoint,
+    );
+    await coordinator.receive(
+      barrierMessage(documentUri.toString(), "save-after-commit", "save", 2),
+      endpoint,
+    );
+    assert.equal(
+      endpoint.messages.some((message) => message.kind === "resync"),
+      false,
+      "Immediate Save after a composition-equivalent final edit entered recovery.",
+    );
+    assert.equal(document.isDirty, false, "Immediate Save left the document dirty.");
+    assert.equal(
+      await readDiskText(documentUri),
+      "dirtyかきく",
+      "Immediate Save did not persist the final authoritative composition text.",
+    );
+  } finally {
+    await removeSmokeFile(documentUri);
+  }
 }
 
 async function verifyCompositionHistoryPath(workspaceUri: vscode.Uri): Promise<void> {
@@ -320,10 +541,10 @@ function fullReplacementMessage(
 function barrierMessage(
   documentUri: string,
   sessionId: string,
-  kind: "undo" | "redo",
+  kind: "save" | "undo" | "redo",
   sequence: number,
 ): {
-  readonly kind: "undo" | "redo";
+  readonly kind: "save" | "undo" | "redo";
   readonly protocolVersion: 1;
   readonly documentUri: string;
   readonly sessionId: string;
@@ -339,6 +560,48 @@ function diagnostic(label: string, document: vscode.TextDocument, expectedText: 
 
 function fullDocumentRange(document: vscode.TextDocument): vscode.Range {
   return new vscode.Range(document.positionAt(0), document.positionAt(document.getText().length));
+}
+
+async function replaceWholeDocument(
+  document: vscode.TextDocument,
+  documentUri: vscode.Uri,
+  text: string,
+): Promise<void> {
+  const edit = new vscode.WorkspaceEdit();
+  edit.replace(documentUri, fullDocumentRange(document), text);
+  assert.equal(await vscode.workspace.applyEdit(edit), true, "WorkspaceEdit was rejected.");
+}
+
+function waitForDocumentChange(documentUri: vscode.Uri, priorVersion: number): Promise<void> {
+  return new Promise((resolve): void => {
+    const subscription = vscode.workspace.onDidChangeTextDocument((event): void => {
+      if (
+        event.document.uri.toString() === documentUri.toString() &&
+        event.document.version > priorVersion
+      ) {
+        subscription.dispose();
+        resolve();
+      }
+    });
+  });
+}
+
+function assertPortApplied(result: DocumentPortResult, message: string): void {
+  assert.equal(
+    result.kind,
+    "applied",
+    result.kind === "rejected" ? `${message} ${result.note}` : message,
+  );
+}
+
+function isEditAcknowledgement(
+  message: HostToWebviewMessage,
+): message is Extract<HostToWebviewMessage, { readonly kind: "operation-ack" }> {
+  return message.kind === "operation-ack" && message.operation === "edit";
+}
+
+async function readDiskText(documentUri: vscode.Uri): Promise<string> {
+  return new TextDecoder().decode(await vscode.workspace.fs.readFile(documentUri));
 }
 
 function assertCustomEditorOpened(documentUri: vscode.Uri): void {
