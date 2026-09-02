@@ -1,6 +1,6 @@
 # ADR 0008: IME composition has one authoritative commit boundary
 
-Status: Accepted for ATOK remediation  
+Status: Accepted for ATOK remediation
 Date: 2026-09-02
 
 ## Context
