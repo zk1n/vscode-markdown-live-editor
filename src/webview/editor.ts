@@ -9,6 +9,7 @@ import {
 } from "@codemirror/state";
 import { EditorView, keymap, type KeyBinding, type ViewUpdate } from "@codemirror/view";
 
+import { minimalTextReplacement } from "../core/sync/textReplacement.js";
 import {
   recordsDiagnosticTrace,
   usesBarrierKeymap,
@@ -29,6 +30,7 @@ import {
   createLivePreviewEngine,
   type LivePreviewEngine,
 } from "./livePreview/LivePreviewEngine.js";
+import { CompositionBuffer } from "./compositionBuffer.js";
 
 interface VsCodeApi {
   postMessage(message: WebviewToHostMessage): void;
@@ -67,7 +69,11 @@ class MarkdownWebviewController {
   private inFlightSequence: number | undefined;
   private barrierInFlightSequence: number | undefined;
   private readonly barrierQueue: ("save" | "undo" | "redo")[] = [];
+  private readonly composition = new CompositionBuffer();
+  private compositionEndObserved = false;
+  private barrierInputFrozen = false;
   private hasPendingLocalChanges = false;
+  private recoveryActive = false;
   private disposed = false;
 
   public constructor(
@@ -89,6 +95,18 @@ class MarkdownWebviewController {
       EditorView.updateListener.of((update): void => {
         this.handleUpdate(update);
       }),
+      EditorState.transactionFilter.of((transaction) => this.filterBarrierInput(transaction)),
+      createCompositionLifecycleHandlers(
+        (): void => {
+          this.handleCompositionStart();
+        },
+        (): void => {
+          this.handleCompositionEnd();
+        },
+        (kind): void => {
+          this.recordFocusEvent(kind);
+        },
+      ),
     ];
     if (usesMarkdownLanguage(bootstrap.diagnosticMode)) {
       extensions.unshift(markdown());
@@ -161,12 +179,124 @@ class MarkdownWebviewController {
       return;
     }
 
+    if (this.isCompositionUpdate(update) || this.composition.isActive) {
+      const compositionTransaction = update.transactions.find(
+        (transaction) => transaction.docChanged,
+      );
+      this.beginComposition(compositionTransaction?.startState.doc.toString());
+      this.composition.update(this.view.state.doc.toString());
+      this.diagnostics.record("sync.composition.buffered", {
+        composing: update.view.composing,
+        compositionStarted: update.view.compositionStarted,
+        text: textPreview(this.view.state.doc.toString()),
+      });
+      return;
+    }
+
     this.hasPendingLocalChanges = true;
     this.diagnostics.record("sync.edit.pending", {
       forwarded: true,
       composing: update.view.composing,
       compositionStarted: update.view.compositionStarted,
       text: textPreview(this.view.state.doc.toString()),
+    });
+    this.sendPendingEdit();
+  }
+
+  private filterBarrierInput(transaction: Transaction): Transaction | readonly Transaction[] {
+    if (
+      !this.barrierInputFrozen ||
+      !transaction.docChanged ||
+      transaction.annotation(remoteUpdate) === true
+    ) {
+      return transaction;
+    }
+    this.diagnostics.record("sync.barrier.input-blocked", this.focusTraceDetails());
+    return [];
+  }
+
+  private isCompositionUpdate(update: ViewUpdate): boolean {
+    return (
+      update.view.composing ||
+      update.view.compositionStarted ||
+      update.transactions.some((transaction) => {
+        const userEvent = transaction.annotation(Transaction.userEvent);
+        return userEvent?.startsWith("input.type.compose") === true;
+      })
+    );
+  }
+
+  private beginComposition(baseText: string | undefined): void {
+    if (this.composition.isActive) {
+      return;
+    }
+    const localBase = baseText ?? this.view.state.doc.toString();
+    this.composition.begin(this.documentVersion, localBase);
+    this.compositionEndObserved = false;
+    this.diagnostics.record("sync.composition.started", {
+      baseDocumentVersion: this.documentVersion,
+      baseText: textPreview(localBase),
+      ...this.focusTraceDetails(),
+    });
+    if (localBase !== this.authoritativeText) {
+      this.hasPendingLocalChanges = true;
+      this.sendPendingEdit();
+    }
+  }
+
+  private handleCompositionStart(): void {
+    if (this.disposed || !usesDocumentSync(this.bootstrap.diagnosticMode)) {
+      return;
+    }
+    this.beginComposition(undefined);
+  }
+
+  private handleCompositionEnd(): void {
+    if (this.disposed || !this.composition.isActive) {
+      return;
+    }
+    this.compositionEndObserved = true;
+    this.diagnostics.record("sync.composition.end-observed", this.focusTraceDetails());
+    queueMicrotask((): void => {
+      this.finalizeCompositionIfSafe();
+    });
+  }
+
+  private finalizeCompositionIfSafe(): void {
+    if (this.disposed || !this.composition.isActive || !this.compositionEndObserved) {
+      return;
+    }
+    if (this.inFlightSequence !== undefined || this.hasPendingLocalChanges) {
+      return;
+    }
+
+    const commit = this.composition.finish(this.view.state.doc.toString());
+    this.compositionEndObserved = false;
+    if (commit === undefined) {
+      return;
+    }
+    if (this.authoritativeText !== commit.baseText) {
+      this.enterRecovery(
+        "Authority changed while an IME composition was buffered; local composition remains visible.",
+      );
+      return;
+    }
+    if (commit.finalText === commit.baseText) {
+      this.diagnostics.record("sync.composition.empty", {
+        baseDocumentVersion: commit.baseDocumentVersion,
+        ...this.focusTraceDetails(),
+      });
+      this.sendNextBarrier();
+      return;
+    }
+
+    this.hasPendingLocalChanges = true;
+    this.diagnostics.record("sync.composition.commit-ready", {
+      baseDocumentVersion: commit.baseDocumentVersion,
+      documentVersion: this.documentVersion,
+      baseText: textPreview(commit.baseText),
+      finalText: textPreview(commit.finalText),
+      ...this.focusTraceDetails(),
     });
     this.sendPendingEdit();
   }
@@ -219,8 +349,13 @@ class MarkdownWebviewController {
       compositionStarted: this.view.compositionStarted,
       inFlightSequence: this.inFlightSequence,
       pendingLocalChanges: this.hasPendingLocalChanges,
+      compositionActive: this.composition.isActive,
+      ...this.focusTraceDetails(),
     });
-    this.view.dispatch({ effects: this.editable.reconfigure(EditorView.editable.of(false)) });
+    // Do not change contenteditable for a normal barrier: it can blur the
+    // content DOM. The transaction filter preserves FIFO without remounting or
+    // replacing the editor's focusable surface.
+    this.barrierInputFrozen = true;
     this.barrierQueue.push(action);
     this.sendPendingEdit();
     this.sendNextBarrier();
@@ -241,6 +376,9 @@ class MarkdownWebviewController {
         this.barrierInFlightSequence = undefined;
         this.barrierQueue.length = 0;
         this.hasPendingLocalChanges = false;
+        this.composition.abandon();
+        this.compositionEndObserved = false;
+        this.barrierInputFrozen = false;
         if (this.view.state.doc.toString() === this.authoritativeText) {
           this.applyAuthoritativeSnapshot(message);
           this.view.dispatch({ effects: this.editable.reconfigure(EditorView.editable.of(true)) });
@@ -271,7 +409,9 @@ class MarkdownWebviewController {
     if (message.operation === "edit" && message.sequence === this.inFlightSequence) {
       this.inFlightSequence = undefined;
       this.authoritativeText = message.text;
-      if (this.hasPendingLocalChanges) {
+      if (this.composition.isActive) {
+        this.finalizeCompositionIfSafe();
+      } else if (this.hasPendingLocalChanges) {
         this.sendPendingEdit();
       } else {
         this.sendNextBarrier();
@@ -296,12 +436,18 @@ class MarkdownWebviewController {
       text: textPreview(message.text),
       inFlightSequence: this.inFlightSequence,
       pendingLocalChanges: this.hasPendingLocalChanges,
+      compositionActive: this.composition.isActive,
+      ...this.focusTraceDetails(),
     });
     this.documentVersion = message.documentVersion;
     if (message.text === this.authoritativeText) {
       return;
     }
-    if (this.inFlightSequence !== undefined || this.hasPendingLocalChanges) {
+    if (
+      this.inFlightSequence !== undefined ||
+      this.hasPendingLocalChanges ||
+      this.composition.isActive
+    ) {
       this.enterRecovery(
         "The document changed outside this webview while local edits were pending.",
       );
@@ -312,22 +458,29 @@ class MarkdownWebviewController {
 
   private applyAuthoritativeSnapshot(snapshot: DocumentSnapshotMessage): void {
     this.authoritativeText = snapshot.text;
-    if (this.view.state.doc.toString() === snapshot.text) {
+    const before = this.view.state.doc.toString();
+    const replacement = minimalTextReplacement(before, snapshot.text);
+    if (replacement === undefined) {
       return;
     }
     this.diagnostics.record("sync.authority.applied", {
       documentVersion: snapshot.documentVersion,
-      before: textPreview(this.view.state.doc.toString()),
+      before: textPreview(before),
       after: textPreview(snapshot.text),
+      from: replacement.from,
+      to: replacement.to,
+      ...this.focusTraceDetails(),
     });
     this.view.dispatch({
-      changes: { from: 0, to: this.view.state.doc.length, insert: snapshot.text },
+      changes: replacement,
       annotations: remoteUpdate.of(true),
     });
   }
 
   private enterRecovery(note: string): void {
     this.diagnostics.record("sync.recovery", { note });
+    this.recoveryActive = true;
+    this.barrierInputFrozen = false;
     this.view.dispatch({ effects: this.editable.reconfigure(EditorView.editable.of(false)) });
     this.showStatus(`Editing paused to protect unsynchronized text: ${note}`);
   }
@@ -336,7 +489,8 @@ class MarkdownWebviewController {
     const action = this.barrierQueue[0];
     if (action === undefined) {
       if (this.barrierInFlightSequence === undefined) {
-        this.view.dispatch({ effects: this.editable.reconfigure(EditorView.editable.of(true)) });
+        this.barrierInputFrozen = false;
+        this.diagnostics.record("sync.barrier.completed", this.focusTraceDetails());
       }
       return;
     }
@@ -344,6 +498,7 @@ class MarkdownWebviewController {
       this.inFlightSequence !== undefined ||
       this.barrierInFlightSequence !== undefined ||
       this.hasPendingLocalChanges ||
+      this.composition.isActive ||
       this.disposed
     ) {
       return;
@@ -364,6 +519,7 @@ class MarkdownWebviewController {
       sequence,
       documentVersion: this.documentVersion,
       composing: this.view.composing,
+      ...this.focusTraceDetails(),
     });
     this.vscode.postMessage(message);
   }
@@ -389,8 +545,32 @@ class MarkdownWebviewController {
         before: textPreview(transaction.startState.doc.toString()),
         after: textPreview(transaction.state.doc.toString()),
         selection: `${String(selection.from)}:${String(selection.to)}`,
+        ...this.focusTraceDetails(),
       });
     }
+  }
+
+  private recordFocusEvent(kind: "focus" | "blur"): void {
+    this.diagnostics.record(`dom.${kind}`, this.focusTraceDetails());
+  }
+
+  private focusTraceDetails(): Readonly<Record<string, TraceValue>> {
+    const activeElement = document.activeElement;
+    return {
+      activeElement: activeElement?.tagName ?? "none",
+      barrierQueueLength: this.barrierQueue.length,
+      compositionActive: this.composition.isActive,
+      contentDomFocused: activeElement === this.view.contentDOM,
+      documentVersion: this.documentVersion,
+      documentVisibility: document.visibilityState,
+      editorHasFocus: this.view.hasFocus,
+      inFlightSequence: this.inFlightSequence,
+      nextSequence: this.nextSequence,
+      pendingLocalChanges: this.hasPendingLocalChanges,
+      recoveryActive: this.recoveryActive,
+      selection: `${String(this.view.state.selection.main.from)}:${String(this.view.state.selection.main.to)}`,
+      webviewActive: document.visibilityState === "visible",
+    };
   }
 }
 
@@ -551,6 +731,31 @@ function createDiagnosticDomEventTrace(trace: DiagnosticTrace): Extension {
     },
     keyup: (event): boolean => {
       traceKeyboardEvent(trace, "keyup", event);
+      return false;
+    },
+  });
+}
+
+function createCompositionLifecycleHandlers(
+  compositionStart: () => void,
+  compositionEnd: () => void,
+  focusChanged: (kind: "focus" | "blur") => void,
+): Extension {
+  return EditorView.domEventHandlers({
+    compositionstart: (): boolean => {
+      compositionStart();
+      return false;
+    },
+    compositionend: (): boolean => {
+      compositionEnd();
+      return false;
+    },
+    focus: (): boolean => {
+      focusChanged("focus");
+      return false;
+    },
+    blur: (): boolean => {
+      focusChanged("blur");
       return false;
     },
   });

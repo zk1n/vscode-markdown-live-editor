@@ -15,6 +15,7 @@ const EXTENSION_ID = "local-dev.vscode-markdown-live-editor";
 const SMOKE_FILE_NAME = "extension-host-smoke.md";
 const FIRST_EDIT_FILE_NAME = "extension-host-first-edit.md";
 const FIRST_EDIT_LF_FILE_NAME = "extension-host-first-edit-lf.md";
+const COMPOSITION_HISTORY_FILE_NAME = "extension-host-composition-history.md";
 
 export async function run(): Promise<void> {
   const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
@@ -69,6 +70,68 @@ export async function run(): Promise<void> {
   }
 
   await verifyFirstEditProtocolPath(workspaceFolder.uri);
+  await verifyCompositionHistoryPath(workspaceFolder.uri);
+}
+
+async function verifyCompositionHistoryPath(workspaceUri: vscode.Uri): Promise<void> {
+  const documentUri = vscode.Uri.joinPath(workspaceUri, COMPOSITION_HISTORY_FILE_NAME);
+  await removeSmokeFile(documentUri);
+
+  try {
+    await vscode.workspace.fs.writeFile(documentUri, new TextEncoder().encode("abc"));
+    const document = await vscode.workspace.openTextDocument(documentUri);
+    const coordinator = new DocumentSyncCoordinator(new VscodeDocumentPort());
+    const endpoint = new RecordingEndpoint();
+    const opened = await coordinator.openSession(
+      documentUri.toString(),
+      "composition-history",
+      endpoint,
+    );
+    assert.ok(opened.ok, "Composition history session did not open.");
+
+    await coordinator.receive(
+      fullReplacementMessage(
+        documentUri.toString(),
+        "composition-history",
+        1,
+        opened.snapshot.documentVersion,
+        opened.snapshot.text,
+        "abcかきく",
+      ),
+      endpoint,
+    );
+    assert.equal(document.getText(), "abcかきく", "Final composition commit did not apply.");
+
+    await vscode.commands.executeCommand("vscode.openWith", documentUri, VIEW_TYPE);
+    assertCustomEditorOpened(documentUri);
+
+    await coordinator.receive(
+      barrierMessage(documentUri.toString(), "composition-history", "undo", 2),
+      endpoint,
+    );
+    assert.equal(
+      document.getText(),
+      "abc",
+      "Undo did not revert the composition final commit as one unit.",
+    );
+
+    await coordinator.receive(
+      barrierMessage(documentUri.toString(), "composition-history", "redo", 3),
+      endpoint,
+    );
+    assert.equal(
+      document.getText(),
+      "abcかきく",
+      "Redo did not restore the composition final commit.",
+    );
+    assert.equal(
+      endpoint.messages.some((message) => message.kind === "resync"),
+      false,
+      "Composition history path unexpectedly entered recovery.",
+    );
+  } finally {
+    await removeSmokeFile(documentUri);
+  }
 }
 
 async function verifyFirstEditProtocolPath(workspaceUri: vscode.Uri): Promise<void> {
@@ -207,6 +270,66 @@ function positionAt(
     line: lastNewline === -1 ? 0 : prefix.split("\n").length - 1,
     character: offset - lastNewline - 1,
   };
+}
+
+function fullReplacementMessage(
+  documentUri: string,
+  sessionId: string,
+  sequence: number,
+  documentVersion: number,
+  expectedText: string,
+  text: string,
+): {
+  readonly kind: "edit";
+  readonly protocolVersion: 1;
+  readonly documentUri: string;
+  readonly sessionId: string;
+  readonly sequence: number;
+  readonly documentVersion: number;
+  readonly changes: readonly [
+    {
+      readonly range: {
+        readonly start: { readonly line: number; readonly character: number };
+        readonly end: { readonly line: number; readonly character: number };
+      };
+      readonly expectedText: string;
+      readonly text: string;
+    },
+  ];
+} {
+  return {
+    kind: "edit",
+    protocolVersion: PROTOCOL_VERSION,
+    documentUri,
+    sessionId,
+    sequence,
+    documentVersion,
+    changes: [
+      {
+        range: {
+          start: { line: 0, character: 0 },
+          end: positionAt(expectedText, expectedText.length),
+        },
+        expectedText,
+        text,
+      },
+    ],
+  };
+}
+
+function barrierMessage(
+  documentUri: string,
+  sessionId: string,
+  kind: "undo" | "redo",
+  sequence: number,
+): {
+  readonly kind: "undo" | "redo";
+  readonly protocolVersion: 1;
+  readonly documentUri: string;
+  readonly sessionId: string;
+  readonly sequence: number;
+} {
+  return { kind, protocolVersion: PROTOCOL_VERSION, documentUri, sessionId, sequence };
 }
 
 function diagnostic(label: string, document: vscode.TextDocument, expectedText: string): string {

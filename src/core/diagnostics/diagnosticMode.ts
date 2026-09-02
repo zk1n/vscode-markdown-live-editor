@@ -23,7 +23,7 @@ export function usesLivePreview(mode: DiagnosticMode): boolean {
 }
 
 export function usesBarrierKeymap(mode: DiagnosticMode): boolean {
-  return mode === "off" || mode === "preview";
+  return mode === "off" || mode === "sync" || mode === "preview";
 }
 
 export function recordsDiagnosticTrace(mode: DiagnosticMode): boolean {

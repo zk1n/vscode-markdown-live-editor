@@ -29,7 +29,7 @@ describe("development diagnostic modes", () => {
     expect(usesMarkdownLanguage("sync")).toBe(true);
     expect(usesDocumentSync("sync")).toBe(true);
     expect(usesLivePreview("sync")).toBe(false);
-    expect(usesBarrierKeymap("sync")).toBe(false);
+    expect(usesBarrierKeymap("sync")).toBe(true);
 
     expect(usesMarkdownLanguage("preview")).toBe(true);
     expect(usesDocumentSync("preview")).toBe(true);

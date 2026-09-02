@@ -45,3 +45,19 @@ implemented.
 
 The current Windows target is ATOK. Microsoft IME requires its own recorded
 manual result and cannot substitute for ATOK release-gate evidence.
+
+## Implementation notes
+
+The webview records the authoritative document version and local text at
+`compositionstart`. CodeMirror preedit transactions update only that local
+buffer. At semantic `compositionend`, after an earlier ordinary edit (if any)
+has acknowledged, the client verifies that the authoritative text still equals
+the recorded base and sends one existing FIFO `edit` operation for the final
+text. An authority mismatch while the buffer is active enters recovery and
+leaves the local composition visible.
+
+Save, Undo, and Redo requests made during composition remain in the existing
+barrier queue until that final edit acknowledges. The implementation does not
+use a timeout; its microtask only allows CodeMirror's synchronous
+composition-end processing to settle before the semantic end boundary is
+evaluated.
