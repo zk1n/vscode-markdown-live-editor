@@ -1,0 +1,45 @@
+name: Bug report
+description: Report incorrect behavior or source-data integrity problems
+title: "[Bug] "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Source-text corruption reports are high priority. A perfect reproduction is helpful but not required.
+  - type: textarea
+    id: symptom
+    attributes:
+      label: What happened?
+      description: Describe the behavior you observed.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Reproduction / recent actions
+      description: If the exact reproduction is unknown, say so and list recent actions such as Undo/Redo/Save/IME.
+  - type: textarea
+    id: diff
+    attributes:
+      label: Source diff (optional)
+      description: If easily available, include a minimal git diff or raw Markdown. This is optional, not a reporting obligation.
+  - type: input
+    id: vscode
+    attributes:
+      label: VS Code version
+  - type: input
+    id: extension
+    attributes:
+      label: Extension version/commit
+  - type: input
+    id: os
+    attributes:
+      label: OS

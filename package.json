@@ -1,0 +1,60 @@
+{
+  "name": "vscode-markdown-live-editor",
+  "displayName": "Markdown Live Editor",
+  "description": "An Obsidian-like Live Preview Markdown editor for VS Code with ordinary Markdown as the source of truth.",
+  "version": "0.0.0",
+  "private": true,
+  "license": "MIT",
+  "publisher": "local-dev",
+  "engines": {
+    "vscode": "^1.120.0",
+    "node": ">=24 <25"
+  },
+  "categories": [
+    "Other"
+  ],
+  "main": "./dist/extension.js",
+  "activationEvents": [
+    "onCommand:vscodeMarkdownLiveEditor.showProjectInfo"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "command": "vscodeMarkdownLiveEditor.showProjectInfo",
+        "title": "Markdown Live Editor: Show Project Info"
+      }
+    ]
+  },
+  "scripts": {
+    "clean": "node ./scripts/clean.mjs",
+    "build": "node ./scripts/build.mjs",
+    "watch": "node ./scripts/build.mjs --watch",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "check": "npm run typecheck && npm run lint && npm run test && npm run build && npm run format:check"
+  },
+  "dependencies": {
+    "@codemirror/commands": "6.11.0",
+    "@codemirror/lang-markdown": "6.5.2",
+    "@codemirror/search": "6.7.1",
+    "@codemirror/state": "6.7.1",
+    "@codemirror/view": "6.43.10"
+  },
+  "devDependencies": {
+    "@eslint/js": "9.39.5",
+    "@types/node": "22.20.1",
+    "@types/vscode": "1.120.0",
+    "@vscode/test-electron": "3.1.0",
+    "esbuild": "0.28.2",
+    "eslint": "9.39.5",
+    "globals": "17.11.0",
+    "prettier": "3.9.6",
+    "typescript": "6.0.3",
+    "typescript-eslint": "8.69.0",
+    "vitest": "4.1.11"
+  }
+}
