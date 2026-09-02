@@ -1,9 +1,8 @@
-import { EditorState } from "@codemirror/state";
+import { EditorState, Transaction } from "@codemirror/state";
 import { describe, expect, it } from "vitest";
 
 import {
   createLivePreviewEngine,
-  livePreviewComposition,
   livePreviewState,
 } from "../../src/webview/livePreview/LivePreviewEngine.js";
 import {
@@ -46,22 +45,30 @@ describe("Markdown presentation syntax", () => {
 });
 
 describe("LivePreviewEngine", () => {
-  it("changes decorations for selection presentation without mutating the CodeMirror document", () => {
+  it("reveals source markers without removing semantic presentation or mutating the document", () => {
     const engine = createLivePreviewEngine();
-    const state = EditorState.create({ doc: "x **hello**", extensions: [engine.extension] });
+    const state = EditorState.create({
+      doc: "## heading\nplain",
+      selection: { anchor: 11 },
+      extensions: [engine.extension],
+    });
     const initialDecorations = decorationCount(state);
 
-    const selectionTransaction = state.update({ selection: { anchor: 5 } });
+    const selectionTransaction = state.update({ selection: { anchor: 4 } });
     expect(selectionTransaction.docChanged).toBe(false);
-    expect(selectionTransaction.state.doc.toString()).toBe("x **hello**");
-    expect(decorationCount(selectionTransaction.state)).toBeLessThan(initialDecorations);
+    expect(selectionTransaction.state.doc.toString()).toBe("## heading\nplain");
+    // The heading marker is revealed, while its semantic heading mark remains.
+    expect(decorationCount(selectionTransaction.state)).toBe(initialDecorations - 1);
 
-    const compositionStart = selectionTransaction.state.update({
-      effects: livePreviewComposition.of(true),
+    const compositionUpdate = selectionTransaction.state.update({
+      changes: { from: 4, insert: "日本" },
+      annotations: Transaction.userEvent.of("input.type.compose"),
     });
-    expect(compositionStart.docChanged).toBe(false);
-    expect(compositionStart.state.doc.toString()).toBe("x **hello**");
-    expect(decorationCount(compositionStart.state)).toBe(0);
+    expect(compositionUpdate.docChanged).toBe(true);
+    expect(compositionUpdate.state.doc.toString()).toBe("## h日本eading\nplain");
+    expect(decorationCount(compositionUpdate.state)).toBe(
+      decorationCount(selectionTransaction.state),
+    );
 
     engine.dispose();
   });

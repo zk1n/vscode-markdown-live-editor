@@ -2,12 +2,18 @@ import { randomUUID } from "node:crypto";
 
 import * as vscode from "vscode";
 
+import {
+  type DiagnosticMode,
+  recordsDiagnosticTrace,
+  usesDocumentSync,
+} from "../../core/diagnostics/diagnosticMode.js";
 import type {
   DocumentSyncCoordinator,
   WebviewEndpoint,
 } from "../../core/sync/documentSyncCoordinator.js";
 
 interface MarkdownEditorBootstrap {
+  readonly diagnosticMode: DiagnosticMode;
   readonly documentUri: string;
   readonly documentVersion: number;
   readonly sessionId: string;
@@ -16,6 +22,7 @@ interface MarkdownEditorBootstrap {
 }
 
 export interface MarkdownEditorProviderOptions {
+  readonly diagnosticMode: DiagnosticMode;
   readonly webviewScriptPath: vscode.Uri;
 }
 
@@ -49,17 +56,21 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
       },
     };
 
-    return this.openSession(
-      webview,
-      documentUri,
-      sessionId,
-      endpoint,
-      webviewPanel,
-      cancellationToken,
-    );
+    if (usesDocumentSync(this.options.diagnosticMode)) {
+      return this.openSyncedSession(
+        webview,
+        documentUri,
+        sessionId,
+        endpoint,
+        webviewPanel,
+        cancellationToken,
+      );
+    }
+
+    return this.openStandaloneDiagnosticSession(document, webview, sessionId);
   }
 
-  private async openSession(
+  private async openSyncedSession(
     webview: vscode.Webview,
     documentUri: string,
     sessionId: string,
@@ -92,6 +103,7 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
     }
 
     const bootstrap: MarkdownEditorBootstrap = {
+      diagnosticMode: this.options.diagnosticMode,
       documentUri,
       documentVersion: opened.snapshot.documentVersion,
       sessionId,
@@ -107,6 +119,31 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
     receiveDisposable = webview.onDidReceiveMessage((value: unknown) => {
       void this.coordinator.receive(value, endpoint);
     });
+  }
+
+  /**
+   * A1/A2 deliberately do not open a coordinator session or a webview message
+   * receiver. They cannot mutate the VS Code TextDocument authority.
+   */
+  private openStandaloneDiagnosticSession(
+    document: vscode.TextDocument,
+    webview: vscode.Webview,
+    sessionId: string,
+  ): Promise<void> {
+    const bootstrap: MarkdownEditorBootstrap = {
+      diagnosticMode: this.options.diagnosticMode,
+      documentUri: document.uri.toString(),
+      documentVersion: document.version,
+      sessionId,
+      nextSequence: 1,
+      text: toProtocolText(document.getText()),
+    };
+    webview.html = createWebviewHtml(
+      webview,
+      webview.asWebviewUri(this.options.webviewScriptPath),
+      bootstrap,
+    );
+    return Promise.resolve();
   }
 }
 
@@ -125,6 +162,9 @@ function createWebviewHtml(
     "connect-src 'none'",
   ].join("; ");
   const bootstrapJson = JSON.stringify(bootstrap).replaceAll("<", "\\u003c");
+  const diagnosticPanel = recordsDiagnosticTrace(bootstrap.diagnosticMode)
+    ? '<pre id="editor-diagnostics" aria-label="Development diagnostic trace"></pre>'
+    : "";
 
   return `<!DOCTYPE html>
 <html lang="en">
@@ -137,17 +177,23 @@ function createWebviewHtml(
     html, body, #editor-root { height: 100%; margin: 0; }
     body { color: var(--vscode-editor-foreground); background: var(--vscode-editor-background); }
     #editor-root { min-height: 0; }
-    #editor-status { position: fixed; right: 0.75rem; bottom: 0.5rem; max-width: min(34rem, 90vw); color: var(--vscode-editorWarning-foreground); background: var(--vscode-editorWarning-background); padding: 0.35rem 0.5rem; border-radius: 3px; font: 12px var(--vscode-font-family); }
-    #editor-status[hidden] { display: none; }
+     #editor-status { position: fixed; right: 0.75rem; bottom: 0.5rem; max-width: min(34rem, 90vw); color: var(--vscode-editorWarning-foreground); background: var(--vscode-editorWarning-background); padding: 0.35rem 0.5rem; border-radius: 3px; font: 12px var(--vscode-font-family); }
+     #editor-status[hidden] { display: none; }
+     #editor-diagnostics { position: fixed; left: 0.75rem; bottom: 0.5rem; width: min(64rem, calc(100vw - 1.5rem)); max-height: 35vh; overflow: auto; margin: 0; padding: 0.5rem; color: var(--vscode-editor-foreground); background: var(--vscode-editor-background); border: 1px solid var(--vscode-editorWidget-border); font: 11px var(--vscode-editor-font-family); white-space: pre-wrap; user-select: text; }
   </style>
 </head>
 <body>
-  <main id="editor-root" aria-label="Markdown editor"></main>
-  <div id="editor-status" role="status" aria-live="polite" hidden></div>
+   <main id="editor-root" aria-label="Markdown editor"></main>
+   <div id="editor-status" role="status" aria-live="polite" hidden></div>
+   ${diagnosticPanel}
   <script id="markdown-live-editor-bootstrap" type="application/json">${bootstrapJson}</script>
   <script nonce="${nonce}" src="${escapeHtmlAttribute(scriptUri.toString())}"></script>
 </body>
 </html>`;
+}
+
+function toProtocolText(text: string): string {
+  return text.replaceAll("\r\n", "\n");
 }
 
 function escapeHtmlAttribute(value: string): string {

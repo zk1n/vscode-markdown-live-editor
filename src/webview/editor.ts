@@ -1,7 +1,22 @@
 import { markdown } from "@codemirror/lang-markdown";
-import { Annotation, Compartment, EditorState, Prec } from "@codemirror/state";
+import {
+  Annotation,
+  Compartment,
+  EditorState,
+  Prec,
+  Transaction,
+  type Extension,
+} from "@codemirror/state";
 import { EditorView, keymap, type KeyBinding, type ViewUpdate } from "@codemirror/view";
 
+import {
+  recordsDiagnosticTrace,
+  usesBarrierKeymap,
+  usesDocumentSync,
+  usesLivePreview,
+  usesMarkdownLanguage,
+  type DiagnosticMode,
+} from "../core/diagnostics/diagnosticMode.js";
 import {
   PROTOCOL_VERSION,
   decodeHostToWebviewMessage,
@@ -20,6 +35,7 @@ interface VsCodeApi {
 }
 
 interface WebviewBootstrap {
+  readonly diagnosticMode: DiagnosticMode;
   readonly documentUri: string;
   readonly documentVersion: number;
   readonly sessionId: string;
@@ -42,7 +58,8 @@ const vscodeEditorTheme = EditorView.theme({
 
 class MarkdownWebviewController {
   private readonly editable = new Compartment();
-  private readonly livePreview: LivePreviewEngine;
+  private readonly livePreview: LivePreviewEngine | undefined;
+  private readonly diagnostics: DiagnosticTrace;
   private readonly view: EditorView;
   private authoritativeText: string;
   private documentVersion: number;
@@ -62,28 +79,50 @@ class MarkdownWebviewController {
     this.authoritativeText = bootstrap.text;
     this.documentVersion = bootstrap.documentVersion;
     this.nextSequence = bootstrap.nextSequence;
-    this.livePreview = createLivePreviewEngine();
+    this.diagnostics = createDiagnosticTrace(bootstrap.diagnosticMode);
+    this.livePreview = usesLivePreview(bootstrap.diagnosticMode)
+      ? createLivePreviewEngine()
+      : undefined;
+    const extensions: Extension[] = [
+      vscodeEditorTheme,
+      this.editable.of(EditorView.editable.of(true)),
+      EditorView.updateListener.of((update): void => {
+        this.handleUpdate(update);
+      }),
+    ];
+    if (usesMarkdownLanguage(bootstrap.diagnosticMode)) {
+      extensions.unshift(markdown());
+    }
+    if (this.livePreview !== undefined) {
+      extensions.push(this.livePreview.extension);
+    }
+    if (usesBarrierKeymap(bootstrap.diagnosticMode)) {
+      extensions.push(
+        Prec.highest(
+          keymap.of(
+            createBarrierKeymap((action): void => {
+              this.requestBarrier(action);
+            }),
+          ),
+        ),
+      );
+    }
+    if (recordsDiagnosticTrace(bootstrap.diagnosticMode)) {
+      extensions.push(createDiagnosticDomEventTrace(this.diagnostics));
+    }
     this.view = new EditorView({
       state: EditorState.create({
         doc: bootstrap.text,
-        extensions: [
-          markdown(),
-          vscodeEditorTheme,
-          this.livePreview.extension,
-          this.editable.of(EditorView.editable.of(true)),
-          Prec.highest(
-            keymap.of(
-              createBarrierKeymap((action): void => {
-                this.requestBarrier(action);
-              }),
-            ),
-          ),
-          EditorView.updateListener.of((update): void => {
-            this.handleUpdate(update);
-          }),
-        ],
+        extensions,
       }),
       parent,
+    });
+    this.diagnostics.record("diagnostic.mode", {
+      mode: bootstrap.diagnosticMode,
+      documentSync: usesDocumentSync(bootstrap.diagnosticMode),
+      livePreview: usesLivePreview(bootstrap.diagnosticMode),
+      markdown: usesMarkdownLanguage(bootstrap.diagnosticMode),
+      barrierKeymap: usesBarrierKeymap(bootstrap.diagnosticMode),
     });
   }
 
@@ -92,6 +131,7 @@ class MarkdownWebviewController {
       return;
     }
 
+    this.diagnostics.record("host.message.received", messageSummary(value));
     const decoded = decodeHostToWebviewMessage(value);
     if (!decoded.ok) {
       this.enterRecovery(`Invalid host message: ${decoded.error}`);
@@ -107,19 +147,27 @@ class MarkdownWebviewController {
     }
     this.disposed = true;
     this.view.destroy();
-    this.livePreview.dispose();
+    this.livePreview?.dispose();
   }
 
-  private handleUpdate(update: ViewUpdateLike): void {
+  private handleUpdate(update: ViewUpdate): void {
+    this.traceCodeMirrorUpdate(update);
     if (
       !update.docChanged ||
       this.disposed ||
-      update.transactions.some((transaction) => transaction.annotation(remoteUpdate) === true)
+      update.transactions.some((transaction) => transaction.annotation(remoteUpdate) === true) ||
+      !usesDocumentSync(this.bootstrap.diagnosticMode)
     ) {
       return;
     }
 
     this.hasPendingLocalChanges = true;
+    this.diagnostics.record("sync.edit.pending", {
+      forwarded: true,
+      composing: update.view.composing,
+      compositionStarted: update.view.compositionStarted,
+      text: textPreview(this.view.state.doc.toString()),
+    });
     this.sendPendingEdit();
   }
 
@@ -138,7 +186,7 @@ class MarkdownWebviewController {
     this.nextSequence += 1;
     this.inFlightSequence = sequence;
     this.hasPendingLocalChanges = false;
-    this.vscode.postMessage({
+    const message: WebviewToHostMessage = {
       kind: "edit",
       protocolVersion: PROTOCOL_VERSION,
       documentUri: this.bootstrap.documentUri,
@@ -146,7 +194,16 @@ class MarkdownWebviewController {
       sequence,
       documentVersion: this.documentVersion,
       changes: [fullDocumentReplacement(this.authoritativeText, text)],
+    };
+    this.diagnostics.record("sync.edit.sent", {
+      sequence,
+      documentVersion: this.documentVersion,
+      composing: this.view.composing,
+      compositionStarted: this.view.compositionStarted,
+      expectedText: textPreview(this.authoritativeText),
+      text: textPreview(text),
     });
+    this.vscode.postMessage(message);
   }
 
   private requestBarrier(action: "save" | "undo" | "redo"): void {
@@ -156,6 +213,13 @@ class MarkdownWebviewController {
 
     // Freeze before queueing the barrier so an edit made after the command
     // cannot overtake it. The host still supplies the authoritative result.
+    this.diagnostics.record("sync.barrier.requested", {
+      action,
+      composing: this.view.composing,
+      compositionStarted: this.view.compositionStarted,
+      inFlightSequence: this.inFlightSequence,
+      pendingLocalChanges: this.hasPendingLocalChanges,
+    });
     this.view.dispatch({ effects: this.editable.reconfigure(EditorView.editable.of(false)) });
     this.barrierQueue.push(action);
     this.sendPendingEdit();
@@ -197,6 +261,12 @@ class MarkdownWebviewController {
   private handleAcknowledgement(
     message: Extract<HostToWebviewMessage, { kind: "operation-ack" }>,
   ): void {
+    this.diagnostics.record("sync.operation.ack", {
+      operation: message.operation,
+      sequence: message.sequence,
+      documentVersion: message.documentVersion,
+      text: textPreview(message.text),
+    });
     this.documentVersion = message.documentVersion;
     if (message.operation === "edit" && message.sequence === this.inFlightSequence) {
       this.inFlightSequence = undefined;
@@ -220,6 +290,13 @@ class MarkdownWebviewController {
   private handleDocumentUpdate(
     message: Extract<HostToWebviewMessage, { kind: "document-update" }>,
   ): void {
+    this.diagnostics.record("sync.document.update", {
+      reason: message.reason,
+      documentVersion: message.documentVersion,
+      text: textPreview(message.text),
+      inFlightSequence: this.inFlightSequence,
+      pendingLocalChanges: this.hasPendingLocalChanges,
+    });
     this.documentVersion = message.documentVersion;
     if (message.text === this.authoritativeText) {
       return;
@@ -238,6 +315,11 @@ class MarkdownWebviewController {
     if (this.view.state.doc.toString() === snapshot.text) {
       return;
     }
+    this.diagnostics.record("sync.authority.applied", {
+      documentVersion: snapshot.documentVersion,
+      before: textPreview(this.view.state.doc.toString()),
+      after: textPreview(snapshot.text),
+    });
     this.view.dispatch({
       changes: { from: 0, to: this.view.state.doc.length, insert: snapshot.text },
       annotations: remoteUpdate.of(true),
@@ -245,6 +327,7 @@ class MarkdownWebviewController {
   }
 
   private enterRecovery(note: string): void {
+    this.diagnostics.record("sync.recovery", { note });
     this.view.dispatch({ effects: this.editable.reconfigure(EditorView.editable.of(false)) });
     this.showStatus(`Editing paused to protect unsynchronized text: ${note}`);
   }
@@ -269,22 +352,47 @@ class MarkdownWebviewController {
     const sequence = this.nextSequence;
     this.nextSequence += 1;
     this.barrierInFlightSequence = sequence;
-    this.vscode.postMessage({
+    const message: WebviewToHostMessage = {
       kind: action,
       protocolVersion: PROTOCOL_VERSION,
       documentUri: this.bootstrap.documentUri,
       sessionId: this.bootstrap.sessionId,
       sequence,
+    };
+    this.diagnostics.record("sync.barrier.sent", {
+      action,
+      sequence,
+      documentVersion: this.documentVersion,
+      composing: this.view.composing,
     });
+    this.vscode.postMessage(message);
   }
 
   private showStatus(note: string): void {
     this.statusElement.textContent = note;
     this.statusElement.hidden = false;
   }
-}
 
-type ViewUpdateLike = Pick<ViewUpdate, "docChanged" | "transactions">;
+  private traceCodeMirrorUpdate(update: ViewUpdate): void {
+    if (!recordsDiagnosticTrace(this.bootstrap.diagnosticMode)) {
+      return;
+    }
+    for (const transaction of update.transactions) {
+      const selection = transaction.state.selection.main;
+      this.diagnostics.record("codemirror.transaction", {
+        docChanged: transaction.docChanged,
+        userEvent: transaction.annotation(Transaction.userEvent) ?? "",
+        remote: transaction.annotation(remoteUpdate) === true,
+        composing: update.view.composing,
+        compositionStarted: update.view.compositionStarted,
+        transactionCount: update.transactions.length,
+        before: textPreview(transaction.startState.doc.toString()),
+        after: textPreview(transaction.state.doc.toString()),
+        selection: `${String(selection.from)}:${String(selection.to)}`,
+      });
+    }
+  }
+}
 
 function createBarrierKeymap(
   requestBarrier: (action: "save" | "undo" | "redo") => void,
@@ -347,6 +455,7 @@ function isBootstrap(value: unknown): value is WebviewBootstrap {
     return false;
   }
   return (
+    isDiagnosticMode(value["diagnosticMode"]) &&
     typeof value["documentUri"] === "string" &&
     typeof value["sessionId"] === "string" &&
     typeof value["text"] === "string" &&
@@ -359,8 +468,141 @@ function isBootstrap(value: unknown): value is WebviewBootstrap {
   );
 }
 
+function isDiagnosticMode(value: unknown): value is DiagnosticMode {
+  return (
+    typeof value === "string" &&
+    (value === "off" ||
+      value === "raw-cm6" ||
+      value === "markdown" ||
+      value === "sync" ||
+      value === "preview")
+  );
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+type TraceValue = boolean | number | string | undefined;
+
+interface DiagnosticTrace {
+  record(kind: string, details: Readonly<Record<string, TraceValue>>): void;
+}
+
+const disabledDiagnosticTrace: DiagnosticTrace = {
+  record: (): void => undefined,
+};
+
+class OnPageDiagnosticTrace implements DiagnosticTrace {
+  private readonly lines: string[] = [];
+
+  public constructor(private readonly element: HTMLElement) {}
+
+  public record(kind: string, details: Readonly<Record<string, TraceValue>>): void {
+    const timestamp = String(Date.now());
+    const serialized = Object.entries(details)
+      .map(([key, value]): string => `${key}=${JSON.stringify(value)}`)
+      .join(" ");
+    this.lines.push(`${timestamp} ${kind}${serialized === "" ? "" : ` ${serialized}`}`);
+    if (this.lines.length > 250) {
+      this.lines.shift();
+    }
+    this.element.textContent = this.lines.join("\n");
+    this.element.scrollTop = this.element.scrollHeight;
+  }
+}
+
+function createDiagnosticTrace(mode: DiagnosticMode): DiagnosticTrace {
+  if (!recordsDiagnosticTrace(mode)) {
+    return disabledDiagnosticTrace;
+  }
+  const element = document.getElementById("editor-diagnostics");
+  if (element === null) {
+    throw new Error("Development diagnostic trace output is missing.");
+  }
+  return new OnPageDiagnosticTrace(element);
+}
+
+function createDiagnosticDomEventTrace(trace: DiagnosticTrace): Extension {
+  return EditorView.domEventHandlers({
+    compositionstart: (event): boolean => {
+      traceCompositionEvent(trace, "compositionstart", event);
+      return false;
+    },
+    compositionupdate: (event): boolean => {
+      traceCompositionEvent(trace, "compositionupdate", event);
+      return false;
+    },
+    compositionend: (event): boolean => {
+      traceCompositionEvent(trace, "compositionend", event);
+      return false;
+    },
+    beforeinput: (event): boolean => {
+      traceInputEvent(trace, "beforeinput", event);
+      return false;
+    },
+    input: (event): boolean => {
+      traceInputEvent(trace, "input", event);
+      return false;
+    },
+    keydown: (event): boolean => {
+      traceKeyboardEvent(trace, "keydown", event);
+      return false;
+    },
+    keyup: (event): boolean => {
+      traceKeyboardEvent(trace, "keyup", event);
+      return false;
+    },
+  });
+}
+
+function traceCompositionEvent(
+  trace: DiagnosticTrace,
+  kind: string,
+  event: CompositionEvent,
+): void {
+  trace.record(`dom.${kind}`, { data: event.data, isComposing: eventIsComposing(event) });
+}
+
+function traceInputEvent(trace: DiagnosticTrace, kind: string, event: InputEvent): void {
+  trace.record(`dom.${kind}`, {
+    data: event.data ?? "",
+    inputType: event.inputType,
+    isComposing: event.isComposing,
+  });
+}
+
+function traceKeyboardEvent(trace: DiagnosticTrace, kind: string, event: KeyboardEvent): void {
+  trace.record(`dom.${kind}`, {
+    code: event.code,
+    isComposing: event.isComposing,
+    key: event.key,
+    repeat: event.repeat,
+  });
+}
+
+function eventIsComposing(event: Event): boolean {
+  const value = Reflect.get(event, "isComposing") as unknown;
+  return typeof value === "boolean" && value;
+}
+
+function messageSummary(value: unknown): Readonly<Record<string, TraceValue>> {
+  if (!isRecord(value)) {
+    return { kind: "invalid" };
+  }
+  return {
+    documentVersion:
+      typeof value["documentVersion"] === "number" ? value["documentVersion"] : undefined,
+    kind: typeof value["kind"] === "string" ? value["kind"] : "invalid",
+    operation: typeof value["operation"] === "string" ? value["operation"] : undefined,
+    reason: typeof value["reason"] === "string" ? value["reason"] : undefined,
+    sequence: typeof value["sequence"] === "number" ? value["sequence"] : undefined,
+  };
+}
+
+function textPreview(text: string): string {
+  const maximumLength = 160;
+  return text.length <= maximumLength ? text : `${text.slice(0, maximumLength)}…`;
 }
 
 const root = document.getElementById("editor-root");

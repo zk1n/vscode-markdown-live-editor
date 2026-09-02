@@ -6,6 +6,7 @@ import {
   type ResyncMessage,
   type WebviewToHostMessage,
 } from "../../protocol/messages.js";
+import { disabledDiagnosticLog, type DiagnosticLog } from "../diagnostics/diagnosticLog.js";
 import { applyWireChanges } from "./documentText.js";
 
 export interface DocumentSnapshot {
@@ -73,7 +74,10 @@ export class DocumentSyncCoordinator {
   private readonly sessionsByDocument = new Map<string, Map<string, SessionState>>();
   private readonly queues = new Map<string, Promise<void>>();
 
-  public constructor(private readonly documentPort: DocumentPort) {}
+  public constructor(
+    private readonly documentPort: DocumentPort,
+    private readonly diagnostics: DiagnosticLog = disabledDiagnosticLog,
+  ) {}
 
   public async openSession(
     documentUri: string,
@@ -130,9 +134,12 @@ export class DocumentSyncCoordinator {
   public async receive(rawMessage: unknown, endpoint: WebviewEndpoint): Promise<void> {
     const decoded = decodeWebviewToHostMessage(rawMessage);
     if (!decoded.ok) {
+      this.diagnostics.record("coordinator.receive.invalid", { note: decoded.error });
       this.post(endpoint, { kind: "protocol-error", note: decoded.error });
       return;
     }
+
+    this.diagnostics.record("coordinator.receive", messageTrace(decoded.value));
 
     await this.enqueue(decoded.value.documentUri, async (): Promise<void> => {
       await this.process(decoded.value, endpoint);
@@ -223,6 +230,11 @@ export class DocumentSyncCoordinator {
     message: ClientEditMessage,
     snapshot: DocumentSnapshot,
   ): Promise<void> {
+    this.diagnostics.record("coordinator.edit", {
+      sequence: message.sequence,
+      documentVersion: message.documentVersion,
+      textLength: message.changes[0]?.text.length,
+    });
     if (message.documentVersion !== snapshot.documentVersion) {
       this.resync(
         session,
@@ -284,6 +296,10 @@ export class DocumentSyncCoordinator {
     session: SessionState,
     message: Exclude<WebviewToHostMessage, ClientEditMessage>,
   ): Promise<void> {
+    this.diagnostics.record("coordinator.barrier", {
+      operation: message.kind,
+      sequence: message.sequence,
+    });
     let portResult: DocumentPortResult;
     try {
       switch (message.kind) {
@@ -348,6 +364,12 @@ export class DocumentSyncCoordinator {
     message: WebviewToHostMessage,
     snapshot: DocumentSnapshot,
   ): void {
+    this.diagnostics.record("coordinator.ack", {
+      operation: message.kind,
+      sequence: message.sequence,
+      documentVersion: snapshot.documentVersion,
+      textLength: snapshot.text.length,
+    });
     this.post(session.endpoint, {
       kind: "operation-ack",
       operation: message.kind,
@@ -362,6 +384,13 @@ export class DocumentSyncCoordinator {
     reason: ResyncMessage["reason"],
     note: string,
   ): void {
+    this.diagnostics.record("coordinator.resync", {
+      reason,
+      documentVersion: snapshot.documentVersion,
+      nextSequence: session.nextSequence,
+      note,
+      textLength: snapshot.text.length,
+    });
     this.post(session.endpoint, {
       kind: "resync",
       reason,
@@ -425,4 +454,12 @@ export class DocumentSyncCoordinator {
       // A disposed webview cannot be allowed to interrupt the shared document queue.
     }
   }
+}
+
+function messageTrace(message: WebviewToHostMessage): Readonly<Record<string, number | string>> {
+  return {
+    documentVersion: message.kind === "edit" ? message.documentVersion : "",
+    kind: message.kind,
+    sequence: message.sequence,
+  };
 }

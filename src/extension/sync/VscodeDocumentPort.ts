@@ -1,5 +1,6 @@
 import * as vscode from "vscode";
 
+import { disabledDiagnosticLog, type DiagnosticLog } from "../../core/diagnostics/diagnosticLog.js";
 import type {
   DocumentPort,
   DocumentPortResult,
@@ -12,6 +13,8 @@ import type {
  */
 export class VscodeDocumentPort implements DocumentPort {
   private readonly savesInProgress = new Set<string>();
+
+  public constructor(private readonly diagnostics: DiagnosticLog = disabledDiagnosticLog) {}
 
   public isSaving(documentUri: string): boolean {
     return this.savesInProgress.has(documentUri);
@@ -27,6 +30,12 @@ export class VscodeDocumentPort implements DocumentPort {
     text: string,
   ): Promise<DocumentPortResult> {
     const document = this.requireDocument(documentUri);
+    this.diagnostics.record("port.replace.requested", {
+      dirty: document.isDirty,
+      expectedVersion,
+      textLength: text.length,
+      version: document.version,
+    });
     if (document.version !== expectedVersion) {
       return this.rejected(
         document,
@@ -53,6 +62,12 @@ export class VscodeDocumentPort implements DocumentPort {
 
     const applied = await vscode.workspace.applyEdit(workspaceEdit);
     const snapshot = await this.readDocument(documentUri);
+    this.diagnostics.record("port.replace.result", {
+      applied,
+      dirty: document.isDirty,
+      documentVersion: snapshot.documentVersion,
+      textLength: snapshot.text.length,
+    });
     return applied
       ? { kind: "applied", snapshot }
       : { kind: "rejected", snapshot, note: "VS Code rejected the document edit." };
@@ -60,10 +75,20 @@ export class VscodeDocumentPort implements DocumentPort {
 
   public async saveDocument(documentUri: string): Promise<DocumentPortResult> {
     const document = this.requireDocument(documentUri);
+    this.diagnostics.record("port.save.requested", {
+      dirty: document.isDirty,
+      documentVersion: document.version,
+    });
     this.savesInProgress.add(documentUri);
     try {
       const saved = await document.save();
       const snapshot = await this.readDocument(documentUri);
+      this.diagnostics.record("port.save.result", {
+        dirty: document.isDirty,
+        documentVersion: snapshot.documentVersion,
+        saved,
+        textLength: snapshot.text.length,
+      });
       return saved
         ? { kind: "applied", snapshot }
         : {
@@ -88,8 +113,26 @@ export class VscodeDocumentPort implements DocumentPort {
     documentUri: string,
     command: "undo" | "redo",
   ): Promise<DocumentPortResult> {
+    const document = this.requireDocument(documentUri);
+    this.diagnostics.record("port.history.requested", {
+      command,
+      dirty: document.isDirty,
+      documentVersion: document.version,
+    });
+    if (!isActiveCustomEditorDocument(documentUri)) {
+      return this.rejected(
+        document,
+        "Undo/Redo was not executed because this custom editor document is not active.",
+      );
+    }
     await vscode.commands.executeCommand(command);
-    return { kind: "applied", snapshot: await this.readDocument(documentUri) };
+    const snapshot = await this.readDocument(documentUri);
+    this.diagnostics.record("port.history.result", {
+      command,
+      documentVersion: snapshot.documentVersion,
+      textLength: snapshot.text.length,
+    });
+    return { kind: "applied", snapshot };
   }
 
   private requireDocument(documentUri: string): vscode.TextDocument {
@@ -117,6 +160,11 @@ export class VscodeDocumentPort implements DocumentPort {
       note,
     });
   }
+}
+
+function isActiveCustomEditorDocument(documentUri: string): boolean {
+  const input = vscode.window.tabGroups.activeTabGroup.activeTab?.input;
+  return input instanceof vscode.TabInputCustom && input.uri.toString() === documentUri;
 }
 
 function fullDocumentRange(document: vscode.TextDocument): vscode.Range {

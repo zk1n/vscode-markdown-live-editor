@@ -1,4 +1,4 @@
-import { type Extension, StateEffect, StateField, type EditorState } from "@codemirror/state";
+import { type Extension, StateField, type EditorState } from "@codemirror/state";
 import { Decoration, type DecorationSet, EditorView } from "@codemirror/view";
 
 import { findPresentationSyntax, isSyntaxActive } from "./markdownPresentation.js";
@@ -18,36 +18,23 @@ export function createLivePreviewEngine(): LivePreviewEngine {
 
 interface LivePreviewState {
   readonly decorations: DecorationSet;
-  readonly composing: boolean;
 }
 
-export const livePreviewComposition = StateEffect.define<boolean>();
-
 export const livePreviewState = StateField.define<LivePreviewState>({
-  create: (state): LivePreviewState => ({ composing: false, decorations: buildDecorations(state) }),
+  create: (state): LivePreviewState => ({ decorations: buildDecorations(state) }),
   update: (value, transaction): LivePreviewState => {
-    const compositionEffect = transaction.effects.find((effect) =>
-      effect.is(livePreviewComposition),
-    );
-    const composing = compositionEffect?.value ?? value.composing;
+    if (transaction.docChanged && transaction.isUserEvent("input.type.compose")) {
+      // Preserve the existing decoration topology while CodeMirror applies an
+      // IME preedit. Mapping follows the text change without a project DOM
+      // event handler dispatching another transaction into the composition.
+      return { decorations: value.decorations.map(transaction.changes) };
+    }
     return {
-      composing,
-      decorations: composing ? Decoration.none : buildDecorations(transaction.state),
+      decorations: buildDecorations(transaction.state),
     };
   },
   provide: (field): Extension =>
     EditorView.decorations.from(field, (value): DecorationSet => value.decorations),
-});
-
-const compositionEvents = EditorView.domEventHandlers({
-  compositionstart: (_event, view): boolean => {
-    view.dispatch({ effects: livePreviewComposition.of(true) });
-    return false;
-  },
-  compositionend: (_event, view): boolean => {
-    view.dispatch({ effects: livePreviewComposition.of(false) });
-    return false;
-  },
 });
 
 const livePreviewTheme = EditorView.baseTheme({
@@ -75,7 +62,7 @@ const livePreviewTheme = EditorView.baseTheme({
 });
 
 class CodeMirrorDecorationLivePreviewEngine implements LivePreviewEngine {
-  public readonly extension: Extension = [livePreviewState, compositionEvents, livePreviewTheme];
+  public readonly extension: Extension = [livePreviewState, livePreviewTheme];
 
   public dispose(): void {
     // CodeMirror owns the field and theme lifetime through EditorView.destroy().
@@ -87,13 +74,12 @@ function buildDecorations(state: EditorState): DecorationSet {
   const decorations = [];
 
   for (const syntax of findPresentationSyntax(state.doc.toString())) {
-    if (isSyntaxActive(syntax, selections)) {
-      continue;
-    }
-    for (const marker of syntax.markers) {
-      decorations.push(
-        Decoration.mark({ class: "cm-live-preview-marker" }).range(marker.from, marker.to),
-      );
+    if (!isSyntaxActive(syntax, selections)) {
+      for (const marker of syntax.markers) {
+        decorations.push(
+          Decoration.mark({ class: "cm-live-preview-marker" }).range(marker.from, marker.to),
+        );
+      }
     }
     const className =
       syntax.kind === "heading"

@@ -24,10 +24,18 @@ For v0.1, provide a project-owned `LivePreviewEngine` backed by CodeMirror
 - emphasis markers (`*`, `_`).
 
 The engine recognizes a conservative subset and skips fenced code blocks. It
-hides markers and styles content only when a caret or selection is outside the
-enclosing syntax range. On `compositionstart`, it removes preview decorations;
-on `compositionend`, decorations are recalculated. These are effects-only
-presentation transactions.
+keeps semantic styling on syntax content even while its caret/selection is
+inside that range, and changes only marker visibility. This avoids heading
+font-size and line-height changes when a caret crosses a source marker.
+
+For CodeMirror transactions identified as `input.type.compose`, it maps the
+existing decoration set through the text change rather than rebuilding it. It
+does not install a project `compositionstart`/`compositionend` handler that
+dispatches an additional CodeMirror transaction. The next non-composition
+transaction recalculates presentation normally. This decision is specifically
+intended to avoid a document-wide DOM transition while an IME establishes or
+updates a composition range. It does not claim to solve a browser/ATOK input
+bug without A1-A4 diagnostic evidence.
 
 The engine owns no document changes, filesystem activity, commands, history,
 protocol messages, document versions, sequence numbers, or recovery decisions.
@@ -43,4 +51,6 @@ bundle, selection, and source-integrity evidence set.
 The first slice has a small and removable rendering surface with no new runtime
 dependency. It intentionally omits richer Markdown syntax and advanced widgets.
 Manual Windows IME and cursor/selection behavior remain release gates because
-CodeMirror-level tests cannot reproduce the operating system input path.
+CodeMirror-level tests cannot reproduce the operating system input path. ATOK
+is a required v0.1 manual regression target alongside any separately verified
+Microsoft IME environment.
