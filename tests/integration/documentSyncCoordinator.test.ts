@@ -353,6 +353,61 @@ describe("DocumentSyncCoordinator", () => {
     });
   });
 
+  it("keeps a composition-final edit and repeated Save barriers FIFO", async () => {
+    const port = new FakeDocumentPort("ABCD");
+    const coordinator = new DocumentSyncCoordinator(port);
+    const endpoint = new RecordingEndpoint();
+    await coordinator.openSession(DOCUMENT_URI, "session-a", endpoint);
+
+    await Promise.all([
+      coordinator.receive(fullReplacementEdit(1, 1, "ABCD", "ABCDあいう"), endpoint),
+      coordinator.receive(barrier("save", 2), endpoint),
+      coordinator.receive(barrier("save", 3), endpoint),
+    ]);
+
+    expect(port.calls).toEqual(["replace:ABCDあいう", "save", "save"]);
+    expect(
+      endpoint.messages.filter(
+        (message) => message.kind === "operation-ack" && message.operation === "save",
+      ),
+    ).toHaveLength(2);
+    expect(endpoint.messages.some((message) => message.kind === "resync")).toBe(false);
+  });
+
+  it("uses host authority only for two final compositions, Undo, and Redo", async () => {
+    const port = new FakeDocumentPort("ABCDEF");
+    const coordinator = new DocumentSyncCoordinator(port);
+    const endpoint = new RecordingEndpoint();
+    await coordinator.openSession(DOCUMENT_URI, "session-a", endpoint);
+
+    await coordinator.receive(fullReplacementEdit(1, 1, "ABCDEF", "ABCD"), endpoint);
+    await coordinator.receive(fullReplacementEdit(2, 2, "ABCD", "ABCDあいう"), endpoint);
+    await coordinator.receive(
+      fullReplacementEdit(3, 3, "ABCDあいう", "ABCDあいうかきく"),
+      endpoint,
+    );
+    await coordinator.receive(barrier("undo", 4), endpoint);
+    await coordinator.receive(barrier("redo", 5), endpoint);
+
+    expect(port.calls).toEqual([
+      "replace:ABCD",
+      "replace:ABCDあいう",
+      "replace:ABCDあいうかきく",
+      "undo",
+      "redo",
+    ]);
+    expect(endpoint.messages).toContainEqual(
+      expect.objectContaining({ kind: "document-update", reason: "undo", text: "ABCDあいう" }),
+    );
+    expect(endpoint.messages).toContainEqual(
+      expect.objectContaining({
+        kind: "document-update",
+        reason: "redo",
+        text: "ABCDあいうかきく",
+      }),
+    );
+  });
+
   it("keeps local edit, acknowledgement, and Save identical for plain and supported Markdown syntax", async () => {
     const cases = ["plain text", "# ATX heading", "**strong**", "*emphasis*"] as const;
 

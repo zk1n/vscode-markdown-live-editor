@@ -7,9 +7,10 @@ import {
   Transaction,
   type Extension,
 } from "@codemirror/state";
-import { EditorView, keymap, type KeyBinding, type ViewUpdate } from "@codemirror/view";
+import { EditorView, keymap, type ViewUpdate } from "@codemirror/view";
 
 import { minimalTextReplacement } from "../core/sync/textReplacement.js";
+import { textFingerprint } from "../core/diagnostics/textFingerprint.js";
 import {
   recordsDiagnosticTrace,
   usesBarrierKeymap,
@@ -31,6 +32,7 @@ import {
   type LivePreviewEngine,
 } from "./livePreview/LivePreviewEngine.js";
 import { BarrierInputGate, type BarrierAction } from "./barrierInputGate.js";
+import { createBarrierKeymap } from "./barrierKeymap.js";
 import { CompositionBuffer } from "./compositionBuffer.js";
 import { PendingEditQueue } from "./pendingEditQueue.js";
 
@@ -73,6 +75,7 @@ class MarkdownWebviewController {
   private readonly composition = new CompositionBuffer();
   private compositionGeneration = 0;
   private compositionEndObserved = false;
+  private nextShortcutAttempt = 1;
   private recoveryActive = false;
   private disposed = false;
 
@@ -85,7 +88,15 @@ class MarkdownWebviewController {
     this.pendingEdits = new PendingEditQueue(bootstrap.text);
     this.documentVersion = bootstrap.documentVersion;
     this.nextSequence = bootstrap.nextSequence;
-    this.diagnostics = createDiagnosticTrace(bootstrap.diagnosticMode);
+    this.diagnostics = createDiagnosticTrace(bootstrap.diagnosticMode, (event, details): void => {
+      this.vscode.postMessage({
+        kind: "diagnostic",
+        documentUri: bootstrap.documentUri,
+        sessionId: bootstrap.sessionId,
+        event,
+        details: details as Readonly<Record<string, boolean | number | string>>,
+      });
+    });
     this.livePreview = usesLivePreview(bootstrap.diagnosticMode)
       ? createLivePreviewEngine()
       : undefined;
@@ -125,9 +136,7 @@ class MarkdownWebviewController {
         ),
       );
     }
-    if (recordsDiagnosticTrace(bootstrap.diagnosticMode)) {
-      extensions.push(createDiagnosticDomEventTrace(this.diagnostics));
-    }
+    extensions.push(createDiagnosticDomEventTrace(this.diagnostics));
     this.view = new EditorView({
       state: EditorState.create({
         doc: bootstrap.text,
@@ -188,7 +197,7 @@ class MarkdownWebviewController {
       this.diagnostics.record("sync.composition.buffered", {
         composing: update.view.composing,
         compositionStarted: update.view.compositionStarted,
-        text: textPreview(this.view.state.doc.toString()),
+        textFingerprint: textFingerprint(this.view.state.doc.toString()),
       });
       return;
     }
@@ -198,7 +207,7 @@ class MarkdownWebviewController {
       forwarded: true,
       composing: update.view.composing,
       compositionStarted: update.view.compositionStarted,
-      text: textPreview(this.view.state.doc.toString()),
+      textFingerprint: textFingerprint(this.view.state.doc.toString()),
     });
   }
 
@@ -246,7 +255,7 @@ class MarkdownWebviewController {
     this.compositionEndObserved = false;
     this.diagnostics.record("sync.composition.started", {
       baseDocumentVersion: this.documentVersion,
-      baseText: textPreview(localBase),
+      baseTextFingerprint: textFingerprint(localBase),
       ...this.focusTraceDetails(),
     });
     if (localBase !== this.pendingEdits.authority) {
@@ -305,8 +314,8 @@ class MarkdownWebviewController {
     this.diagnostics.record("sync.composition.commit-ready", {
       baseDocumentVersion: commit.baseDocumentVersion,
       documentVersion: this.documentVersion,
-      baseText: textPreview(commit.baseText),
-      finalText: textPreview(commit.finalText),
+      baseTextFingerprint: textFingerprint(commit.baseText),
+      finalTextFingerprint: textFingerprint(commit.finalText),
       ...this.focusTraceDetails(),
     });
     this.queuePendingEdit(commit.finalText);
@@ -344,8 +353,8 @@ class MarkdownWebviewController {
       documentVersion: this.documentVersion,
       composing: this.view.composing,
       compositionStarted: this.view.compositionStarted,
-      expectedText: textPreview(this.pendingEdits.authority),
-      text: textPreview(text),
+      expectedTextFingerprint: textFingerprint(this.pendingEdits.authority),
+      textFingerprint: textFingerprint(text),
     });
     this.vscode.postMessage(message);
   }
@@ -357,8 +366,16 @@ class MarkdownWebviewController {
 
     // Freeze before queueing the barrier so an edit made after the command
     // cannot overtake it. The host still supplies the authoritative result.
+    const shortcutAttemptId = `shortcut-${String(this.nextShortcutAttempt)}`;
+    this.nextShortcutAttempt += 1;
+    this.diagnostics.record("shortcut.keymap.handled", {
+      action,
+      owner: "webview-keymap",
+      shortcutAttemptId,
+    });
     this.diagnostics.record("sync.barrier.requested", {
       action,
+      shortcutAttemptId,
       composing: this.view.composing,
       compositionStarted: this.view.compositionStarted,
       inFlightSequence: this.inFlightSequence,
@@ -372,6 +389,7 @@ class MarkdownWebviewController {
     this.barriers.enqueue(
       action,
       this.composition.isActive ? this.compositionGeneration : undefined,
+      shortcutAttemptId,
     );
     this.sendPendingEdit();
     this.sendNextBarrier();
@@ -417,7 +435,7 @@ class MarkdownWebviewController {
       operation: message.operation,
       sequence: message.sequence,
       documentVersion: message.documentVersion,
-      text: textPreview(message.text),
+      textFingerprint: textFingerprint(message.text),
     });
     this.documentVersion = message.documentVersion;
     if (message.operation === "edit" && message.sequence === this.inFlightSequence) {
@@ -446,7 +464,7 @@ class MarkdownWebviewController {
     this.diagnostics.record("sync.document.update", {
       reason: message.reason,
       documentVersion: message.documentVersion,
-      text: textPreview(message.text),
+      textFingerprint: textFingerprint(message.text),
       inFlightSequence: this.inFlightSequence,
       pendingLocalChanges: this.pendingEdits.hasPending,
       compositionActive: this.composition.isActive,
@@ -479,8 +497,8 @@ class MarkdownWebviewController {
     }
     this.diagnostics.record("sync.authority.applied", {
       documentVersion: snapshot.documentVersion,
-      before: textPreview(before),
-      after: textPreview(snapshot.text),
+      beforeFingerprint: textFingerprint(before),
+      afterFingerprint: textFingerprint(snapshot.text),
       from: replacement.from,
       to: replacement.to,
       ...this.focusTraceDetails(),
@@ -500,8 +518,8 @@ class MarkdownWebviewController {
   }
 
   private sendNextBarrier(): void {
-    const action = this.barriers.nextAction;
-    if (action === undefined) {
+    const request = this.barriers.nextRequest;
+    if (request === undefined) {
       if (this.barriers.completeIfIdle()) {
         this.diagnostics.record("sync.barrier.completed", this.focusTraceDetails());
       }
@@ -521,15 +539,17 @@ class MarkdownWebviewController {
     this.nextSequence += 1;
     this.barriers.markBarrierSent(sequence);
     const message: WebviewToHostMessage = {
-      kind: action,
+      kind: request.action,
       protocolVersion: PROTOCOL_VERSION,
       documentUri: this.bootstrap.documentUri,
       sessionId: this.bootstrap.sessionId,
       sequence,
+      shortcutAttemptId: request.shortcutAttemptId,
     };
     this.diagnostics.record("sync.barrier.sent", {
-      action,
+      action: request.action,
       sequence,
+      shortcutAttemptId: request.shortcutAttemptId,
       documentVersion: this.documentVersion,
       composing: this.view.composing,
       ...this.focusTraceDetails(),
@@ -569,8 +589,8 @@ class MarkdownWebviewController {
         composing: update.view.composing,
         compositionStarted: update.view.compositionStarted,
         transactionCount: update.transactions.length,
-        before: textPreview(transaction.startState.doc.toString()),
-        after: textPreview(transaction.state.doc.toString()),
+        beforeFingerprint: textFingerprint(transaction.startState.doc.toString()),
+        afterFingerprint: textFingerprint(transaction.state.doc.toString()),
         selection: `${String(selection.from)}:${String(selection.to)}`,
         ...this.focusTraceDetails(),
       });
@@ -602,23 +622,6 @@ class MarkdownWebviewController {
       webviewActive: document.visibilityState === "visible",
     };
   }
-}
-
-function createBarrierKeymap(
-  requestBarrier: (action: "save" | "undo" | "redo") => void,
-): readonly KeyBinding[] {
-  const request =
-    (action: "save" | "undo" | "redo"): (() => boolean) =>
-    () => {
-      requestBarrier(action);
-      return true;
-    };
-  return [
-    { key: "Mod-s", preventDefault: true, run: request("save") },
-    { key: "Mod-z", preventDefault: true, run: request("undo") },
-    { key: "Mod-y", preventDefault: true, run: request("redo") },
-    { key: "Mod-Shift-z", preventDefault: true, run: request("redo") },
-  ];
 }
 
 function fullDocumentReplacement(
@@ -699,14 +702,13 @@ interface DiagnosticTrace {
   record(kind: string, details: Readonly<Record<string, TraceValue>>): void;
 }
 
-const disabledDiagnosticTrace: DiagnosticTrace = {
-  record: (): void => undefined,
-};
-
 class OnPageDiagnosticTrace implements DiagnosticTrace {
   private readonly lines: string[] = [];
 
-  public constructor(private readonly element: HTMLElement) {}
+  public constructor(
+    private readonly element: HTMLElement | undefined,
+    private readonly report: (event: string, details: Readonly<Record<string, TraceValue>>) => void,
+  ) {}
 
   public record(kind: string, details: Readonly<Record<string, TraceValue>>): void {
     const timestamp = String(Date.now());
@@ -717,51 +719,47 @@ class OnPageDiagnosticTrace implements DiagnosticTrace {
     if (this.lines.length > 250) {
       this.lines.shift();
     }
-    this.element.textContent = this.lines.join("\n");
-    this.element.scrollTop = this.element.scrollHeight;
+    if (this.element !== undefined) {
+      this.element.textContent = this.lines.join("\n");
+      this.element.scrollTop = this.element.scrollHeight;
+    }
+    this.report(kind, details);
   }
 }
 
-function createDiagnosticTrace(mode: DiagnosticMode): DiagnosticTrace {
-  if (!recordsDiagnosticTrace(mode)) {
-    return disabledDiagnosticTrace;
-  }
+function createDiagnosticTrace(
+  mode: DiagnosticMode,
+  report: (event: string, details: Readonly<Record<string, TraceValue>>) => void,
+): DiagnosticTrace {
   const element = document.getElementById("editor-diagnostics");
-  if (element === null) {
+  if (recordsDiagnosticTrace(mode) && element === null) {
     throw new Error("Development diagnostic trace output is missing.");
   }
-  return new OnPageDiagnosticTrace(element);
+  return new OnPageDiagnosticTrace(element ?? undefined, report);
 }
 
 function createDiagnosticDomEventTrace(trace: DiagnosticTrace): Extension {
-  return EditorView.domEventHandlers({
-    compositionstart: (event): boolean => {
+  return EditorView.domEventObservers({
+    compositionstart: (event): void => {
       traceCompositionEvent(trace, "compositionstart", event);
-      return false;
     },
-    compositionupdate: (event): boolean => {
+    compositionupdate: (event): void => {
       traceCompositionEvent(trace, "compositionupdate", event);
-      return false;
     },
-    compositionend: (event): boolean => {
+    compositionend: (event): void => {
       traceCompositionEvent(trace, "compositionend", event);
-      return false;
     },
-    beforeinput: (event): boolean => {
+    beforeinput: (event): void => {
       traceInputEvent(trace, "beforeinput", event);
-      return false;
     },
-    input: (event): boolean => {
+    input: (event): void => {
       traceInputEvent(trace, "input", event);
-      return false;
     },
-    keydown: (event): boolean => {
+    keydown: (event): void => {
       traceKeyboardEvent(trace, "keydown", event);
-      return false;
     },
-    keyup: (event): boolean => {
+    keyup: (event): void => {
       traceKeyboardEvent(trace, "keyup", event);
-      return false;
     },
   });
 }
@@ -796,24 +794,39 @@ function traceCompositionEvent(
   kind: string,
   event: CompositionEvent,
 ): void {
-  trace.record(`dom.${kind}`, { data: event.data, isComposing: eventIsComposing(event) });
+  trace.record(`dom.${kind}`, {
+    isComposing: eventIsComposing(event),
+  });
 }
 
 function traceInputEvent(trace: DiagnosticTrace, kind: string, event: InputEvent): void {
   trace.record(`dom.${kind}`, {
-    data: event.data ?? "",
     inputType: event.inputType,
     isComposing: event.isComposing,
   });
 }
 
 function traceKeyboardEvent(trace: DiagnosticTrace, kind: string, event: KeyboardEvent): void {
+  if (!isBarrierShortcutEvent(event)) {
+    return;
+  }
   trace.record(`dom.${kind}`, {
     code: event.code,
+    ctrlKey: event.ctrlKey,
+    defaultPrevented: event.defaultPrevented,
     isComposing: event.isComposing,
     key: event.key,
+    metaKey: event.metaKey,
     repeat: event.repeat,
+    shiftKey: event.shiftKey,
   });
+}
+
+function isBarrierShortcutEvent(event: KeyboardEvent): boolean {
+  if (!event.ctrlKey && !event.metaKey) {
+    return false;
+  }
+  return event.code === "KeyS" || event.code === "KeyZ" || event.code === "KeyY";
 }
 
 function eventIsComposing(event: Event): boolean {
@@ -833,11 +846,6 @@ function messageSummary(value: unknown): Readonly<Record<string, TraceValue>> {
     reason: typeof value["reason"] === "string" ? value["reason"] : undefined,
     sequence: typeof value["sequence"] === "number" ? value["sequence"] : undefined,
   };
-}
-
-function textPreview(text: string): string {
-  const maximumLength = 160;
-  return text.length <= maximumLength ? text : `${text.slice(0, maximumLength)}…`;
 }
 
 const root = document.getElementById("editor-root");

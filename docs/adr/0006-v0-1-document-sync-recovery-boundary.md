@@ -43,6 +43,16 @@ For v0.1:
   host as a best-effort Auto Save barrier. A Save initiated by that same host
   queue bypasses the listener's flush to avoid self-waiting during
   `TextDocument.save()`.
+- For those exact four physical shortcuts, the CodeMirror webview keymap is
+  the semantic owner. A handled binding uses both `preventDefault` and
+  `stopPropagation`: VS Code's webview wrapper may forward trusted keydown
+  events to the workbench even after `preventDefault`, so default prevention
+  alone cannot establish a single owner. This is deliberately limited to the
+  four bindings; unrelated workbench shortcuts continue to bubble normally.
+- The local-only diagnostic ring retains at most 250 metadata-only events.
+  It records operation IDs, versions, queue state, focus/selection offsets,
+  and text length/fingerprint rather than Markdown bodies. It is available via
+  an explicit copy command and does not add a network or telemetry path.
 - When an external update arrives while local work is pending, editing pauses
   and the local text remains visible for recovery rather than being silently
   overwritten.
@@ -65,3 +75,7 @@ The following remain manual/extension-host validation items before release:
 - host command/menu Undo and Redo behavior while the custom editor has focus;
 - Auto Save and forced-save behavior;
 - concurrent external file replacement close to a webview edit.
+
+Synthetic DOM tests prove the CodeMirror propagation boundary but cannot make
+an event trusted to VS Code. Actual OS/VS Code shortcut delivery, menu/command
+paths, and ATOK composition remain separate Human Gate surfaces.

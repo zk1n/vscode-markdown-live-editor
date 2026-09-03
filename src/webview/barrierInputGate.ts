@@ -1,11 +1,16 @@
 export type BarrierAction = "save" | "undo" | "redo";
 
+export interface BarrierRequest {
+  readonly action: BarrierAction;
+  readonly shortcutAttemptId: string;
+}
+
 /**
  * Preserves barrier FIFO without preventing the completion of the composition
  * that was already active when the first barrier was requested.
  */
 export class BarrierInputGate {
-  private readonly queue: BarrierAction[] = [];
+  private readonly queue: BarrierRequest[] = [];
   private inputFrozen = false;
   private inFlightSequence: number | undefined;
   private allowedCompositionGeneration: number | undefined;
@@ -19,6 +24,10 @@ export class BarrierInputGate {
   }
 
   public get nextAction(): BarrierAction | undefined {
+    return this.queue[0]?.action;
+  }
+
+  public get nextRequest(): BarrierRequest | undefined {
     return this.queue[0];
   }
 
@@ -26,12 +35,16 @@ export class BarrierInputGate {
     return this.inFlightSequence;
   }
 
-  public enqueue(action: BarrierAction, activeCompositionGeneration: number | undefined): void {
+  public enqueue(
+    action: BarrierAction,
+    activeCompositionGeneration: number | undefined,
+    shortcutAttemptId = "untraced",
+  ): void {
     if (!this.inputFrozen) {
       this.allowedCompositionGeneration = activeCompositionGeneration;
       this.inputFrozen = true;
     }
-    this.queue.push(action);
+    this.queue.push({ action, shortcutAttemptId });
   }
 
   public acceptsLocalTransaction(activeCompositionGeneration: number | undefined): boolean {

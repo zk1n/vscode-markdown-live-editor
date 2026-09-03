@@ -32,9 +32,9 @@ export interface DocumentPort {
     expectedVersion: number,
     text: string,
   ): Promise<DocumentPortResult>;
-  saveDocument(documentUri: string): Promise<DocumentPortResult>;
-  undoDocument(documentUri: string): Promise<DocumentPortResult>;
-  redoDocument(documentUri: string): Promise<DocumentPortResult>;
+  saveDocument(documentUri: string, shortcutAttemptId?: string): Promise<DocumentPortResult>;
+  undoDocument(documentUri: string, shortcutAttemptId?: string): Promise<DocumentPortResult>;
+  redoDocument(documentUri: string, shortcutAttemptId?: string): Promise<DocumentPortResult>;
 }
 
 export interface WebviewEndpoint {
@@ -139,10 +139,19 @@ export class DocumentSyncCoordinator {
       return;
     }
 
-    this.diagnostics.record("coordinator.receive", messageTrace(decoded.value));
+    const message = decoded.value;
+    if (message.kind === "diagnostic") {
+      const session = this.getSession(message.documentUri, message.sessionId);
+      if (session?.endpoint === endpoint) {
+        this.diagnostics.record(`webview.${message.event}`, message.details);
+      }
+      return;
+    }
 
-    await this.enqueue(decoded.value.documentUri, async (): Promise<void> => {
-      await this.process(decoded.value, endpoint);
+    this.diagnostics.record("coordinator.receive", messageTrace(message));
+
+    await this.enqueue(message.documentUri, async (): Promise<void> => {
+      await this.process(message, endpoint);
     });
   }
 
@@ -172,7 +181,7 @@ export class DocumentSyncCoordinator {
   }
 
   private async process(
-    message: WebviewToHostMessage,
+    message: Exclude<WebviewToHostMessage, { readonly kind: "diagnostic" }>,
     receivedEndpoint: WebviewEndpoint,
   ): Promise<void> {
     const session = this.getSession(message.documentUri, message.sessionId);
@@ -294,23 +303,35 @@ export class DocumentSyncCoordinator {
 
   private async processBarrier(
     session: SessionState,
-    message: Exclude<WebviewToHostMessage, ClientEditMessage>,
+    message: Exclude<WebviewToHostMessage, ClientEditMessage | { readonly kind: "diagnostic" }>,
   ): Promise<void> {
     this.diagnostics.record("coordinator.barrier", {
+      documentUri: message.documentUri,
       operation: message.kind,
       sequence: message.sequence,
+      sessionId: message.sessionId,
+      shortcutAttemptId: message.shortcutAttemptId ?? "untraced",
     });
     let portResult: DocumentPortResult;
     try {
       switch (message.kind) {
         case "save":
-          portResult = await this.documentPort.saveDocument(message.documentUri);
+          portResult = await this.documentPort.saveDocument(
+            message.documentUri,
+            message.shortcutAttemptId,
+          );
           break;
         case "undo":
-          portResult = await this.documentPort.undoDocument(message.documentUri);
+          portResult = await this.documentPort.undoDocument(
+            message.documentUri,
+            message.shortcutAttemptId,
+          );
           break;
         case "redo":
-          portResult = await this.documentPort.redoDocument(message.documentUri);
+          portResult = await this.documentPort.redoDocument(
+            message.documentUri,
+            message.shortcutAttemptId,
+          );
           break;
       }
     } catch (error: unknown) {
@@ -361,7 +382,7 @@ export class DocumentSyncCoordinator {
 
   private acknowledge(
     session: SessionState,
-    message: WebviewToHostMessage,
+    message: Exclude<WebviewToHostMessage, { readonly kind: "diagnostic" }>,
     snapshot: DocumentSnapshot,
   ): void {
     this.diagnostics.record("coordinator.ack", {
@@ -456,10 +477,13 @@ export class DocumentSyncCoordinator {
   }
 }
 
-function messageTrace(message: WebviewToHostMessage): Readonly<Record<string, number | string>> {
+function messageTrace(
+  message: Exclude<WebviewToHostMessage, { readonly kind: "diagnostic" }>,
+): Readonly<Record<string, number | string>> {
   return {
     documentVersion: message.kind === "edit" ? message.documentVersion : "",
     kind: message.kind,
     sequence: message.sequence,
+    shortcutAttemptId: message.kind === "edit" ? "" : (message.shortcutAttemptId ?? "untraced"),
   };
 }

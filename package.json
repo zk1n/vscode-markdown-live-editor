@@ -41,6 +41,10 @@
       {
         "command": "vscodeMarkdownLiveEditor.showProjectInfo",
         "title": "Markdown Live Editor: Show Project Info"
+      },
+      {
+        "command": "vscodeMarkdownLiveEditor.copyDiagnostics",
+        "title": "Markdown Live Editor: Copy Diagnostic Metadata"
       }
     ],
     "customEditors": [
@@ -78,12 +82,13 @@
   },
   "devDependencies": {
     "@eslint/js": "9.39.5",
-    "@types/node": "22.20.1",
+    "@types/node": "24.13.3",
     "@types/vscode": "1.120.0",
     "@vscode/test-electron": "3.1.0",
     "esbuild": "0.28.2",
     "eslint": "9.39.5",
     "globals": "17.11.0",
+    "happy-dom": "20.13.0",
     "prettier": "3.9.6",
     "typescript": "6.0.3",
     "typescript-eslint": "8.69.0",

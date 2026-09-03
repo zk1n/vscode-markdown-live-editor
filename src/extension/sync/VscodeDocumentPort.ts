@@ -2,6 +2,7 @@ import * as vscode from "vscode";
 import { TextDecoder } from "node:util";
 
 import { disabledDiagnosticLog, type DiagnosticLog } from "../../core/diagnostics/diagnosticLog.js";
+import { textFingerprint } from "../../core/diagnostics/textFingerprint.js";
 import type {
   DocumentPort,
   DocumentPortResult,
@@ -15,6 +16,8 @@ import type {
 export class VscodeDocumentPort implements DocumentPort {
   private readonly savesInProgress = new Set<string>();
   private readonly replacementsInProgress = new Map<string, PendingReplacement>();
+  private readonly historyInProgress = new Map<string, string>();
+  private nextHistoryInvocation = 1;
 
   public constructor(private readonly diagnostics: DiagnosticLog = disabledDiagnosticLog) {}
 
@@ -30,21 +33,27 @@ export class VscodeDocumentPort implements DocumentPort {
   public classifyDocumentChange(event: vscode.TextDocumentChangeEvent): "own" | "external" {
     const document = event.document;
     const pending = this.replacementsInProgress.get(document.uri.toString());
+    const historyInvocationId = this.historyInProgress.get(document.uri.toString());
     const change = event.contentChanges.length === 1 ? event.contentChanges[0] : undefined;
+    const versionMatches =
+      pending !== undefined && document.version === pending.expectedVersion + 1;
+    const targetMatches = pending?.targetText === toProtocolText(document.getText());
+    const replacementMatches =
+      change !== undefined && toProtocolText(change.text) === pending?.targetText;
     const classification =
-      pending !== undefined &&
-      document.version === pending.expectedVersion + 1 &&
-      toProtocolText(document.getText()) === pending.targetText &&
-      change !== undefined &&
-      toProtocolText(change.text) === pending.targetText
+      pending !== undefined && versionMatches && targetMatches && replacementMatches
         ? "own"
         : "external";
     this.diagnostics.record("port.document-change.classified", {
       classification,
       contentChangeCount: event.contentChanges.length,
+      documentUri: document.uri.toString(),
       documentVersion: document.version,
+      historyInvocationId: historyInvocationId ?? "",
       pendingExpectedVersion: pending?.expectedVersion ?? -1,
-      pendingTargetMatches: pending?.targetText === toProtocolText(document.getText()),
+      replacementMatches,
+      targetMatches,
+      versionMatches,
     });
     return classification;
   }
@@ -112,11 +121,16 @@ export class VscodeDocumentPort implements DocumentPort {
       : { kind: "rejected", snapshot, note: "VS Code rejected the document edit." };
   }
 
-  public async saveDocument(documentUri: string): Promise<DocumentPortResult> {
+  public async saveDocument(
+    documentUri: string,
+    shortcutAttemptId = "untraced",
+  ): Promise<DocumentPortResult> {
     const document = this.requireDocument(documentUri);
     this.diagnostics.record("port.save.requested", {
+      documentUri,
       dirty: document.isDirty,
       documentVersion: document.version,
+      shortcutAttemptId,
     });
     this.savesInProgress.add(documentUri);
     try {
@@ -127,10 +141,13 @@ export class VscodeDocumentPort implements DocumentPort {
       const diskMatches = diskText === snapshot.text;
       this.diagnostics.record("port.save.result", {
         authorityTextLength: snapshot.text.length,
+        authorityTextFingerprint: textFingerprint(snapshot.text),
         clean,
         diskTextLength: diskText.length,
+        diskTextFingerprint: textFingerprint(diskText),
         diskMatches,
         dirty: document.isDirty,
+        documentUri,
         documentVersion: snapshot.documentVersion,
         saved,
         textLength: snapshot.text.length,
@@ -152,35 +169,63 @@ export class VscodeDocumentPort implements DocumentPort {
     }
   }
 
-  public async undoDocument(documentUri: string): Promise<DocumentPortResult> {
-    return this.executeHistoryCommand(documentUri, "undo");
+  public async undoDocument(
+    documentUri: string,
+    shortcutAttemptId?: string,
+  ): Promise<DocumentPortResult> {
+    return this.executeHistoryCommand(documentUri, "undo", shortcutAttemptId);
   }
 
-  public async redoDocument(documentUri: string): Promise<DocumentPortResult> {
-    return this.executeHistoryCommand(documentUri, "redo");
+  public async redoDocument(
+    documentUri: string,
+    shortcutAttemptId?: string,
+  ): Promise<DocumentPortResult> {
+    return this.executeHistoryCommand(documentUri, "redo", shortcutAttemptId);
   }
 
   private async executeHistoryCommand(
     documentUri: string,
     command: "undo" | "redo",
+    shortcutAttemptId = "untraced",
   ): Promise<DocumentPortResult> {
     const document = this.requireDocument(documentUri);
+    const commandInvocationId = `history-${String(this.nextHistoryInvocation)}`;
+    this.nextHistoryInvocation += 1;
+    const before = this.snapshot(document);
+    const activeBefore = isActiveCustomEditorDocument(documentUri);
     this.diagnostics.record("port.history.requested", {
+      activeCustomEditor: activeBefore,
       command,
+      commandInvocationId,
       dirty: document.isDirty,
-      documentVersion: document.version,
+      documentUri,
+      beforeDocumentVersion: before.documentVersion,
+      textFingerprint: textFingerprint(before.text),
+      textLength: before.text.length,
+      shortcutAttemptId,
     });
-    if (!isActiveCustomEditorDocument(documentUri)) {
+    if (!activeBefore) {
       return this.rejected(
         document,
         "Undo/Redo was not executed because this custom editor document is not active.",
       );
     }
-    await vscode.commands.executeCommand(command);
-    const snapshot = await this.readDocument(documentUri);
+    this.historyInProgress.set(documentUri, commandInvocationId);
+    let snapshot: DocumentSnapshot;
+    try {
+      await vscode.commands.executeCommand(command);
+      snapshot = await this.readDocument(documentUri);
+    } finally {
+      this.historyInProgress.delete(documentUri);
+    }
     this.diagnostics.record("port.history.result", {
+      activeCustomEditor: isActiveCustomEditorDocument(documentUri),
       command,
-      documentVersion: snapshot.documentVersion,
+      commandInvocationId,
+      dirty: document.isDirty,
+      documentUri,
+      afterDocumentVersion: snapshot.documentVersion,
+      textFingerprint: textFingerprint(snapshot.text),
       textLength: snapshot.text.length,
     });
     return { kind: "applied", snapshot };

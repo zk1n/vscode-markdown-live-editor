@@ -51,6 +51,10 @@ v0.1の既知制約は、ATOKを含むhostが隣接compositionのauthoritative e
 caret、focus、入力継続、Redoの正しさを優先する。
 
 Windows ATOKの手動結果は必須であり、Microsoft IMEの結果で代替しない。
+Save / Undo / Redo shortcutのsingle-owner証跡もADR 0006に従って記録する。
+hostが返すUndo snapshotが複数のfinal compositionを一括で戻すことをLevel Bの
+host groupingとして扱えるのは、webview keymap / barrierとhost history commandが
+それぞれ一回であるtraceが得られた場合だけである。
 
 ## Implementation notes
 

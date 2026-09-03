@@ -4,11 +4,7 @@ import {
   decodeDiagnosticMode,
   recordsDiagnosticTrace,
 } from "../core/diagnostics/diagnosticMode.js";
-import {
-  disabledDiagnosticLog,
-  type DiagnosticLog,
-  type DiagnosticLogValue,
-} from "../core/diagnostics/diagnosticLog.js";
+import { BoundedDiagnosticLog } from "../core/diagnostics/diagnosticLog.js";
 import { PROJECT_IDENTITY } from "../core/projectIdentity.js";
 import { DocumentSyncCoordinator } from "../core/sync/documentSyncCoordinator.js";
 import { MarkdownEditorProvider } from "./editor/MarkdownEditorProvider.js";
@@ -35,6 +31,15 @@ export function activate(context: vscode.ExtensionContext): void {
     async (): Promise<void> => {
       await vscode.window.showInformationMessage(
         `${PROJECT_IDENTITY.displayName}: project scaffold is ready.`,
+      );
+    },
+  );
+  const copyDiagnostics = vscode.commands.registerCommand(
+    "vscodeMarkdownLiveEditor.copyDiagnostics",
+    async (): Promise<void> => {
+      await vscode.env.clipboard.writeText(diagnostics.copyText());
+      await vscode.window.showInformationMessage(
+        "Markdown Live Editor diagnostic metadata copied.",
       );
     },
   );
@@ -67,6 +72,10 @@ export function activate(context: vscode.ExtensionContext): void {
       return;
     }
     if (documentPort.isSaving(event.document.uri.toString())) {
+      diagnostics.record("extension.will-save", {
+        documentVersion: event.document.version,
+        skippedBecausePortSave: true,
+      });
       return;
     }
     diagnostics.record("extension.will-save", {
@@ -78,6 +87,7 @@ export function activate(context: vscode.ExtensionContext): void {
 
   context.subscriptions.push(
     disposable,
+    copyDiagnostics,
     customEditorRegistration,
     documentChangeRegistration,
     saveBarrierRegistration,
@@ -91,20 +101,12 @@ export function deactivate(): void {
 function createDiagnostics(
   mode: ReturnType<typeof decodeDiagnosticMode>,
   context: vscode.ExtensionContext,
-): DiagnosticLog {
-  if (!recordsDiagnosticTrace(mode)) {
-    return disabledDiagnosticLog;
+): BoundedDiagnosticLog {
+  const output = recordsDiagnosticTrace(mode)
+    ? vscode.window.createOutputChannel("Markdown Live Editor ATOK Diagnostics")
+    : undefined;
+  if (output !== undefined) {
+    context.subscriptions.push(output);
   }
-  const output = vscode.window.createOutputChannel("Markdown Live Editor ATOK Diagnostics");
-  context.subscriptions.push(output);
-  return {
-    record: (kind: string, details: Readonly<Record<string, DiagnosticLogValue>>): void => {
-      const serialized = Object.entries(details)
-        .map(([key, value]): string => `${key}=${JSON.stringify(value)}`)
-        .join(" ");
-      output.appendLine(
-        `${String(Date.now())} ${kind}${serialized === "" ? "" : ` ${serialized}`}`,
-      );
-    },
-  };
+  return new BoundedDiagnosticLog(250, (line): void => output?.appendLine(line));
 }

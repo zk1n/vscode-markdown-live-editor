@@ -7,6 +7,39 @@ import {
 } from "../../src/protocol/messages.js";
 
 describe("protocol decoding", () => {
+  it("accepts metadata-only diagnostic messages without a client sequence", () => {
+    const decoded = decodeWebviewToHostMessage({
+      kind: "diagnostic",
+      documentUri: "file:///workspace/note.md",
+      sessionId: "session-a",
+      event: "shortcut.keymap.handled",
+      details: { action: "save", repeat: false },
+    });
+
+    expect(decoded).toEqual({
+      ok: true,
+      value: {
+        kind: "diagnostic",
+        documentUri: "file:///workspace/note.md",
+        sessionId: "session-a",
+        event: "shortcut.keymap.handled",
+        details: { action: "save", repeat: false },
+      },
+    });
+  });
+
+  it("rejects diagnostic values that exceed bounded transport limits", () => {
+    const decoded = decodeWebviewToHostMessage({
+      kind: "diagnostic",
+      documentUri: "file:///workspace/note.md",
+      sessionId: "session-a",
+      event: "shortcut.keymap.handled",
+      details: { note: "x".repeat(161) },
+    });
+
+    expect(decoded).toEqual({ ok: false, error: "Diagnostic detail is invalid." });
+  });
+
   it("decodes a complete edit operation from unknown data", () => {
     const decoded = decodeWebviewToHostMessage({
       kind: "edit",
