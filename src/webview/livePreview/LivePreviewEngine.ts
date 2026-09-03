@@ -88,15 +88,19 @@ const livePreviewTheme = EditorView.baseTheme({
   ".cm-live-preview-task-marker": {
     color: "transparent",
     display: "inline-block",
-    fontSize: "0",
     position: "relative",
     width: "1em",
+    // Keep the source span in the same font metrics as its surrounding line.
+    // Its text is transparent, but its normal line box gives the overlaid
+    // pseudo marker a stable baseline and inline width.
+    verticalAlign: "baseline",
+    whiteSpace: "nowrap",
   },
   ".cm-live-preview-task-marker::before": {
     color: "var(--vscode-checkbox-foreground, var(--vscode-editor-foreground))",
-    fontSize: "1rem",
+    fontSize: "inherit",
     left: "0",
-    lineHeight: "1",
+    lineHeight: "inherit",
     position: "absolute",
     top: "0",
   },
