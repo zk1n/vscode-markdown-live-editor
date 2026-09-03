@@ -23,6 +23,7 @@ class FakeDocumentPort implements DocumentPort {
 
   public readonly calls: string[] = [];
   public replacementTextOverride: string | undefined;
+  public rejectSave = false;
 
   public constructor(initialText: string) {
     this.history = [initialText];
@@ -56,6 +57,13 @@ class FakeDocumentPort implements DocumentPort {
 
   public saveDocument(documentUri: string): Promise<DocumentPortResult> {
     this.calls.push("save");
+    if (this.rejectSave) {
+      return Promise.resolve({
+        kind: "rejected",
+        snapshot: this.snapshot(documentUri),
+        note: "The dirty document was not saved.",
+      });
+    }
     return Promise.resolve({ kind: "applied", snapshot: this.snapshot(documentUri) });
   }
 
@@ -139,6 +147,44 @@ function edit(
   };
 }
 
+function fullReplacementEdit(
+  sequence: number,
+  documentVersion: number,
+  expectedText: string,
+  text: string,
+): ClientEditMessage {
+  return {
+    kind: "edit",
+    protocolVersion: PROTOCOL_VERSION,
+    documentUri: DOCUMENT_URI,
+    sessionId: "session-a",
+    sequence,
+    documentVersion,
+    changes: [
+      {
+        range: {
+          start: { line: 0, character: 0 },
+          end: positionAt(expectedText, expectedText.length),
+        },
+        expectedText,
+        text,
+      },
+    ],
+  };
+}
+
+function positionAt(
+  text: string,
+  offset: number,
+): { readonly line: number; readonly character: number } {
+  const prefix = text.slice(0, offset);
+  const lastNewline = prefix.lastIndexOf("\n");
+  return {
+    line: lastNewline === -1 ? 0 : prefix.split("\n").length - 1,
+    character: offset - lastNewline - 1,
+  };
+}
+
 function barrier(
   kind: "save" | "undo" | "redo",
   sequence: number,
@@ -159,6 +205,53 @@ function barrier(
 }
 
 describe("DocumentSyncCoordinator", () => {
+  it("acknowledges valid first insertions at middle, beginning, EOF, and an empty document", async () => {
+    const cases = [
+      { initial: "abc", expected: "aXbc" },
+      { initial: "abc", expected: "Xabc" },
+      { initial: "abc", expected: "abcX" },
+      { initial: "", expected: "X" },
+      { initial: "日本😀", expected: "日本X😀" },
+    ] as const;
+
+    for (const testCase of cases) {
+      const port = new FakeDocumentPort(testCase.initial);
+      const coordinator = new DocumentSyncCoordinator(port);
+      const endpoint = new RecordingEndpoint();
+      await coordinator.openSession(DOCUMENT_URI, "session-a", endpoint);
+
+      await coordinator.receive(
+        fullReplacementEdit(1, 1, testCase.initial, testCase.expected),
+        endpoint,
+      );
+
+      expect(endpoint.messages.some((message) => message.kind === "resync")).toBe(false);
+      expect(endpoint.messages).toContainEqual(
+        expect.objectContaining({
+          kind: "operation-ack",
+          operation: "edit",
+          sequence: 1,
+          text: testCase.expected,
+        }),
+      );
+    }
+  });
+
+  it("keeps sequential full-document edits FIFO and authoritative", async () => {
+    const port = new FakeDocumentPort("");
+    const coordinator = new DocumentSyncCoordinator(port);
+    const endpoint = new RecordingEndpoint();
+    await coordinator.openSession(DOCUMENT_URI, "session-a", endpoint);
+
+    await coordinator.receive(fullReplacementEdit(1, 1, "", "A"), endpoint);
+    await coordinator.receive(fullReplacementEdit(2, 2, "A", "A日"), endpoint);
+    await coordinator.receive(fullReplacementEdit(3, 3, "A日", "A日😀"), endpoint);
+
+    expect(port.calls).toEqual(["replace:A", "replace:A日", "replace:A日😀"]);
+    expect(endpoint.messages.filter((message) => message.kind === "operation-ack")).toHaveLength(3);
+    expect(endpoint.messages.some((message) => message.kind === "resync")).toBe(false);
+  });
+
   it("serializes queued edits, acknowledges each one, and broadcasts authority", async () => {
     const port = new FakeDocumentPort("");
     const coordinator = new DocumentSyncCoordinator(port);
@@ -257,6 +350,134 @@ describe("DocumentSyncCoordinator", () => {
       kind: "document-update",
       reason: "undo",
       text: "",
+    });
+  });
+
+  it("keeps a composition-final edit and repeated Save barriers FIFO", async () => {
+    const port = new FakeDocumentPort("ABCD");
+    const coordinator = new DocumentSyncCoordinator(port);
+    const endpoint = new RecordingEndpoint();
+    await coordinator.openSession(DOCUMENT_URI, "session-a", endpoint);
+
+    await Promise.all([
+      coordinator.receive(fullReplacementEdit(1, 1, "ABCD", "ABCDあいう"), endpoint),
+      coordinator.receive(barrier("save", 2), endpoint),
+      coordinator.receive(barrier("save", 3), endpoint),
+    ]);
+
+    expect(port.calls).toEqual(["replace:ABCDあいう", "save", "save"]);
+    expect(
+      endpoint.messages.filter(
+        (message) => message.kind === "operation-ack" && message.operation === "save",
+      ),
+    ).toHaveLength(2);
+    expect(endpoint.messages.some((message) => message.kind === "resync")).toBe(false);
+  });
+
+  it("uses host authority only for two final compositions, Undo, and Redo", async () => {
+    const port = new FakeDocumentPort("ABCDEF");
+    const coordinator = new DocumentSyncCoordinator(port);
+    const endpoint = new RecordingEndpoint();
+    await coordinator.openSession(DOCUMENT_URI, "session-a", endpoint);
+
+    await coordinator.receive(fullReplacementEdit(1, 1, "ABCDEF", "ABCD"), endpoint);
+    await coordinator.receive(fullReplacementEdit(2, 2, "ABCD", "ABCDあいう"), endpoint);
+    await coordinator.receive(
+      fullReplacementEdit(3, 3, "ABCDあいう", "ABCDあいうかきく"),
+      endpoint,
+    );
+    await coordinator.receive(barrier("undo", 4), endpoint);
+    await coordinator.receive(barrier("redo", 5), endpoint);
+
+    expect(port.calls).toEqual([
+      "replace:ABCD",
+      "replace:ABCDあいう",
+      "replace:ABCDあいうかきく",
+      "undo",
+      "redo",
+    ]);
+    expect(endpoint.messages).toContainEqual(
+      expect.objectContaining({ kind: "document-update", reason: "undo", text: "ABCDあいう" }),
+    );
+    expect(endpoint.messages).toContainEqual(
+      expect.objectContaining({
+        kind: "document-update",
+        reason: "redo",
+        text: "ABCDあいうかきく",
+      }),
+    );
+  });
+
+  it("keeps local edit, acknowledgement, and Save identical for plain and supported Markdown syntax", async () => {
+    const cases = ["plain text", "# ATX heading", "**strong**", "*emphasis*"] as const;
+
+    for (const text of cases) {
+      const port = new FakeDocumentPort("");
+      const coordinator = new DocumentSyncCoordinator(port);
+      const endpoint = new RecordingEndpoint();
+      await coordinator.openSession(DOCUMENT_URI, "session-a", endpoint);
+
+      await coordinator.receive(fullReplacementEdit(1, 1, "", text), endpoint);
+      await coordinator.receive(barrier("save", 2), endpoint);
+
+      expect(port.calls).toEqual([`replace:${text}`, "save"]);
+      expect(endpoint.messages).toContainEqual(
+        expect.objectContaining({
+          kind: "operation-ack",
+          operation: "edit",
+          sequence: 1,
+          text,
+        }),
+      );
+      expect(endpoint.messages).toContainEqual(
+        expect.objectContaining({
+          kind: "operation-ack",
+          operation: "save",
+          sequence: 2,
+          text,
+        }),
+      );
+      expect(endpoint.messages.some((message) => message.kind === "resync")).toBe(false);
+    }
+  });
+
+  it("applies only the authoritative Undo result and restores the same text on Redo", async () => {
+    const port = new FakeDocumentPort("あいう");
+    const coordinator = new DocumentSyncCoordinator(port);
+    const endpoint = new RecordingEndpoint();
+    await coordinator.openSession(DOCUMENT_URI, "session-a", endpoint);
+
+    await coordinator.receive(fullReplacementEdit(1, 1, "あいう", "あいうかきく"), endpoint);
+    await coordinator.receive(barrier("undo", 2), endpoint);
+    await coordinator.receive(barrier("redo", 3), endpoint);
+
+    const acknowledgements = endpoint.messages.filter(
+      (message): message is Extract<typeof message, { readonly kind: "operation-ack" }> =>
+        message.kind === "operation-ack",
+    );
+    expect(acknowledgements.map(({ operation, text }) => ({ operation, text }))).toEqual([
+      { operation: "edit", text: "あいうかきく" },
+      { operation: "undo", text: "あいう" },
+      { operation: "redo", text: "あいうかきく" },
+    ]);
+    expect(port.calls).toEqual(["replace:あいうかきく", "undo", "redo"]);
+  });
+
+  it("enters recovery when a Save barrier reports an actual rejection", async () => {
+    const port = new FakeDocumentPort("unsaved");
+    port.rejectSave = true;
+    const coordinator = new DocumentSyncCoordinator(port);
+    const endpoint = new RecordingEndpoint();
+    await coordinator.openSession(DOCUMENT_URI, "session-a", endpoint);
+
+    await coordinator.receive(barrier("save", 1), endpoint);
+
+    expect(port.calls).toEqual(["save"]);
+    expect(endpoint.messages.at(-1)).toMatchObject({
+      kind: "resync",
+      reason: "port-rejected",
+      text: "unsaved",
+      nextSequence: 2,
     });
   });
 

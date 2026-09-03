@@ -20,10 +20,31 @@
     "onCustomEditor:vscodeMarkdownLiveEditor.editor"
   ],
   "contributes": {
+    "configuration": {
+      "title": "Markdown Live Editor",
+      "properties": {
+        "vscodeMarkdownLiveEditor.developmentDiagnosticMode": {
+          "type": "string",
+          "default": "off",
+          "enum": [
+            "off",
+            "raw-cm6",
+            "markdown",
+            "sync",
+            "preview"
+          ],
+          "markdownDescription": "Development-only ATOK layer-isolation mode. `raw-cm6` is local CodeMirror only; `markdown` adds the Markdown language; `sync` adds project document sync; `preview` adds live preview and the custom Save/Undo/Redo keymap. Diagnostic modes never constitute a release configuration."
+        }
+      }
+    },
     "commands": [
       {
         "command": "vscodeMarkdownLiveEditor.showProjectInfo",
         "title": "Markdown Live Editor: Show Project Info"
+      },
+      {
+        "command": "vscodeMarkdownLiveEditor.copyDiagnostics",
+        "title": "Markdown Live Editor: Copy Diagnostic Metadata"
       }
     ],
     "customEditors": [
@@ -45,10 +66,11 @@
     "watch": "node ./scripts/build.mjs --watch",
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
-    "format": "prettier --write .",
-    "format:check": "prettier --check .",
+    "format": "prettier --write CHANGELOG.md CONTRIBUTING.md README.md SECURITY.md package.json tsconfig.json vitest.config.ts eslint.config.mjs src tests scripts docs .vscode",
+    "format:check": "prettier --check CHANGELOG.md CONTRIBUTING.md README.md SECURITY.md package.json tsconfig.json vitest.config.ts eslint.config.mjs src tests scripts docs .vscode",
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:extension-host": "npm run build && node ./scripts/run-extension-host-tests.mjs",
     "check": "npm run typecheck && npm run lint && npm run test && npm run build && npm run format:check"
   },
   "dependencies": {
@@ -60,12 +82,13 @@
   },
   "devDependencies": {
     "@eslint/js": "9.39.5",
-    "@types/node": "22.20.1",
+    "@types/node": "24.13.3",
     "@types/vscode": "1.120.0",
     "@vscode/test-electron": "3.1.0",
     "esbuild": "0.28.2",
     "eslint": "9.39.5",
     "globals": "17.11.0",
+    "happy-dom": "20.13.0",
     "prettier": "3.9.6",
     "typescript": "6.0.3",
     "typescript-eslint": "8.69.0",

@@ -25,10 +25,34 @@ const webviewContext = await esbuild.context({
   logLevel: "info",
 });
 
+const extensionHostTestContext = await esbuild.context({
+  entryPoints: ["tests/extension-host/index.ts"],
+  bundle: true,
+  outfile: "dist/extension-host/index.cjs",
+  external: ["vscode"],
+  format: "cjs",
+  platform: "node",
+  target: "node22",
+  sourcemap: true,
+  logLevel: "info",
+});
+
 if (watch) {
-  await Promise.all([extensionContext.watch(), webviewContext.watch()]);
+  await Promise.all([
+    extensionContext.watch(),
+    webviewContext.watch(),
+    extensionHostTestContext.watch(),
+  ]);
   console.log("Watching extension bundle...");
 } else {
-  await Promise.all([extensionContext.rebuild(), webviewContext.rebuild()]);
-  await Promise.all([extensionContext.dispose(), webviewContext.dispose()]);
+  await Promise.all([
+    extensionContext.rebuild(),
+    webviewContext.rebuild(),
+    extensionHostTestContext.rebuild(),
+  ]);
+  await Promise.all([
+    extensionContext.dispose(),
+    webviewContext.dispose(),
+    extensionHostTestContext.dispose(),
+  ]);
 }

@@ -35,9 +35,19 @@ export interface ClientEditMessage extends ClientOperationBase {
 
 export interface ClientBarrierMessage extends ClientOperationBase {
   readonly kind: "save" | "undo" | "redo";
+  readonly shortcutAttemptId?: string;
 }
 
-export type WebviewToHostMessage = ClientEditMessage | ClientBarrierMessage;
+export interface ClientDiagnosticMessage {
+  readonly kind: "diagnostic";
+  readonly documentUri: string;
+  readonly sessionId: string;
+  readonly event: string;
+  readonly details: Readonly<Record<string, boolean | number | string>>;
+}
+
+export type WebviewToHostMessage =
+  ClientEditMessage | ClientBarrierMessage | ClientDiagnosticMessage;
 
 export interface DocumentSnapshotMessage {
   readonly documentUri: string;
@@ -47,7 +57,7 @@ export interface DocumentSnapshotMessage {
 
 export interface OperationAcknowledgement extends DocumentSnapshotMessage {
   readonly kind: "operation-ack";
-  readonly operation: WebviewToHostMessage["kind"];
+  readonly operation: ClientEditMessage["kind"] | ClientBarrierMessage["kind"];
   readonly sequence: number;
 }
 
@@ -215,11 +225,45 @@ export function decodeWebviewToHostMessage(
   }
 
   const base = decodeOperationBase(value);
+  const kind = value["kind"];
+  if (kind === "diagnostic") {
+    const documentUri = readNonEmptyString(value["documentUri"], "documentUri");
+    const sessionId = readNonEmptyString(value["sessionId"], "sessionId");
+    if (!documentUri.ok || !sessionId.ok || typeof value["event"] !== "string") {
+      return { ok: false, error: "Diagnostic message is invalid." };
+    }
+    if (value["event"].length > 96 || !isRecord(value["details"])) {
+      return { ok: false, error: "Diagnostic details must be an object." };
+    }
+    const details: Record<string, boolean | number | string> = {};
+    const entries = Object.entries(value["details"]);
+    if (entries.length > 32) {
+      return { ok: false, error: "Diagnostic details exceed the bounded limit." };
+    }
+    for (const [key, detail] of entries) {
+      if (
+        key.length > 64 ||
+        (typeof detail !== "boolean" && typeof detail !== "number" && typeof detail !== "string") ||
+        (typeof detail === "string" && detail.length > 160)
+      ) {
+        return { ok: false, error: "Diagnostic detail is invalid." };
+      }
+      details[key] = detail;
+    }
+    return {
+      ok: true,
+      value: {
+        kind,
+        documentUri: documentUri.value,
+        sessionId: sessionId.value,
+        event: value["event"],
+        details,
+      },
+    };
+  }
   if (!base.ok) {
     return base;
   }
-
-  const kind = value["kind"];
   if (kind === "edit") {
     const documentVersion = readNonNegativeInteger(value["documentVersion"], "documentVersion");
     if (!documentVersion.ok) {
@@ -252,9 +296,19 @@ export function decodeWebviewToHostMessage(
   }
 
   if (kind === "save" || kind === "undo" || kind === "redo") {
+    const shortcutAttemptId = value["shortcutAttemptId"];
+    if (
+      (shortcutAttemptId !== undefined && typeof shortcutAttemptId !== "string") ||
+      (typeof shortcutAttemptId === "string" && shortcutAttemptId.length > 96)
+    ) {
+      return { ok: false, error: "shortcutAttemptId must be a string when present." };
+    }
     return {
       ok: true,
-      value: { kind, protocolVersion: PROTOCOL_VERSION, ...base.value },
+      value:
+        shortcutAttemptId === undefined
+          ? { kind, protocolVersion: PROTOCOL_VERSION, ...base.value }
+          : { kind, protocolVersion: PROTOCOL_VERSION, ...base.value, shortcutAttemptId },
     };
   }
 

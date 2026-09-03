@@ -1,5 +1,10 @@
 import * as vscode from "vscode";
 
+import {
+  decodeDiagnosticMode,
+  recordsDiagnosticTrace,
+} from "../core/diagnostics/diagnosticMode.js";
+import { BoundedDiagnosticLog } from "../core/diagnostics/diagnosticLog.js";
 import { PROJECT_IDENTITY } from "../core/projectIdentity.js";
 import { DocumentSyncCoordinator } from "../core/sync/documentSyncCoordinator.js";
 import { MarkdownEditorProvider } from "./editor/MarkdownEditorProvider.js";
@@ -8,9 +13,16 @@ import { VscodeDocumentPort } from "./sync/VscodeDocumentPort.js";
 const MARKDOWN_EDITOR_VIEW_TYPE = "vscodeMarkdownLiveEditor.editor";
 
 export function activate(context: vscode.ExtensionContext): void {
-  const documentPort = new VscodeDocumentPort();
-  const coordinator = new DocumentSyncCoordinator(documentPort);
+  const diagnosticMode = decodeDiagnosticMode(
+    vscode.workspace
+      .getConfiguration("vscodeMarkdownLiveEditor")
+      .get<unknown>("developmentDiagnosticMode"),
+  );
+  const diagnostics = createDiagnostics(diagnosticMode, context);
+  const documentPort = new VscodeDocumentPort(diagnostics);
+  const coordinator = new DocumentSyncCoordinator(documentPort, diagnostics);
   const editorProvider = new MarkdownEditorProvider(coordinator, {
+    diagnosticMode,
     webviewScriptPath: vscode.Uri.joinPath(context.extensionUri, "dist", "webview.js"),
   });
 
@@ -19,6 +31,15 @@ export function activate(context: vscode.ExtensionContext): void {
     async (): Promise<void> => {
       await vscode.window.showInformationMessage(
         `${PROJECT_IDENTITY.displayName}: project scaffold is ready.`,
+      );
+    },
+  );
+  const copyDiagnostics = vscode.commands.registerCommand(
+    "vscodeMarkdownLiveEditor.copyDiagnostics",
+    async (): Promise<void> => {
+      await vscode.env.clipboard.writeText(diagnostics.copyText());
+      await vscode.window.showInformationMessage(
+        "Markdown Live Editor diagnostic metadata copied.",
       );
     },
   );
@@ -33,6 +54,16 @@ export function activate(context: vscode.ExtensionContext): void {
     if (event.document.languageId !== "markdown") {
       return;
     }
+    const changeClassification = documentPort.classifyDocumentChange(event);
+    diagnostics.record("extension.document.changed", {
+      classification: changeClassification,
+      dirty: event.document.isDirty,
+      documentVersion: event.document.version,
+      textLength: event.document.getText().length,
+    });
+    if (changeClassification === "own") {
+      return;
+    }
     void coordinator.publishExternalChange(event.document.uri.toString());
   });
 
@@ -41,13 +72,22 @@ export function activate(context: vscode.ExtensionContext): void {
       return;
     }
     if (documentPort.isSaving(event.document.uri.toString())) {
+      diagnostics.record("extension.will-save", {
+        documentVersion: event.document.version,
+        skippedBecausePortSave: true,
+      });
       return;
     }
+    diagnostics.record("extension.will-save", {
+      dirty: event.document.isDirty,
+      documentVersion: event.document.version,
+    });
     event.waitUntil(coordinator.flush(event.document.uri.toString()).then(() => []));
   });
 
   context.subscriptions.push(
     disposable,
+    copyDiagnostics,
     customEditorRegistration,
     documentChangeRegistration,
     saveBarrierRegistration,
@@ -56,4 +96,17 @@ export function activate(context: vscode.ExtensionContext): void {
 
 export function deactivate(): void {
   // No global resources are retained by the scaffold.
+}
+
+function createDiagnostics(
+  mode: ReturnType<typeof decodeDiagnosticMode>,
+  context: vscode.ExtensionContext,
+): BoundedDiagnosticLog {
+  const output = recordsDiagnosticTrace(mode)
+    ? vscode.window.createOutputChannel("Markdown Live Editor ATOK Diagnostics")
+    : undefined;
+  if (output !== undefined) {
+    context.subscriptions.push(output);
+  }
+  return new BoundedDiagnosticLog(250, (line): void => output?.appendLine(line));
 }

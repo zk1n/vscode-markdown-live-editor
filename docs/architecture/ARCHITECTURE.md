@@ -198,6 +198,15 @@ Preferred baseline:
 
 Selection/caret state needs explicit design and testing, but source correctness wins if trade-offs arise.
 
+For a normal authoritative update (own edit acknowledgement, VS Code Undo,
+VS Code Redo, or an external update without pending local work), keep the
+existing `EditorState` and dispatch the smallest text replacement from the
+current CodeMirror text to the authoritative snapshot. CodeMirror maps the
+selection through that change. A selection in the changed range may map to its
+nearest valid boundary, but normal Undo/Redo must not reset it unconditionally
+to offset 0 or destroy editor focus. Full reset/recovery remains a separate
+path and is only permitted when authority cannot safely be reconciled.
+
 ## 9. IME composition
 
 Composition is editor-local until CodeMirror emits stable document transactions appropriate for synchronization.

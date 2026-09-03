@@ -44,6 +44,11 @@ Required where automation cannot faithfully cover OS input behavior:
 - memory observation
 - extended real-use session
 
+CodeMirror DOM propagation tests and controller/protocol sequence tests prove
+the project-owned route and ordering only. They do not make synthetic events
+trusted to VS Code and do not replace actual OS/VS Code key delivery or ATOK
+Human Gate evidence.
+
 ## 2. v0.1 critical invariants
 
 A test failure in these areas blocks promotion:
@@ -122,9 +127,15 @@ npm run lint
 npm test
 npm run build
 npm run check
+npm run test:extension-host
 ```
 
 `npm run check` is the pre-integration baseline.
+
+`npm run test:extension-host` is the separately runnable public-API smoke
+suite. It uses a pinned VS Code test instance and may download it on its first
+run; keep it outside the fast `check` path while it remains an integration
+environment dependency.
 
 ## 7. Release manual evidence
 
