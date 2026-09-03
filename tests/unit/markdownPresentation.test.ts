@@ -123,6 +123,48 @@ describe("LivePreviewEngine", () => {
 
     engine.dispose();
   });
+
+  it("reveals a hidden closing marker before a next-line Backspace and preserves source", () => {
+    const cases = [
+      ["link", "[label](target.md)"],
+      ["strong", "**bold**"],
+      ["emphasis", "_italic_"],
+      ["strikethrough", "~~strike~~"],
+      ["inline code", "`code`"],
+    ] as const;
+
+    for (const [name, source] of cases) {
+      const engine = createLivePreviewEngine();
+      const state = EditorState.create({
+        doc: `${source}\n`,
+        selection: { anchor: source.length + 1 },
+        extensions: [engine.extension],
+      });
+
+      expect(decorationCount(state), name).toBe(1);
+      const newlineOnlyDeletion = state.update({
+        changes: { from: source.length, to: source.length + 1 },
+      });
+      expect(newlineOnlyDeletion.state.doc.toString(), name).toBe(source);
+
+      engine.dispose();
+    }
+  });
+
+  it("reveals a hidden opening marker before a previous-line Delete and preserves source", () => {
+    const engine = createLivePreviewEngine();
+    const state = EditorState.create({
+      doc: "plain\n[label](target.md)",
+      selection: { anchor: 5 },
+      extensions: [engine.extension],
+    });
+
+    expect(decorationCount(state)).toBe(1);
+    const newlineOnlyDeletion = state.update({ changes: { from: 5, to: 6 } });
+    expect(newlineOnlyDeletion.state.doc.toString()).toBe("plain[label](target.md)");
+
+    engine.dispose();
+  });
 });
 
 function decorationCount(state: EditorState): number {

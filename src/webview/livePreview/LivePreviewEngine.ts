@@ -121,11 +121,12 @@ class CodeMirrorDecorationLivePreviewEngine implements LivePreviewEngine {
 }
 
 function buildDecorations(state: EditorState): DecorationSet {
+  const documentText = state.doc.toString();
   const selections = state.selection.ranges.map(({ from, to }) => ({ from, to }));
   const decorations = [];
 
-  for (const syntax of findPresentationSyntax(state.doc.toString())) {
-    if (!isSyntaxActive(syntax, selections)) {
+  for (const syntax of findPresentationSyntax(documentText)) {
+    if (!isSyntaxActive(syntax, selections, documentText)) {
       for (const marker of syntax.markers) {
         decorations.push(
           Decoration.mark({ class: markerClass(marker) }).range(marker.from, marker.to),
