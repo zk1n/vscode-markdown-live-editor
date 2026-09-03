@@ -26,7 +26,7 @@ export class BoundedDiagnosticLog implements DiagnosticLog {
     const line = limitLine(
       `${String(Date.now())} ${limitString(kind, 96)}${serialized === "" ? "" : ` ${serialized}`}`,
     );
-    const size = line.length;
+    const size = utf8Size(`${line}\n`);
     this.lines.push({ line, size });
     this.totalSize += size;
     while (this.lines.length > this.capacity || this.totalSize > this.maximumSize) {
@@ -48,11 +48,26 @@ function limitValue(value: DiagnosticLogValue): DiagnosticLogValue {
 }
 
 function limitLine(value: string): string {
-  return limitString(value, 512);
+  return limitByUtf8Bytes(value, 512);
 }
 
 function limitString(value: string, maximumLength: number): string {
   return value.length <= maximumLength ? value : `${value.slice(0, maximumLength)}…`;
+}
+
+function limitByUtf8Bytes(value: string, maximumSize: number): string {
+  if (utf8Size(value) <= maximumSize) {
+    return value;
+  }
+  let end = value.length;
+  while (end > 0 && utf8Size(`${value.slice(0, end)}…`) > maximumSize) {
+    end -= 1;
+  }
+  return `${value.slice(0, end)}…`;
+}
+
+function utf8Size(value: string): number {
+  return new TextEncoder().encode(value).byteLength;
 }
 
 export const disabledDiagnosticLog: DiagnosticLog = {
