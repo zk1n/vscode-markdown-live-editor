@@ -11,7 +11,7 @@ import {
 } from "../../src/webview/livePreview/markdownPresentation.js";
 
 describe("Markdown presentation syntax", () => {
-  it("recognizes the minimal heading, strong, and emphasis subset without parsing fenced code", () => {
+  it("recognizes heading, strong, and emphasis without parsing fenced code", () => {
     const syntax = findPresentationSyntax(
       "## Heading\n**bold** and _italic_\n```md\n# source\n```",
     );
@@ -27,6 +27,40 @@ describe("Markdown presentation syntax", () => {
       markers: [
         { from: 11, to: 13 },
         { from: 17, to: 19 },
+      ],
+    });
+  });
+
+  it("recognizes the remaining Slice 2 presentation syntax while preserving code as source", () => {
+    const source =
+      "~~removed~~ and `*literal*`\n- item\n1. ordered\n- [ ] open\n- [X] done\n> quote\n[site](docs/readme.md)\n```md\n~~source~~\n```";
+    const syntax = findPresentationSyntax(source);
+
+    expect(syntax.map(({ kind }) => kind)).toEqual([
+      "inline-code",
+      "strikethrough",
+      "list",
+      "list",
+      "task",
+      "task",
+      "blockquote",
+      "link",
+    ]);
+    expect(syntax).not.toContainEqual(expect.objectContaining({ kind: "emphasis" }));
+
+    const tasks = syntax.filter(({ kind }) => kind === "task");
+    expect(tasks[0]?.markers[1]).toMatchObject({ presentation: "task-unchecked" });
+    expect(tasks[1]?.markers[1]).toMatchObject({ presentation: "task-checked" });
+
+    const lists = syntax.filter(({ kind }) => kind === "list");
+    expect(lists[0]?.markers[0]).toMatchObject({ presentation: "list" });
+
+    const link = syntax.find(({ kind }) => kind === "link");
+    const linkStart = source.indexOf("[site]");
+    expect(link).toMatchObject({
+      markers: [
+        { from: linkStart, to: linkStart + 1 },
+        { from: linkStart + 5, to: linkStart + "[site](docs/readme.md)".length },
       ],
     });
   });
@@ -69,6 +103,23 @@ describe("LivePreviewEngine", () => {
     expect(decorationCount(compositionUpdate.state)).toBe(
       decorationCount(selectionTransaction.state),
     );
+
+    engine.dispose();
+  });
+
+  it("uses presentation-only task markers and reveals their source at the active caret", () => {
+    const engine = createLivePreviewEngine();
+    const state = EditorState.create({
+      doc: "- [ ] task\nplain",
+      selection: { anchor: 15 },
+      extensions: [engine.extension],
+    });
+    const inactiveDecorations = decorationCount(state);
+
+    const selectionTransaction = state.update({ selection: { anchor: 3 } });
+    expect(selectionTransaction.docChanged).toBe(false);
+    expect(selectionTransaction.state.doc.toString()).toBe("- [ ] task\nplain");
+    expect(decorationCount(selectionTransaction.state)).toBe(inactiveDecorations - 2);
 
     engine.dispose();
   });

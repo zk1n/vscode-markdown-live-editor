@@ -1,8 +1,20 @@
-export type PresentationSyntaxKind = "heading" | "strong" | "emphasis";
+export type PresentationSyntaxKind =
+  | "heading"
+  | "strong"
+  | "emphasis"
+  | "strikethrough"
+  | "inline-code"
+  | "list"
+  | "blockquote"
+  | "link"
+  | "task";
+
+export type MarkerPresentation = "hidden" | "list" | "task-checked" | "task-unchecked";
 
 export interface MarkerRange {
   readonly from: number;
   readonly to: number;
+  readonly presentation?: MarkerPresentation;
 }
 
 export interface PresentationSyntaxRange {
@@ -22,7 +34,8 @@ export interface SelectionRange {
 
 /**
  * Deliberately conservative v0.1 recognition for presentation only. It skips
- * fenced code blocks and does not attempt to normalize or rewrite Markdown.
+ * fenced code blocks, keeps complex/nested inline forms as source, and does
+ * not attempt to normalize or rewrite Markdown.
  */
 export function findPresentationSyntax(text: string): readonly PresentationSyntaxRange[] {
   const ranges: PresentationSyntaxRange[] = [];
@@ -34,14 +47,29 @@ export function findPresentationSyntax(text: string): readonly PresentationSynta
     if (/^\s*(```|~~~)/.test(line)) {
       fencedCode = !fencedCode;
     } else if (!fencedCode) {
+      const inlineCode = findInlineCodeRanges(line, offset);
       const heading = findHeading(line, offset);
       if (heading !== undefined) {
         ranges.push(heading);
       }
-      ranges.push(...findDelimitedRanges(line, offset, "**", "strong"));
-      ranges.push(...findDelimitedRanges(line, offset, "__", "strong"));
-      ranges.push(...findDelimitedRanges(line, offset, "*", "emphasis"));
-      ranges.push(...findDelimitedRanges(line, offset, "_", "emphasis"));
+      ranges.push(...findBlockPrefixRanges(line, offset));
+      ranges.push(...inlineCode);
+
+      const protectedRanges = inlineCode.map(({ from, to }) => ({
+        from: from - offset,
+        to: to - offset,
+      }));
+      const links = findLinkRanges(line, offset, protectedRanges);
+      ranges.push(...links);
+      protectedRanges.push(
+        ...links.map(({ from, to }) => ({ from: from - offset, to: to - offset })),
+      );
+
+      ranges.push(...findDelimitedRanges(line, offset, "**", "strong", protectedRanges));
+      ranges.push(...findDelimitedRanges(line, offset, "__", "strong", protectedRanges));
+      ranges.push(...findDelimitedRanges(line, offset, "~~", "strikethrough", protectedRanges));
+      ranges.push(...findDelimitedRanges(line, offset, "*", "emphasis", protectedRanges));
+      ranges.push(...findDelimitedRanges(line, offset, "_", "emphasis", protectedRanges));
     }
     offset += line.length + 1;
   }
@@ -85,11 +113,197 @@ function findHeading(line: string, offset: number): PresentationSyntaxRange | un
   };
 }
 
+function findBlockPrefixRanges(line: string, offset: number): readonly PresentationSyntaxRange[] {
+  const task = findTask(line, offset);
+  if (task !== undefined) {
+    return [task];
+  }
+
+  const list = findList(line, offset);
+  if (list !== undefined) {
+    return [list];
+  }
+
+  const blockquote = findBlockquote(line, offset);
+  return blockquote === undefined ? [] : [blockquote];
+}
+
+function findTask(line: string, offset: number): PresentationSyntaxRange | undefined {
+  const match = /^( {0,3})(?:[-+*]|\d{1,9}[.)])([ \t]+)(\[[ xX]\])([ \t]+)(?=\S)/.exec(line);
+  if (match === null) {
+    return undefined;
+  }
+  const indentation = match[1];
+  const beforeCheckbox = match[2];
+  const checkbox = match[3];
+  const trailingSpace = match[4];
+  if (
+    indentation === undefined ||
+    beforeCheckbox === undefined ||
+    checkbox === undefined ||
+    trailingSpace === undefined
+  ) {
+    return undefined;
+  }
+
+  const checkboxFrom = indentation.length + line.slice(indentation.length).indexOf(checkbox);
+  const checkboxTo = checkboxFrom + checkbox.length;
+  const contentFrom = checkboxTo + trailingSpace.length;
+  return {
+    kind: "task",
+    from: offset,
+    to: offset + line.length,
+    contentFrom: offset + contentFrom,
+    contentTo: offset + line.length,
+    markers: [
+      { from: offset + indentation.length, to: offset + checkboxFrom },
+      {
+        from: offset + checkboxFrom,
+        to: offset + contentFrom,
+        presentation: checkbox.toLowerCase() === "[x]" ? "task-checked" : "task-unchecked",
+      },
+    ],
+  };
+}
+
+function findList(line: string, offset: number): PresentationSyntaxRange | undefined {
+  const match = /^( {0,3})(?:[-+*]|\d{1,9}[.)])([ \t]+)(?=\S)/.exec(line);
+  if (match === null) {
+    return undefined;
+  }
+  const indentation = match[1];
+  if (indentation === undefined) {
+    return undefined;
+  }
+  const contentFrom = match[0].length;
+  return {
+    kind: "list",
+    from: offset,
+    to: offset + line.length,
+    contentFrom: offset + contentFrom,
+    contentTo: offset + line.length,
+    markers: [
+      {
+        from: offset + indentation.length,
+        to: offset + contentFrom,
+        presentation: "list",
+      },
+    ],
+  };
+}
+
+function findBlockquote(line: string, offset: number): PresentationSyntaxRange | undefined {
+  const match = /^( {0,3}>[ \t]?)(?=\S)/.exec(line);
+  if (match?.[1] === undefined) {
+    return undefined;
+  }
+  const contentFrom = match[0].length;
+  return {
+    kind: "blockquote",
+    from: offset,
+    to: offset + line.length,
+    contentFrom: offset + contentFrom,
+    contentTo: offset + line.length,
+    markers: [{ from: offset, to: offset + contentFrom }],
+  };
+}
+
+function findInlineCodeRanges(line: string, offset: number): readonly PresentationSyntaxRange[] {
+  const ranges: PresentationSyntaxRange[] = [];
+  let searchFrom = 0;
+
+  while (searchFrom < line.length) {
+    const opening = line.indexOf("`", searchFrom);
+    if (opening === -1) {
+      break;
+    }
+    if (isEscaped(line, opening)) {
+      searchFrom = opening + 1;
+      continue;
+    }
+    const markerLength = markerRunLength(line, opening, "`");
+    const marker = "`".repeat(markerLength);
+    const closing = findMatchingInlineCodeMarker(line, marker, opening + markerLength);
+    if (closing === -1) {
+      searchFrom = opening + markerLength;
+      continue;
+    }
+
+    const contentFrom = opening + markerLength;
+    if (/\S/.test(line.slice(contentFrom, closing))) {
+      ranges.push({
+        kind: "inline-code",
+        from: offset + opening,
+        to: offset + closing + markerLength,
+        contentFrom: offset + contentFrom,
+        contentTo: offset + closing,
+        markers: [
+          { from: offset + opening, to: offset + contentFrom },
+          { from: offset + closing, to: offset + closing + markerLength },
+        ],
+      });
+    }
+    searchFrom = closing + markerLength;
+  }
+
+  return ranges;
+}
+
+function findMatchingInlineCodeMarker(line: string, marker: string, searchFrom: number): number {
+  let index = line.indexOf(marker, searchFrom);
+  while (index !== -1) {
+    if (!isEscaped(line, index) && isStandaloneMarker(line, marker, index)) {
+      return index;
+    }
+    index = line.indexOf(marker, index + marker.length);
+  }
+  return -1;
+}
+
+function findLinkRanges(
+  line: string,
+  offset: number,
+  protectedRanges: readonly LocalRange[],
+): readonly PresentationSyntaxRange[] {
+  const ranges: PresentationSyntaxRange[] = [];
+  const expression = /\[([^\]\\\n]+)\]\(([^()\s]+)\)/g;
+
+  for (const match of line.matchAll(expression)) {
+    const fullText = match[0];
+    const label = match[1];
+    if (label === undefined) {
+      continue;
+    }
+    const from = match.index;
+    const to = from + fullText.length;
+    if (isEscaped(line, from) || overlapsProtectedRange(from, to, protectedRanges)) {
+      continue;
+    }
+
+    const contentFrom = from + 1;
+    const contentTo = contentFrom + label.length;
+    ranges.push({
+      kind: "link",
+      from: offset + from,
+      to: offset + to,
+      contentFrom: offset + contentFrom,
+      contentTo: offset + contentTo,
+      markers: [
+        { from: offset + from, to: offset + contentFrom },
+        { from: offset + contentTo, to: offset + to },
+      ],
+    });
+  }
+
+  return ranges;
+}
+
 function findDelimitedRanges(
   line: string,
   offset: number,
-  marker: "**" | "__" | "*" | "_",
-  kind: "strong" | "emphasis",
+  marker: "**" | "__" | "~~" | "*" | "_",
+  kind: "strong" | "emphasis" | "strikethrough",
+  protectedRanges: readonly LocalRange[],
 ): readonly PresentationSyntaxRange[] {
   const ranges: PresentationSyntaxRange[] = [];
   let searchFrom = 0;
@@ -99,9 +313,17 @@ function findDelimitedRanges(
     if (opening === -1) {
       break;
     }
+    if (overlapsProtectedRange(opening, opening + marker.length, protectedRanges)) {
+      searchFrom = opening + marker.length;
+      continue;
+    }
     const closing = findClosingMarker(line, marker, opening + marker.length);
     if (closing === -1) {
       break;
+    }
+    if (overlapsProtectedRange(closing, closing + marker.length, protectedRanges)) {
+      searchFrom = closing + marker.length;
+      continue;
     }
 
     const contentFrom = opening + marker.length;
@@ -163,10 +385,32 @@ function findClosingMarker(line: string, marker: string, searchFrom: number): nu
 }
 
 function isStandaloneMarker(line: string, marker: string, index: number): boolean {
-  if (marker.length !== 1) {
-    return true;
+  const markerCharacter = marker[0];
+  if (markerCharacter === undefined) {
+    return false;
   }
-  return line[index - 1] !== marker && line[index + 1] !== marker;
+  return line[index - 1] !== markerCharacter && line[index + marker.length] !== markerCharacter;
+}
+
+interface LocalRange {
+  readonly from: number;
+  readonly to: number;
+}
+
+function overlapsProtectedRange(
+  from: number,
+  to: number,
+  protectedRanges: readonly LocalRange[],
+): boolean {
+  return protectedRanges.some((range) => from < range.to && to > range.from);
+}
+
+function markerRunLength(line: string, from: number, markerCharacter: string): number {
+  let length = 0;
+  while (line[from + length] === markerCharacter) {
+    length += 1;
+  }
+  return length;
 }
 
 function isEscaped(text: string, index: number): boolean {
