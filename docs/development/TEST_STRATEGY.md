@@ -11,6 +11,8 @@ Pure logic and state machines:
 - version checks
 - WikiLink parsing later
 - path validation later
+- Live Previewの保守的な構文認識、fenced / inline code除外、selection時のsource reveal
+- Live Preview decorationがsource textを変更しないこと
 - attachment naming later
 
 ### Integration

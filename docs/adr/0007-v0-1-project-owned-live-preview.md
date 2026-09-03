@@ -2,6 +2,7 @@
 
 Status: Accepted
 Date: 2026-09-02
+Last updated: 2026-09-03
 
 ## Context
 
@@ -17,16 +18,25 @@ bundle than this slice requires.
 ## Decision
 
 For v0.1, provide a project-owned `LivePreviewEngine` backed by CodeMirror
-`Decoration.mark` and `StateField` state. It supports only:
+`Decoration.mark` and `StateField` state. It supports the conservative subset
+needed by Roadmap Slice 2:
 
 - ATX heading markers;
 - strong markers (`**`, `__`);
 - emphasis markers (`*`, `_`).
+- strikethrough markers (`~~`);
+- inline-code markers (matching backtick runs);
+- ordered/unordered list prefixes;
+- GFM task prefixes, rendered as an inactive checked/unchecked visual marker;
+- blockquote prefixes; and
+- simple inline links (`[label](destination)`).
 
-The engine recognizes a conservative subset and skips fenced code blocks. It
-keeps semantic styling on syntax content even while its caret/selection is
-inside that range, and changes only marker visibility. This avoids heading
-font-size and line-height changes when a caret crosses a source marker.
+The engine skips fenced code blocks and keeps complex/nested inline forms as
+raw source. It does not add task toggles, link navigation, source rewriting, or
+other interactive widgets. It keeps semantic styling on syntax content even
+while its caret/selection is inside that range, and reveals all source markers
+for that syntax range. This avoids heading font-size and line-height changes
+when a caret crosses a source marker.
 
 For CodeMirror transactions identified as `input.type.compose`, it maps the
 existing decoration set through the text change rather than rebuilding it. It

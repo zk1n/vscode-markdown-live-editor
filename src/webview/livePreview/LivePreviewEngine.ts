@@ -1,7 +1,11 @@
 import { type Extension, StateField, type EditorState } from "@codemirror/state";
 import { Decoration, type DecorationSet, EditorView } from "@codemirror/view";
 
-import { findPresentationSyntax, isSyntaxActive } from "./markdownPresentation.js";
+import {
+  findPresentationSyntax,
+  isSyntaxActive,
+  type MarkerRange,
+} from "./markdownPresentation.js";
 
 export interface LivePreviewEngine {
   readonly extension: Extension;
@@ -59,6 +63,49 @@ const livePreviewTheme = EditorView.baseTheme({
   ".cm-live-preview-emphasis": {
     fontStyle: "italic",
   },
+  ".cm-live-preview-strikethrough": {
+    textDecoration: "line-through",
+  },
+  ".cm-live-preview-inline-code": {
+    backgroundColor: "var(--vscode-textCodeBlock-background)",
+    borderRadius: "3px",
+    fontFamily: "var(--vscode-editor-font-family)",
+    padding: "0 0.2em",
+  },
+  ".cm-live-preview-blockquote": {
+    borderLeft: "2px solid var(--vscode-textBlockQuote-border)",
+    color: "var(--vscode-textBlockQuote-foreground)",
+    paddingLeft: "0.5em",
+  },
+  ".cm-live-preview-link": {
+    color: "var(--vscode-textLink-foreground)",
+    textDecoration: "underline",
+  },
+  ".cm-live-preview-list-marker": {
+    color: "var(--vscode-descriptionForeground, var(--vscode-editor-foreground))",
+    fontWeight: "600",
+  },
+  ".cm-live-preview-task-marker": {
+    color: "transparent",
+    display: "inline-block",
+    fontSize: "0",
+    position: "relative",
+    width: "1em",
+  },
+  ".cm-live-preview-task-marker::before": {
+    color: "var(--vscode-checkbox-foreground, var(--vscode-editor-foreground))",
+    fontSize: "1rem",
+    left: "0",
+    lineHeight: "1",
+    position: "absolute",
+    top: "0",
+  },
+  ".cm-live-preview-task-unchecked::before": {
+    content: '"☐"',
+  },
+  ".cm-live-preview-task-checked::before": {
+    content: '"☑"',
+  },
 });
 
 class CodeMirrorDecorationLivePreviewEngine implements LivePreviewEngine {
@@ -77,7 +124,7 @@ function buildDecorations(state: EditorState): DecorationSet {
     if (!isSyntaxActive(syntax, selections)) {
       for (const marker of syntax.markers) {
         decorations.push(
-          Decoration.mark({ class: "cm-live-preview-marker" }).range(marker.from, marker.to),
+          Decoration.mark({ class: markerClass(marker) }).range(marker.from, marker.to),
         );
       }
     }
@@ -91,4 +138,20 @@ function buildDecorations(state: EditorState): DecorationSet {
   }
 
   return Decoration.set(decorations, true);
+}
+
+function markerClass(marker: MarkerRange): string {
+  switch (marker.presentation) {
+    case "list":
+      return "cm-live-preview-list-marker";
+    case "task-checked":
+      return "cm-live-preview-task-marker cm-live-preview-task-checked";
+    case "task-unchecked":
+      return "cm-live-preview-task-marker cm-live-preview-task-unchecked";
+    case "hidden":
+    case undefined:
+      return "cm-live-preview-marker";
+    default:
+      return "cm-live-preview-marker";
+  }
 }
