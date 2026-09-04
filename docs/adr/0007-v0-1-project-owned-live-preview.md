@@ -18,7 +18,8 @@ bundle than this slice requires.
 ## Decision
 
 For v0.1, provide a project-owned `LivePreviewEngine` backed by CodeMirror
-`Decoration.mark` and `StateField` state. It supports the conservative subset
+`StateField` state, `Decoration.mark` for semantic/visible presentation, and
+widgetless `Decoration.replace({})` for hidden source markers. It supports the conservative subset
 needed by Roadmap Slice 2:
 
 - ATX heading markers;
@@ -35,8 +36,10 @@ The engine skips fenced code blocks and keeps complex/nested inline forms as
 raw source. It does not add task toggles, link navigation, source rewriting, or
 other interactive widgets. It keeps semantic styling on syntax content even
 while its caret/selection is inside that range, and reveals all source markers
-for that syntax range. This avoids heading font-size and line-height changes
-when a caret crosses a source marker.
+only for that syntax range. Hidden markers are replacement decorations rather
+than CSS-hidden DOM text, so a caret on an adjacent line does not reveal raw
+source or offer an invisible marker to native newline deletion. This avoids
+heading font-size and line-height changes when a caret crosses a source marker.
 
 For CodeMirror transactions identified as `input.type.compose`, it maps the
 existing decoration set through the text change rather than rebuilding it. It

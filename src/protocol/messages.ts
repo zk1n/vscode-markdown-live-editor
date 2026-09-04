@@ -53,6 +53,23 @@ export interface DocumentSnapshotMessage {
   readonly documentUri: string;
   readonly documentVersion: number;
   readonly text: string;
+  /**
+   * Metadata-only host correlation. It is intentionally optional so that
+   * protocol fixtures and older Webviews remain decodable; it must never be
+   * used to relax authority or acknowledgement checks.
+   */
+  readonly correlation?: HostMessageCorrelation;
+}
+
+export interface HostMessageCorrelation {
+  readonly causalId: string;
+  readonly publicationId: string;
+  readonly source: "opened" | "operation-ack" | "operation-peer" | "external-event" | "resync";
+  readonly queueEnqueueOrdinal: number;
+  readonly queueStartOrdinal: number;
+  readonly originSessionId?: string;
+  readonly operationSequence?: number;
+  readonly externalEventId?: string;
 }
 
 export interface OperationAcknowledgement extends DocumentSnapshotMessage {
@@ -330,12 +347,96 @@ function decodeSnapshot(
     return { ok: false, error: "text must be a string." };
   }
 
+  const correlation = decodeHostMessageCorrelation(value["correlation"]);
+  if (!correlation.ok) {
+    return correlation;
+  }
+
+  return {
+    ok: true,
+    value:
+      correlation.value === undefined
+        ? {
+            documentUri: documentUri.value,
+            documentVersion: documentVersion.value,
+            text: value["text"],
+          }
+        : {
+            documentUri: documentUri.value,
+            documentVersion: documentVersion.value,
+            text: value["text"],
+            correlation: correlation.value,
+          },
+  };
+}
+
+function decodeHostMessageCorrelation(
+  value: unknown,
+): ProtocolDecodeResult<HostMessageCorrelation | undefined> {
+  if (value === undefined) {
+    return { ok: true, value: undefined };
+  }
+  if (!isRecord(value)) {
+    return { ok: false, error: "correlation must be an object when present." };
+  }
+  const causalId = readNonEmptyString(value["causalId"], "correlation.causalId");
+  const publicationId = readNonEmptyString(value["publicationId"], "correlation.publicationId");
+  const queueEnqueueOrdinal = readNonNegativeInteger(
+    value["queueEnqueueOrdinal"],
+    "correlation.queueEnqueueOrdinal",
+  );
+  const queueStartOrdinal = readNonNegativeInteger(
+    value["queueStartOrdinal"],
+    "correlation.queueStartOrdinal",
+  );
+  const source = value["source"];
+  if (!causalId.ok) {
+    return { ok: false, error: causalId.error };
+  }
+  if (!publicationId.ok) {
+    return { ok: false, error: publicationId.error };
+  }
+  if (!queueEnqueueOrdinal.ok) {
+    return { ok: false, error: queueEnqueueOrdinal.error };
+  }
+  if (!queueStartOrdinal.ok) {
+    return { ok: false, error: queueStartOrdinal.error };
+  }
+  if (
+    source !== "opened" &&
+    source !== "operation-ack" &&
+    source !== "operation-peer" &&
+    source !== "external-event" &&
+    source !== "resync"
+  ) {
+    return { ok: false, error: "correlation.source is invalid." };
+  }
+  const originSessionId = value["originSessionId"];
+  const externalEventId = value["externalEventId"];
+  const operationSequenceValue = value["operationSequence"];
+  if (
+    (originSessionId !== undefined && typeof originSessionId !== "string") ||
+    (externalEventId !== undefined && typeof externalEventId !== "string") ||
+    (operationSequenceValue !== undefined &&
+      (typeof operationSequenceValue !== "number" ||
+        !Number.isSafeInteger(operationSequenceValue) ||
+        operationSequenceValue < 0))
+  ) {
+    return { ok: false, error: "correlation optional fields are invalid." };
+  }
   return {
     ok: true,
     value: {
-      documentUri: documentUri.value,
-      documentVersion: documentVersion.value,
-      text: value["text"],
+      causalId: causalId.value,
+      publicationId: publicationId.value,
+      source,
+      queueEnqueueOrdinal: queueEnqueueOrdinal.value,
+      queueStartOrdinal: queueStartOrdinal.value,
+      ...(originSessionId === undefined ? {} : { originSessionId }),
+      ...(operationSequenceValue === undefined
+        ? {}
+        : { operationSequence: operationSequenceValue }),
+      ...(externalEventId === undefined ? {} : { externalEventId }),
     },
   };
 }

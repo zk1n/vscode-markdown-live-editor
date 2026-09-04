@@ -153,4 +153,44 @@ describe("protocol decoding", () => {
       }),
     ).toMatchObject({ ok: false });
   });
+
+  it("decodes bounded metadata-only host correlation without making it authority", () => {
+    const decoded = decodeHostToWebviewMessage({
+      kind: "document-update",
+      reason: "external",
+      documentUri: "file:///note.md",
+      documentVersion: 4,
+      text: "authoritative",
+      correlation: {
+        causalId: "external:document-change-7",
+        publicationId: "publication-9",
+        source: "external-event",
+        queueEnqueueOrdinal: 11,
+        queueStartOrdinal: 12,
+        externalEventId: "document-change-7",
+      },
+    });
+
+    expect(decoded).toMatchObject({
+      ok: true,
+      value: {
+        kind: "document-update",
+        correlation: {
+          causalId: "external:document-change-7",
+          publicationId: "publication-9",
+          source: "external-event",
+        },
+      },
+    });
+    expect(
+      decodeHostToWebviewMessage({
+        kind: "document-update",
+        reason: "external",
+        documentUri: "file:///note.md",
+        documentVersion: 4,
+        text: "authoritative",
+        correlation: { causalId: "missing-required-fields" },
+      }).ok,
+    ).toBe(false);
+  });
 });

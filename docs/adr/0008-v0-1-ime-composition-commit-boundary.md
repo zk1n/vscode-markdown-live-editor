@@ -2,6 +2,7 @@
 
 Status: Accepted — guarantee level B
 Date: 2026-09-03
+Updated: 2026-09-04
 
 ## Context
 
@@ -37,6 +38,19 @@ composition相当commit 2回にも適用すると同じ結果だった（VS Code
   異なるUndo unitとなることはpublic APIでは保証しない。
 - composition中のauthoritative external updateは、local preeditを黙って上書きせずvisible
   recoveryに入る。
+- originating operationのauthoritative resultはorigin sessionへ`operation-ack`として1回返す。
+  同じoperation由来の`document-update`はpeer sessionだけへbroadcastし、external changeは全sessionへ通知する。
+- edit ACK前に届いた`document-update`がin-flight targetと完全一致する場合は、外部競合と即断せず
+  ACK/resyncまでmetadata-onlyでdeferする。host ACKなしに成功扱いせず、本文が異なる場合は
+  `reason: "edit"`でもvisible recoveryへ入る。
+- recoveryの原因が未確定な間は、authority/Port guardを緩めず、event ID、FIFO queue ordinal、publication ID、
+  session/operation causal ID、Webview recovery incident IDを本文なしで相関する。event時点とqueue実行時の
+  snapshot version/fingerprintが異なる場合はtemporal driftとして明示記録する。
+- VS Codeの`TrimWhitespaceParticipant`がCustom Editorだけを開いたMarkdownでafter-delay Save時に`- `を
+  `-`へ変更する実回帰を確認した。`package.json`のlanguage-specific defaultとして
+  `[markdown].files.trimTrailingWhitespace=false`を提供し、非言語別のuser / workspace設定は永続変更しない。
+  明示的な`[markdown]`設定はこのdefaultより優先する。effective値が`true`ならCustom Editor開始時に一度だけ
+  互換性warningを出し、利用者が選んだ場合だけMarkdown設定画面を開く。
 
 実装は`compositionStarted`およびinput / composition eventsで裏付けた意味的な状態だけを使う。
 timeout、dummy edit、whitespace / newline、hidden editor、internal / proposed APIは使わない。
@@ -64,6 +78,17 @@ captured base textとして明示的に保持し、mutableなEditorView textを�
 (`ABk`、`ABka`など)をpersistent authorityへ送らない。意味的な`compositionend`後、前のordinary
 editがあればacknowledgeを待ち、authorityが記録したbaseと一致することを検証してから最終textだけを
 既存FIFOの`edit`として送る。不一致ならlocal compositionを可視のままrecoveryへ入る。
+
+in-flight targetと完全一致するdeferred snapshotはauthorityを変更せず、matching sequenceかつmatching textの
+`operation-ack`を受けた時だけ解決する。deferred snapshotのversionがACKより新しければ、両方の最新versionを
+次のpending/final editのbaseに使う。resyncはhost snapshotを優先してdeferred stateを破棄する。recovery中の
+遅延ACK、snapshot、compositionendは編集送信を再開させない。
+
+VS Code 1.135.0の実測では、port-owned `WorkspaceEdit`の`onDidChangeTextDocument`は
+`applyEdit()` promise解決前に発生し、単一change、expected version + 1、全snapshot target一致、replacement一致、
+EOL正規化後一致の全条件で`own`分類された。自己editが`external`へ誤分類された証拠はないため、
+`VscodeDocumentPort.classifyDocumentChange()`のfail-closed条件は緩めない。Undo/Redo changeはtargetを事前検証できず
+`external`のままとし、origin attributionの根拠に`historyInProgress`だけを使わない。
 
 Save barrierはcomposition active時にqueueする。filterはその時点で既にactiveだったcompositionの
 continuation/final transactionを許可し、final authoritative editのacknowledgement後にbarrierを送る。

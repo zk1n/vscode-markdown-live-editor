@@ -20,6 +20,11 @@
     "onCustomEditor:vscodeMarkdownLiveEditor.editor"
   ],
   "contributes": {
+    "configurationDefaults": {
+      "[markdown]": {
+        "files.trimTrailingWhitespace": false
+      }
+    },
     "configuration": {
       "title": "Markdown Live Editor",
       "properties": {

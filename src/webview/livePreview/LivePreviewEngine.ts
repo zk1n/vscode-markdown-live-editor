@@ -1,11 +1,8 @@
+import { deleteCharForward } from "@codemirror/commands";
 import { type Extension, StateField, type EditorState } from "@codemirror/state";
 import { Decoration, type DecorationSet, EditorView } from "@codemirror/view";
 
-import {
-  findPresentationSyntax,
-  isSyntaxActive,
-  type MarkerRange,
-} from "./markdownPresentation.js";
+import { findPresentationSyntax, isSyntaxActive } from "./markdownPresentation.js";
 
 export interface LivePreviewEngine {
   readonly extension: Extension;
@@ -13,8 +10,8 @@ export interface LivePreviewEngine {
 }
 
 /**
- * The v0.1 renderer owns only CodeMirror presentation state. Its extension
- * contains no commands, history, document transactions, or host integration.
+ * The v0.1 renderer owns CodeMirror presentation state and one source-aware
+ * forward line-join guard. It contains no history or host integration.
  */
 export function createLivePreviewEngine(): LivePreviewEngine {
   return new CodeMirrorDecorationLivePreviewEngine();
@@ -42,9 +39,6 @@ export const livePreviewState = StateField.define<LivePreviewState>({
 });
 
 const livePreviewTheme = EditorView.baseTheme({
-  ".cm-live-preview-marker": {
-    display: "none",
-  },
   ".cm-live-preview-heading": {
     fontWeight: "700",
   },
@@ -85,6 +79,23 @@ const livePreviewTheme = EditorView.baseTheme({
     color: "var(--vscode-descriptionForeground, var(--vscode-editor-foreground))",
     fontWeight: "600",
   },
+  ".cm-live-preview-list-unordered-marker": {
+    color: "transparent",
+    display: "inline-block",
+    position: "relative",
+    width: "1em",
+    verticalAlign: "baseline",
+    whiteSpace: "nowrap",
+  },
+  ".cm-live-preview-list-unordered-marker::before": {
+    color: "var(--vscode-descriptionForeground, var(--vscode-editor-foreground))",
+    content: '"•"',
+    fontSize: "inherit",
+    left: "0",
+    lineHeight: "inherit",
+    position: "absolute",
+    top: "0",
+  },
   ".cm-live-preview-task-marker": {
     color: "transparent",
     display: "inline-block",
@@ -112,24 +123,80 @@ const livePreviewTheme = EditorView.baseTheme({
   },
 });
 
+const sourceAwareForwardLineJoin = EditorView.domEventHandlers({
+  beforeinput: (event, view): boolean =>
+    event.inputType === "deleteContentForward" &&
+    !event.isComposing &&
+    !view.composing &&
+    hasHiddenOpeningMarkerAfterLineBreak(view.state) &&
+    deleteCharForward(view),
+});
+
 class CodeMirrorDecorationLivePreviewEngine implements LivePreviewEngine {
-  public readonly extension: Extension = [livePreviewState, livePreviewTheme];
+  public readonly extension: Extension = [
+    livePreviewState,
+    livePreviewTheme,
+    sourceAwareForwardLineJoin,
+  ];
 
   public dispose(): void {
     // CodeMirror owns the field and theme lifetime through EditorView.destroy().
   }
 }
 
+function hasHiddenOpeningMarkerAfterLineBreak(state: EditorState): boolean {
+  if (state.selection.ranges.length !== 1) {
+    return false;
+  }
+  const selection = state.selection.main;
+  if (!selection.empty) {
+    return false;
+  }
+  const caret = selection.head;
+  const line = state.doc.lineAt(caret);
+  if (caret !== line.to || line.number === state.doc.lines) {
+    return false;
+  }
+  const nextLineStart = caret + 1;
+  const documentText = state.doc.toString();
+  const selections = [{ from: caret, to: caret }];
+  return findPresentationSyntax(documentText).some(
+    (syntax): boolean =>
+      !isSyntaxActive(syntax, selections) &&
+      syntax.markers.some(
+        (marker): boolean =>
+          marker.from === nextLineStart &&
+          (marker.presentation === undefined || marker.presentation === "hidden"),
+      ),
+  );
+}
+
 function buildDecorations(state: EditorState): DecorationSet {
+  const documentText = state.doc.toString();
   const selections = state.selection.ranges.map(({ from, to }) => ({ from, to }));
   const decorations = [];
 
-  for (const syntax of findPresentationSyntax(state.doc.toString())) {
+  for (const syntax of findPresentationSyntax(documentText)) {
     if (!isSyntaxActive(syntax, selections)) {
       for (const marker of syntax.markers) {
-        decorations.push(
-          Decoration.mark({ class: markerClass(marker) }).range(marker.from, marker.to),
-        );
+        if (marker.presentation === undefined || marker.presentation === "hidden") {
+          // A replacement removes the marker from the editable DOM rather than
+          // merely hiding its text. This keeps adjacent lines in preview while
+          // leaving the CodeMirror document untouched.
+          decorations.push(
+            Decoration.replace({
+              inclusive: false,
+              markerPresentation: "hidden",
+            }).range(marker.from, marker.to),
+          );
+        } else {
+          decorations.push(
+            Decoration.mark({ class: markerClass(marker.presentation) }).range(
+              marker.from,
+              marker.to,
+            ),
+          );
+        }
       }
     }
     const className =
@@ -144,18 +211,17 @@ function buildDecorations(state: EditorState): DecorationSet {
   return Decoration.set(decorations, true);
 }
 
-function markerClass(marker: MarkerRange): string {
-  switch (marker.presentation) {
-    case "list":
-      return "cm-live-preview-list-marker";
+function markerClass(
+  presentation: "list-ordered" | "list-unordered" | "task-checked" | "task-unchecked",
+): string {
+  switch (presentation) {
+    case "list-ordered":
+      return "cm-live-preview-list-marker cm-live-preview-list-ordered-marker";
+    case "list-unordered":
+      return "cm-live-preview-list-marker cm-live-preview-list-unordered-marker";
     case "task-checked":
       return "cm-live-preview-task-marker cm-live-preview-task-checked";
     case "task-unchecked":
       return "cm-live-preview-task-marker cm-live-preview-task-unchecked";
-    case "hidden":
-    case undefined:
-      return "cm-live-preview-marker";
-    default:
-      return "cm-live-preview-marker";
   }
 }

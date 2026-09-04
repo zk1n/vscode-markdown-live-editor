@@ -1,3 +1,5 @@
+import { mkdtemp, rm } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -8,14 +10,22 @@ const fixtureWorkspace = path.join(projectRoot, "tests", "extension-host", "fixt
 const executablePath = process.env.VSCODE_TEST_EXECUTABLE;
 const version = process.env.VSCODE_TEST_VERSION ?? "1.120.0";
 
-const exitCode = await runTests({
-  extensionDevelopmentPath: projectRoot,
-  extensionTestsPath: path.join(projectRoot, "dist", "extension-host", "index.cjs"),
-  version,
-  ...(executablePath === undefined ? {} : { vscodeExecutablePath: executablePath }),
-  launchArgs: [fixtureWorkspace, "--disable-extensions"],
-});
+const userDataDirectory = await mkdtemp(
+  path.join(os.tmpdir(), "markdown-live-editor-vscode-test-"),
+);
 
-if (exitCode !== 0) {
-  process.exitCode = exitCode;
+try {
+  const exitCode = await runTests({
+    extensionDevelopmentPath: projectRoot,
+    extensionTestsPath: path.join(projectRoot, "dist", "extension-host", "index.cjs"),
+    version,
+    ...(executablePath === undefined ? {} : { vscodeExecutablePath: executablePath }),
+    launchArgs: ["--disable-extensions", "--user-data-dir", userDataDirectory, fixtureWorkspace],
+  });
+
+  if (exitCode !== 0) {
+    process.exitCode = exitCode;
+  }
+} finally {
+  await rm(userDataDirectory, { force: true, recursive: true });
 }

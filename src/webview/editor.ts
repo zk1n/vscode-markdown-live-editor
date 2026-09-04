@@ -23,6 +23,7 @@ import {
   PROTOCOL_VERSION,
   decodeHostToWebviewMessage,
   type DocumentSnapshotMessage,
+  type HostMessageCorrelation,
   type HostToWebviewMessage,
   type WebviewToHostMessage,
   type WirePosition,
@@ -49,6 +50,21 @@ interface WebviewBootstrap {
   readonly text: string;
 }
 
+/**
+ * A host document-update can race ahead of its matching edit ACK. Keep only
+ * metadata here: the exact text remains owned by PendingEditQueue and must
+ * never be copied into diagnostics.
+ */
+interface DeferredInFlightSnapshot {
+  readonly documentVersion: number;
+  readonly reason: Extract<HostToWebviewMessage, { kind: "document-update" }>["reason"];
+}
+
+interface TextDiagnosticMetadata {
+  readonly fingerprint: string;
+  readonly length: number;
+}
+
 declare function acquireVsCodeApi(): VsCodeApi;
 
 const remoteUpdate = Annotation.define<boolean>();
@@ -71,11 +87,16 @@ class MarkdownWebviewController {
   private documentVersion: number;
   private nextSequence: number;
   private inFlightSequence: number | undefined;
+  private hostMessageOrdinal = 0;
   private readonly barriers = new BarrierInputGate();
   private readonly composition = new CompositionBuffer();
   private compositionGeneration = 0;
   private compositionEndObserved = false;
+  private compositionBaseMetadata: TextDiagnosticMetadata | undefined;
+  private compositionFinalMetadata: TextDiagnosticMetadata | undefined;
+  private deferredInFlightSnapshot: DeferredInFlightSnapshot | undefined;
   private nextShortcutAttempt = 1;
+  private nextRecoveryIncidentId = 1;
   private recoveryActive = false;
   private disposed = false;
 
@@ -94,7 +115,7 @@ class MarkdownWebviewController {
         documentUri: bootstrap.documentUri,
         sessionId: bootstrap.sessionId,
         event,
-        details: details as Readonly<Record<string, boolean | number | string>>,
+        details: definedDiagnosticDetails(details),
       });
     });
     this.livePreview = usesLivePreview(bootstrap.diagnosticMode)
@@ -158,7 +179,11 @@ class MarkdownWebviewController {
       return;
     }
 
-    this.diagnostics.record("host.message.received", messageSummary(value));
+    this.hostMessageOrdinal += 1;
+    this.diagnostics.record("host.message.received", {
+      ...messageSummary(value),
+      messageOrdinal: this.hostMessageOrdinal,
+    });
     const decoded = decodeHostToWebviewMessage(value);
     if (!decoded.ok) {
       this.enterRecovery(`Invalid host message: ${decoded.error}`);
@@ -194,6 +219,7 @@ class MarkdownWebviewController {
       );
       this.beginComposition(compositionTransaction?.startState.doc.toString());
       this.composition.update(this.view.state.doc.toString());
+      this.compositionFinalMetadata = diagnosticTextMetadata(this.view.state.doc.toString());
       this.diagnostics.record("sync.composition.buffered", {
         composing: update.view.composing,
         compositionStarted: update.view.compositionStarted,
@@ -253,6 +279,8 @@ class MarkdownWebviewController {
     this.composition.begin(this.documentVersion, localBase);
     this.compositionGeneration += 1;
     this.compositionEndObserved = false;
+    this.compositionBaseMetadata = diagnosticTextMetadata(localBase);
+    this.compositionFinalMetadata = undefined;
     this.diagnostics.record("sync.composition.started", {
       baseDocumentVersion: this.documentVersion,
       baseTextFingerprint: textFingerprint(localBase),
@@ -311,6 +339,7 @@ class MarkdownWebviewController {
       return;
     }
 
+    this.compositionFinalMetadata = diagnosticTextMetadata(commit.finalText);
     this.diagnostics.record("sync.composition.commit-ready", {
       baseDocumentVersion: commit.baseDocumentVersion,
       documentVersion: this.documentVersion,
@@ -327,7 +356,7 @@ class MarkdownWebviewController {
   }
 
   private sendPendingEdit(): void {
-    if (this.inFlightSequence !== undefined || this.disposed) {
+    if (this.inFlightSequence !== undefined || this.recoveryActive || this.disposed) {
       return;
     }
 
@@ -355,12 +384,13 @@ class MarkdownWebviewController {
       compositionStarted: this.view.compositionStarted,
       expectedTextFingerprint: textFingerprint(this.pendingEdits.authority),
       textFingerprint: textFingerprint(text),
+      ...this.syncStateDetails(),
     });
     this.vscode.postMessage(message);
   }
 
   private requestBarrier(action: BarrierAction): void {
-    if (this.disposed) {
+    if (this.recoveryActive || this.disposed) {
       return;
     }
 
@@ -405,6 +435,7 @@ class MarkdownWebviewController {
         this.handleDocumentUpdate(message);
         return;
       case "resync":
+        this.resolveDeferredInFlightSnapshot("resync", message.documentVersion);
         this.documentVersion = message.documentVersion;
         this.nextSequence = message.nextSequence;
         this.inFlightSequence = undefined;
@@ -414,6 +445,7 @@ class MarkdownWebviewController {
         this.compositionEndObserved = false;
         if (this.view.state.doc.toString() === this.pendingEdits.authority) {
           this.applyAuthoritativeSnapshot(message);
+          this.recoveryActive = false;
           this.view.dispatch({ effects: this.editable.reconfigure(EditorView.editable.of(true)) });
           this.showStatus(`Resynchronized after ${message.reason}: ${message.note}`);
         } else {
@@ -432,15 +464,59 @@ class MarkdownWebviewController {
     message: Extract<HostToWebviewMessage, { kind: "operation-ack" }>,
   ): void {
     this.diagnostics.record("sync.operation.ack", {
+      currentDocumentVersion: this.documentVersion,
+      deferredInFlightSnapshot: this.deferredInFlightSnapshot !== undefined,
+      matchesInFlightSequence:
+        message.operation === "edit" && message.sequence === this.inFlightSequence,
+      matchesInFlightTarget: message.text === this.pendingEdits.inFlightTarget,
+      messageOrdinal: this.hostMessageOrdinal,
       operation: message.operation,
       sequence: message.sequence,
       documentVersion: message.documentVersion,
-      textFingerprint: textFingerprint(message.text),
+      incomingFingerprint: textFingerprint(message.text),
+      ...this.syncStateDetails(),
+      ...this.correlationDetails(message.correlation),
     });
-    this.documentVersion = message.documentVersion;
+    if (this.recoveryActive) {
+      return;
+    }
+    if (message.documentVersion < this.documentVersion) {
+      if (message.operation === "edit" && message.sequence === this.inFlightSequence) {
+        this.enterRecovery(
+          "An edit acknowledgement was older than the current authoritative document version.",
+          message.correlation,
+        );
+        return;
+      }
+      this.diagnostics.record("sync.operation.ack.ignored-stale", {
+        sequence: message.sequence,
+        documentVersion: message.documentVersion,
+        currentDocumentVersion: this.documentVersion,
+      });
+      return;
+    }
     if (message.operation === "edit" && message.sequence === this.inFlightSequence) {
+      if (message.text !== this.pendingEdits.inFlightTarget) {
+        this.enterRecovery(
+          "The edit acknowledgement did not match the exact in-flight target snapshot.",
+          message.correlation,
+        );
+        return;
+      }
+      const acknowledgementOrder =
+        this.deferredInFlightSnapshot === undefined ? "ack-before-update" : "update-before-ack";
+      const authoritativeDocumentVersion = this.resolveDeferredInFlightSnapshot(
+        "ack",
+        message.documentVersion,
+      );
       this.inFlightSequence = undefined;
       this.pendingEdits.acknowledge(message.text);
+      this.documentVersion = authoritativeDocumentVersion;
+      this.diagnostics.record("sync.operation.ack.applied", {
+        acknowledgementOrder,
+        documentVersion: authoritativeDocumentVersion,
+        sequence: message.sequence,
+      });
       this.sendPendingEdit();
       if (this.composition.isActive) {
         this.finalizeCompositionIfSafe();
@@ -462,16 +538,64 @@ class MarkdownWebviewController {
     message: Extract<HostToWebviewMessage, { kind: "document-update" }>,
   ): void {
     this.diagnostics.record("sync.document.update", {
-      reason: message.reason,
-      documentVersion: message.documentVersion,
-      textFingerprint: textFingerprint(message.text),
-      inFlightSequence: this.inFlightSequence,
-      pendingLocalChanges: this.pendingEdits.hasPending,
       compositionActive: this.composition.isActive,
-      ...this.focusTraceDetails(),
+      currentDocumentVersion: this.documentVersion,
+      documentVersion: message.documentVersion,
+      incomingFingerprint: textFingerprint(message.text),
+      inFlightSequence: this.inFlightSequence,
+      matchesAuthority: message.text === this.pendingEdits.authority,
+      matchesInFlightTarget: message.text === this.pendingEdits.inFlightTarget,
+      matchesPendingTarget: message.text === this.pendingEdits.pendingTarget,
+      messageOrdinal: this.hostMessageOrdinal,
+      pendingLocalChanges: this.pendingEdits.hasPending,
+      reason: message.reason,
+      ...this.syncStateDetails(),
+      ...this.correlationDetails(message.correlation),
     });
-    this.documentVersion = message.documentVersion;
+    if (this.recoveryActive) {
+      this.diagnostics.record("sync.document.update.ignored-recovery", {
+        reason: message.reason,
+        documentVersion: message.documentVersion,
+        textFingerprint: textFingerprint(message.text),
+      });
+      return;
+    }
+    if (message.documentVersion < this.documentVersion) {
+      this.diagnostics.record("sync.document.update.ignored-stale", {
+        reason: message.reason,
+        documentVersion: message.documentVersion,
+        currentDocumentVersion: this.documentVersion,
+        textFingerprint: textFingerprint(message.text),
+      });
+      return;
+    }
+    // ACK/update ordering matrix:
+    // - exact in-flight target before its ACK: defer without changing authority;
+    // - ACK before its matching update: ACK advances authority and the later update is a no-op;
+    // - every other newer snapshot while local state is pending: visible recovery.
+    // The host-provided reason alone is never evidence that a snapshot is ours.
+    if (this.inFlightSequence !== undefined && message.text === this.pendingEdits.inFlightTarget) {
+      const deferred = this.deferredInFlightSnapshot;
+      if (deferred === undefined || message.documentVersion >= deferred.documentVersion) {
+        this.deferredInFlightSnapshot = {
+          documentVersion: message.documentVersion,
+          reason: message.reason,
+        };
+      }
+      this.diagnostics.record("sync.document.update.deferred-in-flight-target", {
+        documentVersion: message.documentVersion,
+        inFlightSequence: this.inFlightSequence,
+        reason: message.reason,
+        targetFingerprint: textFingerprint(message.text),
+      });
+      return;
+    }
     if (message.text === this.pendingEdits.authority) {
+      this.documentVersion = message.documentVersion;
+      this.diagnostics.record("sync.document.update.authority-equal", {
+        documentVersion: message.documentVersion,
+        reason: message.reason,
+      });
       return;
     }
     if (
@@ -481,6 +605,7 @@ class MarkdownWebviewController {
     ) {
       this.enterRecovery(
         "The document changed outside this webview while local edits were pending.",
+        message.correlation,
       );
       return;
     }
@@ -489,6 +614,7 @@ class MarkdownWebviewController {
   }
 
   private applyAuthoritativeSnapshot(snapshot: DocumentSnapshotMessage): void {
+    this.documentVersion = snapshot.documentVersion;
     this.pendingEdits.replaceAuthority(snapshot.text);
     const before = this.view.state.doc.toString();
     const replacement = minimalTextReplacement(before, snapshot.text);
@@ -509,12 +635,31 @@ class MarkdownWebviewController {
     });
   }
 
-  private enterRecovery(note: string): void {
-    this.diagnostics.record("sync.recovery", { note });
+  private enterRecovery(note: string, correlation?: HostMessageCorrelation): void {
+    const recoveryIncidentId = this.nextRecoveryIncidentId;
+    this.nextRecoveryIncidentId += 1;
+    this.diagnostics.record("sync.recovery", {
+      recoveryIncidentId,
+      compositionActive: this.composition.isActive,
+      currentDocumentVersion: this.documentVersion,
+      inFlightSequence: this.inFlightSequence,
+      messageOrdinal: this.hostMessageOrdinal,
+      note,
+      pendingLocalChanges: this.pendingEdits.hasPending,
+      ...this.syncStateDetails(),
+      ...this.correlationDetails(correlation),
+    });
     this.recoveryActive = true;
+    this.deferredInFlightSnapshot = undefined;
     this.barriers.reset();
+    this.composition.abandon();
+    this.compositionEndObserved = false;
+    this.compositionBaseMetadata = undefined;
+    this.compositionFinalMetadata = undefined;
     this.view.dispatch({ effects: this.editable.reconfigure(EditorView.editable.of(false)) });
-    this.showStatus(`Editing paused to protect unsynchronized text: ${note}`);
+    this.showStatus(
+      `Editing paused to protect unsynchronized text: ${note} [incident ${String(recoveryIncidentId)}]`,
+    );
   }
 
   private sendNextBarrier(): void {
@@ -530,6 +675,7 @@ class MarkdownWebviewController {
       this.barriers.barrierInFlightSequence !== undefined ||
       this.pendingEdits.hasPending ||
       this.composition.isActive ||
+      this.recoveryActive ||
       this.disposed
     ) {
       return;
@@ -552,7 +698,7 @@ class MarkdownWebviewController {
       shortcutAttemptId: request.shortcutAttemptId,
       documentVersion: this.documentVersion,
       composing: this.view.composing,
-      ...this.focusTraceDetails(),
+      ...this.syncStateDetails(),
     });
     this.vscode.postMessage(message);
   }
@@ -574,6 +720,29 @@ class MarkdownWebviewController {
   private showStatus(note: string): void {
     this.statusElement.textContent = note;
     this.statusElement.hidden = false;
+  }
+
+  private resolveDeferredInFlightSnapshot(
+    resolution: "ack" | "resync",
+    resolvedDocumentVersion: number,
+  ): number {
+    const deferred = this.deferredInFlightSnapshot;
+    this.deferredInFlightSnapshot = undefined;
+    if (deferred === undefined) {
+      return resolvedDocumentVersion;
+    }
+    const authoritativeDocumentVersion =
+      resolution === "ack"
+        ? Math.max(resolvedDocumentVersion, deferred.documentVersion)
+        : resolvedDocumentVersion;
+    this.diagnostics.record("sync.document.update.deferred-resolved", {
+      authoritativeDocumentVersion,
+      deferredDocumentVersion: deferred.documentVersion,
+      reason: deferred.reason,
+      resolvedDocumentVersion,
+      resolution,
+    });
+    return authoritativeDocumentVersion;
   }
 
   private traceCodeMirrorUpdate(update: ViewUpdate): void {
@@ -622,6 +791,44 @@ class MarkdownWebviewController {
       webviewActive: document.visibilityState === "visible",
     };
   }
+
+  private syncStateDetails(): Readonly<Record<string, TraceValue>> {
+    const authority = diagnosticTextMetadata(this.pendingEdits.authority);
+    const inFlight = this.pendingEdits.inFlightTarget;
+    const pending = this.pendingEdits.pendingTarget;
+    return {
+      sessionId: this.bootstrap.sessionId,
+      authorityFingerprint: authority.fingerprint,
+      authorityLength: authority.length,
+      inFlightTargetFingerprint: inFlight === undefined ? "none" : textFingerprint(inFlight),
+      inFlightTargetLength: inFlight?.length ?? -1,
+      pendingTargetFingerprint: pending === undefined ? "none" : textFingerprint(pending),
+      pendingTargetLength: pending?.length ?? -1,
+      compositionBaseFingerprint: this.compositionBaseMetadata?.fingerprint ?? "none",
+      compositionBaseLength: this.compositionBaseMetadata?.length ?? -1,
+      compositionFinalFingerprint: this.compositionFinalMetadata?.fingerprint ?? "none",
+      compositionFinalLength: this.compositionFinalMetadata?.length ?? -1,
+    };
+  }
+
+  private correlationDetails(
+    correlation: HostMessageCorrelation | undefined,
+  ): Readonly<Record<string, TraceValue>> {
+    return {
+      correlationCausalId: correlation?.causalId,
+      correlationPublicationId: correlation?.publicationId,
+      correlationSource: correlation?.source,
+      correlationQueueEnqueueOrdinal: correlation?.queueEnqueueOrdinal,
+      correlationQueueStartOrdinal: correlation?.queueStartOrdinal,
+      correlationOriginSessionId: correlation?.originSessionId,
+      correlationOperationSequence: correlation?.operationSequence,
+      correlationExternalEventId: correlation?.externalEventId,
+    };
+  }
+}
+
+function diagnosticTextMetadata(text: string): TextDiagnosticMetadata {
+  return { fingerprint: textFingerprint(text), length: text.length };
 }
 
 function fullDocumentReplacement(
@@ -697,6 +904,16 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 type TraceValue = boolean | number | string | undefined;
+
+function definedDiagnosticDetails(
+  details: Readonly<Record<string, TraceValue>>,
+): Readonly<Record<string, boolean | number | string>> {
+  return Object.fromEntries(
+    Object.entries(details).filter(
+      (entry): entry is [string, boolean | number | string] => entry[1] !== undefined,
+    ),
+  );
+}
 
 interface DiagnosticTrace {
   record(kind: string, details: Readonly<Record<string, TraceValue>>): void;

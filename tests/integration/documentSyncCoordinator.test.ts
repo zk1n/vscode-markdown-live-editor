@@ -7,6 +7,8 @@ import {
   type DocumentSnapshot,
   type WebviewEndpoint,
 } from "../../src/core/sync/documentSyncCoordinator.js";
+import { BoundedDiagnosticLog } from "../../src/core/diagnostics/diagnosticLog.js";
+import { textFingerprint } from "../../src/core/diagnostics/textFingerprint.js";
 import type {
   ClientEditMessage,
   HostToWebviewMessage,
@@ -252,7 +254,7 @@ describe("DocumentSyncCoordinator", () => {
     expect(endpoint.messages.some((message) => message.kind === "resync")).toBe(false);
   });
 
-  it("serializes queued edits, acknowledges each one, and broadcasts authority", async () => {
+  it("acknowledges the origin and sends each edit snapshot only to peer sessions", async () => {
     const port = new FakeDocumentPort("");
     const coordinator = new DocumentSyncCoordinator(port);
     const endpointA = new RecordingEndpoint();
@@ -269,13 +271,24 @@ describe("DocumentSyncCoordinator", () => {
     expect(endpointA.messages.filter((message) => message.kind === "operation-ack")).toHaveLength(
       2,
     );
-    expect(endpointB.messages).toContainEqual({
+    expect(
+      endpointA.messages.filter(
+        (message) => message.kind === "document-update" && message.reason === "edit",
+      ),
+    ).toHaveLength(0);
+    const peerUpdate = endpointB.messages.find(
+      (message): message is Extract<HostToWebviewMessage, { readonly kind: "document-update" }> =>
+        message.kind === "document-update" && message.documentVersion === 3,
+    );
+    expect(peerUpdate).toMatchObject({
       kind: "document-update",
       reason: "edit",
       documentUri: DOCUMENT_URI,
       documentVersion: 3,
       text: "AB",
     });
+    expect(peerUpdate?.correlation?.causalId).toBe("operation:session-a:2");
+    expect(peerUpdate?.correlation?.source).toBe("operation-peer");
   });
 
   it("rejects a sequence gap without applying it, then accepts the expected sequence", async () => {
@@ -333,6 +346,23 @@ describe("DocumentSyncCoordinator", () => {
     });
   });
 
+  it("records fingerprint-only evidence when a claimed replacement misses authority", async () => {
+    const port = new FakeDocumentPort("- ");
+    const diagnostics = new BoundedDiagnosticLog();
+    const coordinator = new DocumentSyncCoordinator(port, diagnostics);
+    const endpoint = new RecordingEndpoint();
+    await coordinator.openSession(DOCUMENT_URI, "session-a", endpoint);
+
+    await coordinator.receive(fullReplacementEdit(1, 1, "-x", "- 日本"), endpoint);
+
+    const trace = diagnostics.copyText();
+    expect(trace).toContain("coordinator.edit.change-mismatch");
+    expect(trace).toContain(`authorityTextFingerprint=${JSON.stringify(textFingerprint("- "))}`);
+    expect(trace).toContain(`expectedTextFingerprint=${JSON.stringify(textFingerprint("-x"))}`);
+    expect(trace).toContain(`actualTextFingerprint=${JSON.stringify(textFingerprint("- "))}`);
+    expect(endpoint.messages.at(-1)).toMatchObject({ kind: "resync", reason: "change-mismatch" });
+  });
+
   it("uses Save and Undo as FIFO barriers after visible edits", async () => {
     const port = new FakeDocumentPort("");
     const coordinator = new DocumentSyncCoordinator(port);
@@ -347,8 +377,8 @@ describe("DocumentSyncCoordinator", () => {
 
     expect(port.calls).toEqual(["replace:日本語", "save", "undo"]);
     expect(endpoint.messages.at(-1)).toMatchObject({
-      kind: "document-update",
-      reason: "undo",
+      kind: "operation-ack",
+      operation: "undo",
       text: "",
     });
   });
@@ -397,12 +427,12 @@ describe("DocumentSyncCoordinator", () => {
       "redo",
     ]);
     expect(endpoint.messages).toContainEqual(
-      expect.objectContaining({ kind: "document-update", reason: "undo", text: "ABCDあいう" }),
+      expect.objectContaining({ kind: "operation-ack", operation: "undo", text: "ABCDあいう" }),
     );
     expect(endpoint.messages).toContainEqual(
       expect.objectContaining({
-        kind: "document-update",
-        reason: "redo",
+        kind: "operation-ack",
+        operation: "redo",
         text: "ABCDあいうかきく",
       }),
     );
@@ -498,23 +528,126 @@ describe("DocumentSyncCoordinator", () => {
     });
   });
 
-  it("broadcasts an external authoritative change without applying a client edit", async () => {
+  it("broadcasts an external authoritative change to every open session without applying a client edit", async () => {
     const port = new FakeDocumentPort("before");
     const coordinator = new DocumentSyncCoordinator(port);
-    const endpoint = new RecordingEndpoint();
-    await coordinator.openSession(DOCUMENT_URI, "session-a", endpoint);
+    const endpointA = new RecordingEndpoint();
+    const endpointB = new RecordingEndpoint();
+    await coordinator.openSession(DOCUMENT_URI, "session-a", endpointA);
+    await coordinator.openSession(DOCUMENT_URI, "session-b", endpointB);
     port.applyExternalChange("after");
 
     await coordinator.publishExternalChange(DOCUMENT_URI);
 
     expect(port.calls).toEqual([]);
-    expect(endpoint.messages.at(-1)).toEqual({
+    const expectedUpdate = {
       kind: "document-update",
       reason: "external",
       documentUri: DOCUMENT_URI,
       documentVersion: 2,
       text: "after",
+    };
+    expect(endpointA.messages.at(-1)).toMatchObject(expectedUpdate);
+    expect(endpointB.messages.at(-1)).toMatchObject(expectedUpdate);
+    const externalUpdate = endpointA.messages.at(-1);
+    expect(externalUpdate?.kind).toBe("document-update");
+    if (externalUpdate?.kind === "document-update") {
+      expect(externalUpdate.correlation?.source).toBe("external-event");
+    }
+  });
+
+  it("records event-time to queue-time drift without broadcasting the event text as metadata", async () => {
+    const port = new FakeDocumentPort("before");
+    const diagnostics = new BoundedDiagnosticLog();
+    const coordinator = new DocumentSyncCoordinator(port, diagnostics);
+    const endpoint = new RecordingEndpoint();
+    await coordinator.openSession(DOCUMENT_URI, "session-a", endpoint);
+    const eventVersion = 1;
+    const eventFingerprint = textFingerprint("before");
+    port.applyExternalChange("after");
+
+    await coordinator.publishExternalChange(DOCUMENT_URI, {
+      eventId: "document-change-1",
+      eventDocumentVersion: eventVersion,
+      eventTextFingerprint: eventFingerprint,
+      eventTextLength: "before".length,
+      contentChangeCount: 0,
+      classification: "external",
     });
+
+    const update = endpoint.messages.at(-1);
+    expect(update).toMatchObject({
+      kind: "document-update",
+      reason: "external",
+      text: "after",
+    });
+    if (update?.kind === "document-update") {
+      expect(update.correlation?.causalId).toBe("external:document-change-1");
+      expect(update.correlation?.externalEventId).toBe("document-change-1");
+      expect(update.correlation?.source).toBe("external-event");
+    }
+    const trace = diagnostics.copyText();
+    expect(trace).toContain("coordinator.external.publish-enqueued");
+    expect(trace).toContain('eventId="document-change-1"');
+    expect(trace).toContain("coordinator.external.publish-executed");
+    expect(trace).toContain("temporalDrift=true");
+    expect(trace).toContain(eventFingerprint);
+    expect(trace).not.toContain("before");
+    expect(trace).not.toContain("after");
+  });
+
+  it("sends ACKs to the origin and authoritative snapshots to peers for edit, Save, Undo, and Redo", async () => {
+    const port = new FakeDocumentPort("before");
+    const diagnostics = new BoundedDiagnosticLog();
+    const coordinator = new DocumentSyncCoordinator(port, diagnostics);
+    const endpointA = new RecordingEndpoint();
+    const endpointB = new RecordingEndpoint();
+    await coordinator.openSession(DOCUMENT_URI, "session-a", endpointA);
+    await coordinator.openSession(DOCUMENT_URI, "session-b", endpointB);
+
+    await coordinator.receive(fullReplacementEdit(1, 1, "before", "after"), endpointA);
+    await coordinator.receive(barrier("save", 2), endpointA);
+    await coordinator.receive(barrier("undo", 3), endpointA);
+    await coordinator.receive(barrier("redo", 4), endpointA);
+
+    const originOperations = endpointA.messages.filter(
+      (message): message is Extract<HostToWebviewMessage, { readonly kind: "operation-ack" }> =>
+        message.kind === "operation-ack",
+    );
+    expect(
+      originOperations.map(({ operation, sequence, text }) => ({ operation, sequence, text })),
+    ).toEqual([
+      { operation: "edit", sequence: 1, text: "after" },
+      { operation: "save", sequence: 2, text: "after" },
+      { operation: "undo", sequence: 3, text: "before" },
+      { operation: "redo", sequence: 4, text: "after" },
+    ]);
+    expect(endpointA.messages.filter((message) => message.kind === "document-update")).toHaveLength(
+      1,
+    );
+    expect(
+      endpointB.messages
+        .filter(
+          (
+            message,
+          ): message is Extract<HostToWebviewMessage, { readonly kind: "document-update" }> =>
+            message.kind === "document-update" && message.reason !== "opened",
+        )
+        .map(({ reason, text }) => ({ reason, text })),
+    ).toEqual([
+      { reason: "edit", text: "after" },
+      { reason: "save", text: "after" },
+      { reason: "undo", text: "before" },
+      { reason: "redo", text: "after" },
+    ]);
+
+    const trace = diagnostics.copyText();
+    expect(trace).toContain("coordinator.ack");
+    expect(trace).toContain('originSessionId="session-a"');
+    expect(trace).toContain("coordinator.broadcast");
+    expect(trace).toContain('excludedSessionId="session-a"');
+    expect(trace).toContain("peerCount=1");
+    expect(trace).toContain('logicalOrder="after-ack"');
   });
 
   it("rejects a disposed session and safely starts a reopened session", async () => {

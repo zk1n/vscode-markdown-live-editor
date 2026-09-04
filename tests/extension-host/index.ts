@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { TextDecoder, TextEncoder } from "node:util";
+import * as prettier from "prettier";
 import * as vscode from "vscode";
 
 import {
@@ -7,6 +8,13 @@ import {
   type DocumentPortResult,
   type WebviewEndpoint,
 } from "../../src/core/sync/documentSyncCoordinator.js";
+import { BoundedDiagnosticLog } from "../../src/core/diagnostics/diagnosticLog.js";
+import { textFingerprint } from "../../src/core/diagnostics/textFingerprint.js";
+import {
+  createDocumentChangeHandler,
+  createWillSaveTextDocumentHandler,
+} from "../../src/extension/extension.js";
+import { shouldWarnForMarkdownTrailingWhitespace } from "../../src/extension/markdownTrailingWhitespace.js";
 import { PROTOCOL_VERSION, type HostToWebviewMessage } from "../../src/protocol/messages.js";
 import { VscodeDocumentPort } from "../../src/extension/sync/VscodeDocumentPort.js";
 
@@ -19,7 +27,10 @@ const FIRST_EDIT_LF_FILE_NAME = "extension-host-first-edit-lf.md";
 const COMPOSITION_HISTORY_FILE_NAME = "extension-host-composition-history.md";
 const COMPOSITION_GROUPING_FILE_NAME = "extension-host-composition-grouping.md";
 const SAVE_PROBE_FILE_NAME = "extension-host-save-probe.md";
+const MIXED_LIST_SAVE_PROBE_FILE_NAME = "extension-host-mixed-list-save-probe.md";
 const OWN_CHANGE_FILE_NAME = "extension-host-own-change.md";
+const PRODUCTION_LISTENER_FILE_NAME = "extension-host-production-listener.md";
+const AUTOSAVE_TRIM_FILE_NAME = "extension-host-autosave-trim.md";
 
 export async function run(): Promise<void> {
   const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
@@ -77,7 +88,253 @@ export async function run(): Promise<void> {
   await verifyCompositionHistoryPath(workspaceFolder.uri);
   await verifyWorkspaceEditUndoGrouping(workspaceFolder.uri);
   await verifySaveSemantics(workspaceFolder.uri);
+  await verifyMixedListSaveParticipantSemantics(workspaceFolder.uri);
   await verifyOwnChangeClassification(workspaceFolder.uri);
+  await verifyProductionDocumentChangeListener(workspaceFolder.uri);
+  await verifyAutosaveTrailingWhitespaceProtection(workspaceFolder.uri);
+}
+
+interface SaveParticipantObservation {
+  readonly documentVersion: number;
+  readonly fingerprint: string;
+  readonly contentChangeCount: number;
+  readonly firstChangeRange: string;
+  readonly firstChangeTextFingerprint: string;
+  readonly textLength: number;
+}
+
+async function verifyAutosaveTrailingWhitespaceProtection(workspaceUri: vscode.Uri): Promise<void> {
+  const documentUri = vscode.Uri.joinPath(workspaceUri, AUTOSAVE_TRIM_FILE_NAME);
+  await removeSmokeFile(documentUri);
+
+  const settings = captureAutosaveTrimSettings(documentUri);
+  try {
+    await setAutosaveTrimSettings(documentUri, {
+      autoSave: "afterDelay",
+      autoSaveDelay: 1000,
+      markdownTrimTrailingWhitespace: undefined,
+      trimTrailingWhitespace: true,
+    });
+    await vscode.workspace.fs.writeFile(documentUri, new TextEncoder().encode("-"));
+    const document = await vscode.workspace.openTextDocument(documentUri);
+    await vscode.commands.executeCommand("vscode.openWith", documentUri, VIEW_TYPE);
+    assertCustomEditorOpened(documentUri);
+    assert.equal(
+      vscode.window.visibleTextEditors.some(
+        (editor) => editor.document.uri.toString() === documentUri.toString(),
+      ),
+      false,
+      "The Auto Save trim fixture unexpectedly has a visible normal TextEditor.",
+    );
+
+    const files = markdownFilesConfiguration(document);
+    assert.equal(
+      files.get<boolean>("trimTrailingWhitespace"),
+      false,
+      `The Markdown language default did not override the non-language trim setting: ${JSON.stringify(files.inspect<boolean>("trimTrailingWhitespace"))}`,
+    );
+    const trimInspection = files.inspect<boolean>("trimTrailingWhitespace");
+    assert.ok(trimInspection, "The trailing-whitespace setting is not inspectable.");
+    assert.equal(
+      trimInspection.defaultLanguageValue,
+      false,
+      "The Markdown configuration default was not contributed.",
+    );
+    assert.equal(
+      trimInspection.globalValue,
+      true,
+      "The non-language trim setting was not retained for precedence coverage.",
+    );
+    assert.equal(
+      trimInspection.globalLanguageValue,
+      undefined,
+      "The default regression must not install a Markdown override.",
+    );
+    const endpoint = new RecordingEndpoint();
+    const diagnostics = new BoundedDiagnosticLog();
+    const port = new VscodeDocumentPort(diagnostics);
+    const coordinator = new DocumentSyncCoordinator(port, diagnostics);
+    const opened = await coordinator.openSession(
+      documentUri.toString(),
+      "autosave-trim-default",
+      endpoint,
+    );
+    assert.ok(opened.ok, "The Auto Save trim coordinator session did not open.");
+
+    const observations = observeAutosaveTrim(documentUri);
+    const saveListener = vscode.workspace.onWillSaveTextDocument(
+      createWillSaveTextDocumentHandler(port, coordinator, diagnostics),
+    );
+    try {
+      await coordinator.receive(
+        fullReplacementMessage(
+          documentUri.toString(),
+          "autosave-trim-default",
+          1,
+          opened.snapshot.documentVersion,
+          opened.snapshot.text,
+          "- ",
+        ),
+        endpoint,
+      );
+      const acknowledgement = endpoint.messages.find(
+        (message): message is Extract<HostToWebviewMessage, { readonly kind: "operation-ack" }> =>
+          message.kind === "operation-ack" && message.sequence === 1,
+      );
+      assert.ok(acknowledgement, "The trailing-space edit did not receive an exact ACK.");
+      assert.equal(acknowledgement.text, "- ", "The ACK did not preserve the trailing space.");
+
+      await observations.waitForAfterDelaySave();
+      assert.equal(
+        document.getText(),
+        "- ",
+        "After-delay Save removed the Markdown trailing space.",
+      );
+      assert.equal(
+        await readDiskText(documentUri),
+        "- ",
+        "Disk did not retain the Markdown trailing space.",
+      );
+      assert.equal(
+        observations.hasDestructiveTrim(),
+        false,
+        "A destructive B -> A event was emitted.",
+      );
+
+      const trace = diagnostics.copyText();
+      assert.match(trace, /extension\.will-save/, "Production will-save listener was not invoked.");
+      assert.match(trace, /saveReason="after-delay"/, "After-delay save reason was not recorded.");
+      assert.match(trace, /files\.autoSave="afterDelay"/, "Effective Auto Save was not recorded.");
+      assert.match(
+        trace,
+        /files\.autoSaveDelay=1000/,
+        "Effective Auto Save delay was not recorded.",
+      );
+      assert.match(
+        trace,
+        /files\.trimTrailingWhitespace=false/,
+        "Effective Markdown trailing-whitespace setting was not recorded.",
+      );
+      assert.match(
+        trace,
+        /editor\.formatOnSave=false/,
+        "Effective format-on-save setting was not recorded.",
+      );
+      assert.match(
+        trace,
+        /hasVisibleTextEditor=false/,
+        "Custom-editor-only visibility was not recorded.",
+      );
+      assert.equal(trace.includes("- "), false, "Diagnostic metadata exposed source text.");
+
+      await setAutosaveTrimSettings(documentUri, {
+        autoSave: "afterDelay",
+        autoSaveDelay: 1000,
+        markdownTrimTrailingWhitespace: true,
+        trimTrailingWhitespace: true,
+      });
+      assert.equal(
+        markdownFilesConfiguration(document).get<boolean>("trimTrailingWhitespace"),
+        true,
+        "An explicit Markdown override did not take precedence over the language default.",
+      );
+      assert.equal(
+        shouldWarnForMarkdownTrailingWhitespace(
+          markdownFilesConfiguration(document).get<boolean>("trimTrailingWhitespace"),
+        ),
+        true,
+        "The explicit incompatible override did not enable the compatibility warning.",
+      );
+      assert.equal(
+        markdownFilesConfiguration(document).inspect<boolean>("trimTrailingWhitespace")
+          ?.globalLanguageValue,
+        true,
+        "The extension changed the user-owned explicit Markdown override.",
+      );
+      await setAutosaveTrimSettings(documentUri, {
+        autoSave: "afterDelay",
+        autoSaveDelay: 1000,
+        markdownTrimTrailingWhitespace: false,
+        trimTrailingWhitespace: true,
+      });
+      assert.equal(
+        shouldWarnForMarkdownTrailingWhitespace(
+          markdownFilesConfiguration(document).get<boolean>("trimTrailingWhitespace"),
+        ),
+        false,
+        "An explicit safe Markdown override still requests a warning.",
+      );
+    } finally {
+      saveListener.dispose();
+      observations.dispose();
+      coordinator.closeSession(documentUri.toString(), "autosave-trim-default");
+    }
+  } finally {
+    await restoreAutosaveTrimSettings(documentUri, settings);
+    await closeCustomEditor(documentUri);
+    await removeSmokeFile(documentUri);
+  }
+}
+
+async function verifyProductionDocumentChangeListener(workspaceUri: vscode.Uri): Promise<void> {
+  const documentUri = vscode.Uri.joinPath(workspaceUri, PRODUCTION_LISTENER_FILE_NAME);
+  await removeSmokeFile(documentUri);
+
+  try {
+    await vscode.workspace.fs.writeFile(documentUri, new TextEncoder().encode("- \r\n"));
+    const document = await vscode.workspace.openTextDocument(documentUri);
+    const diagnostics = new BoundedDiagnosticLog();
+    const port = new VscodeDocumentPort(diagnostics);
+    const coordinator = new DocumentSyncCoordinator(port, diagnostics);
+    const endpoint = new RecordingEndpoint();
+    const opened = await coordinator.openSession(
+      documentUri.toString(),
+      "production-listener",
+      endpoint,
+    );
+    assert.ok(opened.ok, "Production-listener session did not open.");
+    const listener = createDocumentChangeHandler(port, coordinator, diagnostics);
+    const subscription = vscode.workspace.onDidChangeTextDocument(listener);
+    try {
+      await coordinator.receive(
+        fullReplacementMessage(
+          documentUri.toString(),
+          "production-listener",
+          1,
+          opened.snapshot.documentVersion,
+          opened.snapshot.text,
+          "- 日本\n",
+        ),
+        endpoint,
+      );
+      await coordinator.flush(documentUri.toString());
+    } finally {
+      subscription.dispose();
+    }
+
+    assert.equal(document.getText(), "- 日本\r\n", "Production listener changed source text.");
+    const acknowledgement = endpoint.messages.find(
+      (message): message is Extract<HostToWebviewMessage, { readonly kind: "operation-ack" }> =>
+        message.kind === "operation-ack" && message.sequence === 1,
+    );
+    assert.ok(acknowledgement, "Origin did not receive its exact edit acknowledgement.");
+    assert.match(
+      String(acknowledgement.correlation?.causalId),
+      /^operation:production-listener:1$/,
+      "ACK lacks operation correlation.",
+    );
+    const trace = diagnostics.copyText();
+    assert.match(trace, /extension\.document\.changed/, "Production listener was not invoked.");
+    assert.match(trace, /eventId="document-change-/, "Listener event ID was not recorded.");
+    assert.match(trace, /coordinator\.queue\.enqueued/, "Queue correlation was not recorded.");
+    assert.equal(
+      trace.includes("日本"),
+      false,
+      "Diagnostic metadata must not contain source text.",
+    );
+  } finally {
+    await removeSmokeFile(documentUri);
+  }
 }
 
 async function verifyOwnChangeClassification(workspaceUri: vscode.Uri): Promise<void> {
@@ -85,33 +342,119 @@ async function verifyOwnChangeClassification(workspaceUri: vscode.Uri): Promise<
   await removeSmokeFile(documentUri);
 
   try {
-    await vscode.workspace.fs.writeFile(documentUri, new TextEncoder().encode("before"));
+    // Use a CRLF fixture to prove that the classifier compares protocol LF
+    // with the native event's CRLF replacement at the adapter boundary.
+    await vscode.workspace.fs.writeFile(documentUri, new TextEncoder().encode("before\r\n"));
     const document = await vscode.workspace.openTextDocument(documentUri);
-    const port = new VscodeDocumentPort();
-    const classifications: ("own" | "external")[] = [];
+    const classificationDiagnostics: Readonly<
+      Record<string, boolean | number | string | undefined>
+    >[] = [];
+    const port = new VscodeDocumentPort({
+      record: (kind, details): void => {
+        if (kind === "port.document-change.classified") {
+          classificationDiagnostics.push(details);
+        }
+      },
+    });
+    const observations: {
+      readonly classification: "own" | "external";
+      readonly contentChangeCount: number;
+      readonly documentText: string;
+      readonly documentVersion: number;
+      readonly replacementText: string | undefined;
+      readonly replacePromiseSettled: boolean;
+    }[] = [];
+    let replacePromiseSettled = false;
     const subscription = vscode.workspace.onDidChangeTextDocument((event): void => {
       if (event.document.uri.toString() === documentUri.toString()) {
-        classifications.push(port.classifyDocumentChange(event));
+        observations.push({
+          classification: port.classifyDocumentChange(event),
+          contentChangeCount: event.contentChanges.length,
+          documentText: event.document.getText(),
+          documentVersion: event.document.version,
+          replacementText: event.contentChanges[0]?.text,
+          // The event is delivered before replaceDocument's promise settles;
+          // this is the timing window in which the pending target is valid.
+          replacePromiseSettled,
+        });
       }
     });
 
     try {
-      assertPortApplied(
-        await port.replaceDocument(documentUri.toString(), document.version, "owned"),
-        "Port-owned WorkspaceEdit was rejected.",
-      );
-      await replaceWholeDocument(document, documentUri, "external");
+      const expectedVersion = document.version;
+      const replacement = port.replaceDocument(documentUri.toString(), expectedVersion, "owned\n");
+      assertPortApplied(await replacement, "Port-owned WorkspaceEdit was rejected.");
+      replacePromiseSettled = true;
+      await replaceWholeDocument(document, documentUri, "external\n");
     } finally {
       subscription.dispose();
     }
 
     assert.equal(
-      classifications.filter((classification) => classification === "own").length,
+      observations.filter(({ classification }) => classification === "own").length,
       1,
       "Only the exact port replacement may be classified as own.",
     );
+    assert.deepEqual(
+      observations[0],
+      {
+        classification: "own",
+        contentChangeCount: 1,
+        documentText: "owned\r\n",
+        documentVersion: 2,
+        replacementText: "owned\r\n",
+        replacePromiseSettled: false,
+      },
+      "The port-owned event did not match the exact version, target, replacement, and timing contract.",
+    );
+    assert.deepEqual(
+      classificationDiagnostics.map(
+        ({
+          classification,
+          contentChangeCount,
+          pendingExpectedVersion,
+          replacementMatches,
+          targetMatches,
+          versionMatches,
+        }) => ({
+          classification,
+          contentChangeCount,
+          pendingExpectedVersion,
+          replacementMatches,
+          targetMatches,
+          versionMatches,
+        }),
+      ),
+      [
+        {
+          classification: "own",
+          contentChangeCount: 1,
+          pendingExpectedVersion: 1,
+          replacementMatches: true,
+          targetMatches: true,
+          versionMatches: true,
+        },
+        {
+          classification: "external",
+          contentChangeCount: 0,
+          pendingExpectedVersion: 1,
+          replacementMatches: false,
+          targetMatches: true,
+          versionMatches: true,
+        },
+        {
+          classification: "external",
+          contentChangeCount: 1,
+          pendingExpectedVersion: -1,
+          replacementMatches: false,
+          targetMatches: false,
+          versionMatches: false,
+        },
+      ],
+      "Classification diagnostics did not expose the expected pending/version/target/replacement checks.",
+    );
     assert.equal(
-      classifications.at(-1),
+      observations.at(-1)?.classification,
       "external",
       "A later external WorkspaceEdit was incorrectly suppressed as own.",
     );
@@ -198,7 +541,17 @@ async function verifySeparateCompositionCommitsFollowHostGrouping(
   try {
     await vscode.workspace.fs.writeFile(documentUri, new TextEncoder().encode("X"));
     const document = await vscode.workspace.openTextDocument(documentUri);
-    const coordinator = new DocumentSyncCoordinator(new VscodeDocumentPort());
+    const historyClassificationDiagnostics: Readonly<
+      Record<string, boolean | number | string | undefined>
+    >[] = [];
+    const port = new VscodeDocumentPort({
+      record: (kind, details): void => {
+        if (kind === "port.document-change.classified") {
+          historyClassificationDiagnostics.push(details);
+        }
+      },
+    });
+    const coordinator = new DocumentSyncCoordinator(port);
     const endpoint = new RecordingEndpoint();
     const opened = await coordinator.openSession(
       documentUri.toString(),
@@ -206,58 +559,131 @@ async function verifySeparateCompositionCommitsFollowHostGrouping(
       endpoint,
     );
     assert.ok(opened.ok, "Composition grouping session did not open.");
+    // Mirror the extension integration listener so this probe can observe
+    // whether a history event is classified external and queued as a second
+    // snapshot on the same coordinator/session.
+    const classificationTrace: {
+      readonly classification: "own" | "external";
+      readonly contentChangeCount: number;
+      readonly documentVersion: number;
+      readonly text: string;
+      readonly replacementText: string | undefined;
+    }[] = [];
+    const documentChangeSubscription = vscode.workspace.onDidChangeTextDocument((event): void => {
+      if (event.document.uri.toString() === documentUri.toString()) {
+        const classification = port.classifyDocumentChange(event);
+        classificationTrace.push({
+          classification,
+          contentChangeCount: event.contentChanges.length,
+          documentVersion: event.document.version,
+          replacementText: event.contentChanges[0]?.text,
+          text: event.document.getText(),
+        });
+        if (classification === "external") {
+          void coordinator.publishExternalChange(documentUri.toString());
+        }
+      }
+    });
 
-    await coordinator.receive(
-      fullReplacementMessage(
-        documentUri.toString(),
-        "composition-grouping",
-        1,
-        opened.snapshot.documentVersion,
-        opened.snapshot.text,
-        "Xあいう",
-      ),
-      endpoint,
-    );
-    const firstCommit = endpoint.messages.find(isEditAcknowledgement);
-    assert.ok(firstCommit, "The first composition-equivalent commit was not acknowledged.");
+    try {
+      await coordinator.receive(
+        fullReplacementMessage(
+          documentUri.toString(),
+          "composition-grouping",
+          1,
+          opened.snapshot.documentVersion,
+          opened.snapshot.text,
+          "Xあいう",
+        ),
+        endpoint,
+      );
+      const firstCommit = endpoint.messages.find(isEditAcknowledgement);
+      assert.ok(firstCommit, "The first composition-equivalent commit was not acknowledged.");
 
-    await coordinator.receive(
-      fullReplacementMessage(
-        documentUri.toString(),
-        "composition-grouping",
-        2,
-        firstCommit.documentVersion,
-        firstCommit.text,
+      await coordinator.receive(
+        fullReplacementMessage(
+          documentUri.toString(),
+          "composition-grouping",
+          2,
+          firstCommit.documentVersion,
+          firstCommit.text,
+          "Xあいうかきく",
+        ),
+        endpoint,
+      );
+      assert.equal(
+        document.getText(),
         "Xあいうかきく",
-      ),
-      endpoint,
-    );
-    assert.equal(
-      document.getText(),
-      "Xあいうかきく",
-      "The second composition-equivalent edit failed.",
-    );
+        "The second composition-equivalent edit failed.",
+      );
+      assert.deepEqual(
+        classificationTrace
+          .filter(({ classification }) => classification === "own")
+          .map(({ text }) => text),
+        ["Xあいう", "Xあいうかきく"],
+        "The two port-owned WorkspaceEdits were not both classified own.",
+      );
 
-    await vscode.commands.executeCommand("vscode.openWith", documentUri, VIEW_TYPE);
-    assertCustomEditorOpened(documentUri);
-    await coordinator.receive(
-      barrierMessage(documentUri.toString(), "composition-grouping", "undo", 3),
-      endpoint,
-    );
-    assert.equal(
-      document.getText(),
-      "Xあいう",
-      "Separate composition-equivalent WorkspaceEdits did not remain separate Undo units.",
-    );
-    await coordinator.receive(
-      barrierMessage(documentUri.toString(), "composition-grouping", "redo", 4),
-      endpoint,
-    );
-    assert.equal(
-      document.getText(),
-      "Xあいうかきく",
-      "Redo did not restore both composition commits.",
-    );
+      await vscode.commands.executeCommand("vscode.openWith", documentUri, VIEW_TYPE);
+      assertCustomEditorOpened(documentUri);
+      const beforeUndoMessages = endpoint.messages.length;
+      await coordinator.receive(
+        barrierMessage(documentUri.toString(), "composition-grouping", "undo", 3),
+        endpoint,
+      );
+      // The history command itself emits a TextDocument change while
+      // historyInProgress is set. The current classifier intentionally keeps
+      // that event external, so the extension listener queues a second
+      // external snapshot after the barrier's own acknowledgement/broadcast.
+      await coordinator.flush(documentUri.toString());
+      const undoTrace = classificationTrace.at(-1);
+      assert.deepEqual(
+        undoTrace,
+        {
+          classification: "external",
+          contentChangeCount: 1,
+          documentVersion: document.version,
+          replacementText: "Xあいう",
+          text: "Xあいう",
+        },
+        "Undo was not observed as a single external history change while history was in progress.",
+      );
+      assert.match(
+        String(historyClassificationDiagnostics.at(-1)?.["historyInvocationId"]),
+        /^history-/,
+        "Undo classification did not observe the active history invocation.",
+      );
+      const undoMessages = endpoint.messages.slice(beforeUndoMessages);
+      assert.equal(
+        undoMessages.some(
+          (message) => message.kind === "document-update" && message.reason === "external",
+        ),
+        true,
+        "The external history event was not queued as an external snapshot.",
+      );
+      assert.equal(
+        document.getText(),
+        "Xあいう",
+        "Separate composition-equivalent WorkspaceEdits did not remain separate Undo units.",
+      );
+      await coordinator.receive(
+        barrierMessage(documentUri.toString(), "composition-grouping", "redo", 4),
+        endpoint,
+      );
+      await coordinator.flush(documentUri.toString());
+      assert.equal(
+        document.getText(),
+        "Xあいうかきく",
+        "Redo did not restore both composition commits.",
+      );
+      assert.match(
+        String(historyClassificationDiagnostics.at(-1)?.["historyInvocationId"]),
+        /^history-/,
+        "Redo classification did not observe the active history invocation.",
+      );
+    } finally {
+      documentChangeSubscription.dispose();
+    }
   } finally {
     await removeSmokeFile(documentUri);
   }
@@ -381,6 +807,296 @@ async function verifySaveSemantics(workspaceUri: vscode.Uri): Promise<void> {
   } finally {
     await removeSmokeFile(documentUri);
   }
+}
+
+async function verifyMixedListSaveParticipantSemantics(workspaceUri: vscode.Uri): Promise<void> {
+  const documentUri = vscode.Uri.joinPath(workspaceUri, MIXED_LIST_SAVE_PROBE_FILE_NAME);
+  const source = "probe\n\n- unordered\n1. ordered\n";
+  const editedSource = "probex\n\n- unordered\n1. ordered\n";
+  const prettierSource = "probex\n\n- unordered\n\n1. ordered\n";
+  await removeSmokeFile(documentUri);
+
+  const formatter = vscode.languages.registerDocumentFormattingEditProvider(
+    { language: "markdown" },
+    {
+      provideDocumentFormattingEdits: async (document): Promise<vscode.TextEdit[]> => {
+        const formatted = await prettier.format(document.getText(), { parser: "markdown" });
+        return formatted === document.getText()
+          ? []
+          : [vscode.TextEdit.replace(fullDocumentRange(document), formatted)];
+      },
+    },
+  );
+
+  try {
+    await vscode.workspace.fs.writeFile(documentUri, new TextEncoder().encode(source));
+    const document = await vscode.workspace.openTextDocument(documentUri);
+    assertCleanFormatterOffConfiguration(documentUri);
+
+    const formatterOffObservations = observeDocument(documentUri);
+    try {
+      await replaceWholeDocument(document, documentUri, editedSource);
+      formatterOffObservations.record("normal-editor-before-save");
+      assert.equal(
+        await document.save(),
+        true,
+        "Formatter-off normal-editor Save did not complete.",
+      );
+      formatterOffObservations.record("normal-editor-after-save");
+      assert.equal(
+        document.getText(),
+        editedSource,
+        "Formatter-off normal-editor Save inserted a blank line.",
+      );
+      assert.equal(
+        await readDiskText(documentUri),
+        editedSource,
+        "Formatter-off normal-editor disk differs.",
+      );
+
+      await replaceWholeDocument(document, documentUri, source);
+      assert.equal(
+        await document.save(),
+        true,
+        "Formatter-off Live Editor fixture reset did not save.",
+      );
+      const port = new VscodeDocumentPort();
+      const coordinator = new DocumentSyncCoordinator(port);
+      const endpoint = new RecordingEndpoint();
+      const opened = await coordinator.openSession(
+        documentUri.toString(),
+        "mixed-list-formatter-off",
+        endpoint,
+      );
+      assert.ok(opened.ok, "Formatter-off Live Editor session did not open.");
+      await coordinator.receive(
+        fullReplacementMessage(
+          documentUri.toString(),
+          "mixed-list-formatter-off",
+          1,
+          opened.snapshot.documentVersion,
+          opened.snapshot.text,
+          editedSource,
+        ),
+        endpoint,
+      );
+      formatterOffObservations.record("live-editor-host-acknowledged");
+      await coordinator.receive(
+        barrierMessage(documentUri.toString(), "mixed-list-formatter-off", "save", 2),
+        endpoint,
+      );
+      formatterOffObservations.record("live-editor-after-immediate-save");
+      assert.equal(
+        endpoint.messages.some((message) => message.kind === "resync"),
+        false,
+        "Formatter-off Live Editor immediate Save entered recovery.",
+      );
+      assert.equal(
+        document.getText(),
+        editedSource,
+        "Formatter-off Live Editor Save inserted a blank line.",
+      );
+      assert.equal(
+        await readDiskText(documentUri),
+        editedSource,
+        "Formatter-off Live Editor disk differs.",
+      );
+      assertNoMixedListBlank(formatterOffObservations.entries, "Formatter-off Save");
+    } finally {
+      formatterOffObservations.dispose();
+    }
+
+    await vscode.workspace
+      .getConfiguration("editor", documentUri)
+      .update("formatOnSave", true, vscode.ConfigurationTarget.Global);
+    assert.equal(
+      vscode.workspace.getConfiguration("editor", documentUri).get<boolean>("formatOnSave"),
+      true,
+      "The isolated test profile did not enable formatOnSave.",
+    );
+
+    const formatterOnObservations = observeDocument(documentUri);
+    try {
+      await replaceWholeDocument(document, documentUri, editedSource);
+      formatterOnObservations.record("normal-editor-before-save");
+      assert.equal(await document.save(), true, "Prettier normal-editor Save did not complete.");
+      formatterOnObservations.record("normal-editor-after-save");
+      assert.equal(
+        document.getText(),
+        prettierSource,
+        "Prettier normal-editor Save did not add its blank line.",
+      );
+
+      await replaceWholeDocument(document, documentUri, source);
+      assert.equal(await document.save(), true, "Prettier Live Editor fixture reset did not save.");
+      const port = new VscodeDocumentPort();
+      const coordinator = new DocumentSyncCoordinator(port);
+      const endpoint = new RecordingEndpoint();
+      const opened = await coordinator.openSession(
+        documentUri.toString(),
+        "mixed-list-prettier",
+        endpoint,
+      );
+      assert.ok(opened.ok, "Prettier Live Editor session did not open.");
+      await coordinator.receive(
+        fullReplacementMessage(
+          documentUri.toString(),
+          "mixed-list-prettier",
+          1,
+          opened.snapshot.documentVersion,
+          opened.snapshot.text,
+          editedSource,
+        ),
+        endpoint,
+      );
+      formatterOnObservations.record("live-editor-host-acknowledged");
+      await coordinator.receive(
+        barrierMessage(documentUri.toString(), "mixed-list-prettier", "save", 2),
+        endpoint,
+      );
+      formatterOnObservations.record("live-editor-after-immediate-save");
+      assert.equal(
+        document.getText(),
+        prettierSource,
+        "Prettier Live Editor Save did not add its blank line.",
+      );
+      assert.equal(
+        await readDiskText(documentUri),
+        prettierSource,
+        "Prettier Live Editor disk differs.",
+      );
+
+      await replaceWholeDocument(document, documentUri, editedSource);
+      await vscode.window.showTextDocument(document, { preview: false });
+      await vscode.commands.executeCommand("editor.action.formatDocument");
+      formatterOnObservations.record("normal-editor-after-manual-format");
+      assert.equal(
+        document.getText(),
+        prettierSource,
+        "Manual Format Document did not add Prettier's blank line.",
+      );
+      assertFirstMixedListBlankAfterSaveParticipant(formatterOnObservations.entries, editedSource);
+    } finally {
+      formatterOnObservations.dispose();
+    }
+  } finally {
+    await vscode.workspace
+      .getConfiguration("editor", documentUri)
+      .update("formatOnSave", undefined, vscode.ConfigurationTarget.Global);
+    formatter.dispose();
+    await removeSmokeFile(documentUri);
+  }
+}
+
+interface SaveObservation {
+  readonly phase: string;
+  readonly timestamp: number;
+  readonly documentVersion: number;
+  readonly dirty: boolean;
+  readonly textLength: number;
+  readonly lineCount: number;
+  readonly sourceHash: string;
+  readonly hasMixedListBlank: boolean;
+  readonly text: string;
+}
+
+function observeDocument(documentUri: vscode.Uri): {
+  readonly entries: readonly SaveObservation[];
+  record(phase: string): void;
+  dispose(): void;
+} {
+  const entries: SaveObservation[] = [];
+  const record = (phase: string, document: vscode.TextDocument): void => {
+    const text = document.getText();
+    entries.push({
+      phase,
+      timestamp: Date.now(),
+      documentVersion: document.version,
+      dirty: document.isDirty,
+      textLength: text.length,
+      lineCount: document.lineCount,
+      sourceHash: textFingerprint(text),
+      hasMixedListBlank: text.includes("- unordered\n\n1. ordered"),
+      text,
+    });
+  };
+  const subscription = vscode.workspace.onDidChangeTextDocument((event): void => {
+    if (event.document.uri.toString() === documentUri.toString()) {
+      record("onDidChangeTextDocument", event.document);
+    }
+  });
+  const document = vscode.workspace.textDocuments.find(
+    (candidate) => candidate.uri.toString() === documentUri.toString(),
+  );
+  if (document === undefined) {
+    throw new Error("The mixed-list Save probe document is not open.");
+  }
+  record("fixture-opened", document);
+  return {
+    entries,
+    record: (phase): void => {
+      record(phase, document);
+    },
+    dispose: (): void => {
+      subscription.dispose();
+    },
+  };
+}
+
+function assertCleanFormatterOffConfiguration(documentUri: vscode.Uri): void {
+  const editor = vscode.workspace.getConfiguration("editor", documentUri);
+  const files = vscode.workspace.getConfiguration("files", documentUri);
+  const formatOnSave = editor.inspect<boolean>("formatOnSave");
+  const defaultFormatter = editor.inspect<string>("defaultFormatter");
+  const codeActions = editor.inspect<Readonly<Record<string, unknown>>>("codeActionsOnSave");
+  const autoSave = files.inspect<string>("autoSave");
+  assert.equal(
+    editor.get<boolean>("formatOnSave"),
+    false,
+    `Unexpected formatOnSave: ${JSON.stringify(formatOnSave)}`,
+  );
+  const effectiveDefaultFormatter = editor.get<unknown>("defaultFormatter");
+  assert.ok(
+    effectiveDefaultFormatter === undefined || effectiveDefaultFormatter === null,
+    `Unexpected defaultFormatter: ${JSON.stringify(defaultFormatter)}`,
+  );
+  const effectiveCodeActions = editor.get<Readonly<Record<string, unknown>>>("codeActionsOnSave");
+  assert.ok(
+    effectiveCodeActions === undefined ||
+      Object.values(effectiveCodeActions).every((value) => value !== true && value !== "always"),
+    `Unexpected save code action: ${JSON.stringify(codeActions)}`,
+  );
+  assert.equal(
+    files.get<string>("autoSave"),
+    "off",
+    `Unexpected autoSave: ${JSON.stringify(autoSave)}`,
+  );
+}
+
+function assertNoMixedListBlank(entries: readonly SaveObservation[], label: string): void {
+  assert.equal(
+    entries.some(({ hasMixedListBlank }) => hasMixedListBlank),
+    false,
+    `${label} inserted a blank line: ${JSON.stringify(entries)}`,
+  );
+}
+
+function assertFirstMixedListBlankAfterSaveParticipant(
+  entries: readonly SaveObservation[],
+  editedSource: string,
+): void {
+  const firstBlank = entries.find(({ hasMixedListBlank }) => hasMixedListBlank);
+  assert.ok(
+    firstBlank,
+    `No participant inserted the expected blank line: ${JSON.stringify(entries)}`,
+  );
+  const prior = entries.slice(0, entries.indexOf(firstBlank)).at(-1);
+  assert.ok(prior, "The formatter observation has no pre-change state.");
+  assert.equal(
+    prior.text,
+    editedSource,
+    `The source changed before Save participant formatting: ${JSON.stringify(entries)}`,
+  );
 }
 
 async function verifyCompositionHistoryPath(workspaceUri: vscode.Uri): Promise<void> {
@@ -673,6 +1389,155 @@ function waitForDocumentChange(documentUri: vscode.Uri, priorVersion: number): P
       }
     });
   });
+}
+
+interface AutosaveTrimSettings {
+  readonly autoSave: string | undefined;
+  readonly autoSaveDelay: number | undefined;
+  readonly markdownTrimTrailingWhitespace: boolean | undefined;
+  readonly trimTrailingWhitespace: boolean | undefined;
+}
+
+function markdownFilesConfiguration(document: vscode.TextDocument): vscode.WorkspaceConfiguration {
+  return vscode.workspace.getConfiguration("files", {
+    uri: document.uri,
+    languageId: document.languageId,
+  });
+}
+
+function captureAutosaveTrimSettings(documentUri: vscode.Uri): AutosaveTrimSettings {
+  const files = vscode.workspace.getConfiguration("files", documentUri);
+  const markdownFiles = vscode.workspace.getConfiguration("files", {
+    uri: documentUri,
+    languageId: "markdown",
+  });
+  return {
+    autoSave: files.inspect<string>("autoSave")?.globalValue,
+    autoSaveDelay: files.inspect<number>("autoSaveDelay")?.globalValue,
+    markdownTrimTrailingWhitespace:
+      markdownFiles.inspect<boolean>("trimTrailingWhitespace")?.globalLanguageValue,
+    trimTrailingWhitespace: files.inspect<boolean>("trimTrailingWhitespace")?.globalValue,
+  };
+}
+
+async function setAutosaveTrimSettings(
+  documentUri: vscode.Uri,
+  settings: AutosaveTrimSettings,
+): Promise<void> {
+  const files = vscode.workspace.getConfiguration("files", documentUri);
+  const markdownFiles = vscode.workspace.getConfiguration("files", {
+    uri: documentUri,
+    languageId: "markdown",
+  });
+  await files.update("autoSave", settings.autoSave, vscode.ConfigurationTarget.Global);
+  await files.update("autoSaveDelay", settings.autoSaveDelay, vscode.ConfigurationTarget.Global);
+  await files.update(
+    "trimTrailingWhitespace",
+    settings.trimTrailingWhitespace,
+    vscode.ConfigurationTarget.Global,
+  );
+  await markdownFiles.update(
+    "trimTrailingWhitespace",
+    settings.markdownTrimTrailingWhitespace,
+    vscode.ConfigurationTarget.Global,
+    true,
+  );
+}
+
+async function restoreAutosaveTrimSettings(
+  documentUri: vscode.Uri,
+  settings: AutosaveTrimSettings,
+): Promise<void> {
+  await setAutosaveTrimSettings(documentUri, settings);
+}
+
+function observeAutosaveTrim(documentUri: vscode.Uri): {
+  readonly dispose: () => void;
+  readonly hasDestructiveTrim: () => boolean;
+  readonly waitForAfterDelaySave: () => Promise<void>;
+} {
+  const changes: SaveParticipantObservation[] = [];
+  let afterDelayObserved = false;
+  let didSaveObserved = false;
+  let resolve: (() => void) | undefined;
+  let reject: ((reason?: unknown) => void) | undefined;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const tryResolve = (): void => {
+    if (afterDelayObserved && didSaveObserved) {
+      if (timer !== undefined) {
+        clearTimeout(timer);
+      }
+      resolve?.();
+    }
+  };
+  const willSaveSubscription = vscode.workspace.onWillSaveTextDocument((event): void => {
+    if (event.document.uri.toString() === documentUri.toString()) {
+      afterDelayObserved ||= event.reason === vscode.TextDocumentSaveReason.AfterDelay;
+      tryResolve();
+    }
+  });
+  const changeSubscription = vscode.workspace.onDidChangeTextDocument((event): void => {
+    if (event.document.uri.toString() === documentUri.toString()) {
+      const first = event.contentChanges[0];
+      changes.push({
+        documentVersion: event.document.version,
+        fingerprint: textFingerprint(event.document.getText()),
+        contentChangeCount: event.contentChanges.length,
+        firstChangeRange:
+          first === undefined
+            ? "none"
+            : `${String(first.range.start.line)}:${String(first.range.start.character)}-${String(first.range.end.line)}:${String(first.range.end.character)}`,
+        firstChangeTextFingerprint: first === undefined ? "none" : textFingerprint(first.text),
+        textLength: event.document.getText().length,
+      });
+      tryResolve();
+    }
+  });
+  const didSaveSubscription = vscode.workspace.onDidSaveTextDocument((document): void => {
+    if (document.uri.toString() === documentUri.toString()) {
+      didSaveObserved = true;
+      tryResolve();
+    }
+  });
+  return {
+    dispose: (): void => {
+      if (timer !== undefined) {
+        clearTimeout(timer);
+      }
+      willSaveSubscription.dispose();
+      changeSubscription.dispose();
+      didSaveSubscription.dispose();
+    },
+    hasDestructiveTrim: (): boolean =>
+      changes.some(
+        (candidate) =>
+          candidate.textLength === 1 &&
+          candidate.contentChangeCount === 1 &&
+          candidate.firstChangeRange === "0:1-0:2" &&
+          candidate.firstChangeTextFingerprint === textFingerprint(""),
+      ),
+    waitForAfterDelaySave: (): Promise<void> =>
+      new Promise((resolvePromise, rejectPromise): void => {
+        resolve = resolvePromise;
+        reject = rejectPromise;
+        timer = setTimeout((): void => {
+          reject?.(
+            new Error(`Timed out waiting for an after-delay Save: ${JSON.stringify(changes)}`),
+          );
+        }, 7_000);
+        tryResolve();
+      }),
+  };
+}
+
+async function closeCustomEditor(documentUri: vscode.Uri): Promise<void> {
+  const activeTab = vscode.window.tabGroups.activeTabGroup.activeTab;
+  if (
+    activeTab?.input instanceof vscode.TabInputCustom &&
+    activeTab.input.uri.toString() === documentUri.toString()
+  ) {
+    await vscode.commands.executeCommand("workbench.action.closeActiveEditor");
+  }
 }
 
 function assertPortApplied(result: DocumentPortResult, message: string): void {

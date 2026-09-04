@@ -7,6 +7,7 @@ import {
   recordsDiagnosticTrace,
   usesDocumentSync,
 } from "../../core/diagnostics/diagnosticMode.js";
+import { disabledDiagnosticLog, type DiagnosticLog } from "../../core/diagnostics/diagnosticLog.js";
 import type {
   DocumentSyncCoordinator,
   WebviewEndpoint,
@@ -23,6 +24,8 @@ interface MarkdownEditorBootstrap {
 
 export interface MarkdownEditorProviderOptions {
   readonly diagnosticMode: DiagnosticMode;
+  readonly diagnostics?: DiagnosticLog;
+  readonly onCustomEditorOpened?: (document: vscode.TextDocument) => void;
   readonly webviewScriptPath: vscode.Uri;
 }
 
@@ -42,6 +45,7 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
     webviewPanel: vscode.WebviewPanel,
     cancellationToken: vscode.CancellationToken,
   ): Promise<void> {
+    this.options.onCustomEditorOpened?.(document);
     const { webview } = webviewPanel;
     webview.options = {
       enableScripts: true,
@@ -50,9 +54,26 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
 
     const documentUri = document.uri.toString();
     const sessionId = randomUUID();
+    const diagnostics = this.options.diagnostics ?? disabledDiagnosticLog;
+    diagnostics.record("provider.session.created", { documentUri, sessionId });
     const endpoint: WebviewEndpoint = {
       postMessage: (message): void => {
-        void webview.postMessage(message);
+        void webview.postMessage(message).then(
+          (delivered): void => {
+            diagnostics.record("provider.webview.post", {
+              sessionId,
+              messageKind: message.kind,
+              delivered,
+            });
+          },
+          (): void => {
+            diagnostics.record("provider.webview.post", {
+              sessionId,
+              messageKind: message.kind,
+              delivered: false,
+            });
+          },
+        );
       },
     };
 
@@ -62,6 +83,7 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
         documentUri,
         sessionId,
         endpoint,
+        diagnostics,
         webviewPanel,
         cancellationToken,
       );
@@ -75,6 +97,7 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
     documentUri: string,
     sessionId: string,
     endpoint: WebviewEndpoint,
+    diagnostics: DiagnosticLog,
     webviewPanel: vscode.WebviewPanel,
     cancellationToken: vscode.CancellationToken,
   ): Promise<void> {
@@ -82,12 +105,14 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
     let receiveDisposable: vscode.Disposable = vscode.Disposable.from();
     const disposeSession = (): void => {
       lifecycle.disposed = true;
+      diagnostics.record("provider.session.disposed", { documentUri, sessionId });
       receiveDisposable.dispose();
       this.coordinator.closeSession(documentUri, sessionId);
     };
     const panelDispose = webviewPanel.onDidDispose(disposeSession);
     const cancellationDispose = cancellationToken.onCancellationRequested(disposeSession);
 
+    diagnostics.record("provider.session.opening", { documentUri, sessionId });
     const opened = await this.coordinator.openSession(documentUri, sessionId, endpoint);
     if (lifecycle.disposed) {
       this.coordinator.closeSession(documentUri, sessionId);
@@ -115,6 +140,11 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
       webview.asWebviewUri(this.options.webviewScriptPath),
       bootstrap,
     );
+    diagnostics.record("provider.session.webview-ready", {
+      documentUri,
+      sessionId,
+      documentVersion: opened.snapshot.documentVersion,
+    });
 
     receiveDisposable = webview.onDidReceiveMessage((value: unknown) => {
       void this.coordinator.receive(value, endpoint);

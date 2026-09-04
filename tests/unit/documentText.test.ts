@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { applyWireChanges } from "../../src/core/sync/documentText.js";
+import { textFingerprint } from "../../src/core/diagnostics/textFingerprint.js";
 import type { WireChange } from "../../src/protocol/messages.js";
 
 function change(
@@ -29,10 +30,16 @@ describe("applyWireChanges", () => {
   it("rejects mismatched expected text without transforming source", () => {
     const result = applyWireChanges("abc", [change(0, 1, "z", "A")]);
 
-    expect(result).toEqual({
+    expect(result).toMatchObject({
       ok: false,
       code: "expected-text-mismatch",
       note: "A change did not match the authoritative text it claimed to replace.",
+      mismatch: {
+        actualTextFingerprint: textFingerprint("a"),
+        expectedTextFingerprint: textFingerprint("z"),
+        startOffset: 0,
+        endOffset: 1,
+      },
     });
   });
 

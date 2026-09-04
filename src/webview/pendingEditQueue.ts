@@ -25,6 +25,10 @@ export class PendingEditQueue {
     return this.inFlightText;
   }
 
+  public get pendingTarget(): string | undefined {
+    return this.pendingText;
+  }
+
   public queue(targetText: string): void {
     if (this.inFlightText === targetText) {
       if (this.pendingText === targetText) {
