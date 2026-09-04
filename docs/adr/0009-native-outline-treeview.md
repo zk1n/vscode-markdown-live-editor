@@ -1,6 +1,6 @@
 # ADR 0009: Native Markdown Outline Tree View
 
-状態: Accepted（実装済み、Human Gate 待ち）  
+状態: Accepted（実装済み、focused Human Gate A-D PASS）
 日付: 2026-09-04
 
 ## Context
@@ -44,4 +44,6 @@ Live Preview の rendered DOM、Webview の一時 state、Outline の表示 stat
 ## Status and validation boundary
 
 自動検証は heading extraction/tree、session registry、TreeDataProvider、package contribution、protocol/Webview navigation guardを対象とする。
-実 VS Code Human Gate は別途必要であり、現在の branch は local のみで `develop` へ未merge、remote 未push である。
+2026-09-04の実 VS Code follow-upで、flicker、initial expansion / manual collapse、moved-view title、quick regressionを
+**Gate A-D: HUMAN PASS**と確認した。この結果はOutlineのfocused acceptanceであり、full Manual Matrix、IME、Save、
+external updateのrelease acceptanceには拡張しない。
