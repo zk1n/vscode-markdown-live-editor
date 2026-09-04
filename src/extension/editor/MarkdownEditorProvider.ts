@@ -13,6 +13,7 @@ import type {
   WebviewEndpoint,
 } from "../../core/sync/documentSyncCoordinator.js";
 import { decodeEditorReadyMessage } from "../../protocol/messages.js";
+import { PROTOCOL_VERSION } from "../../protocol/messages.js";
 import type { MarkdownEditorSessionRegistry } from "./MarkdownEditorSessionRegistry.js";
 
 interface MarkdownEditorBootstrap {
@@ -114,6 +115,7 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
     let receiveDisposable: vscode.Disposable = vscode.Disposable.from();
     let trackingDisposable: vscode.Disposable = vscode.Disposable.from();
     let trackingReady = false;
+    let controllerActivationOrdinal = 0;
     const disposeSession = (): void => {
       if (lifecycle.disposed) {
         return;
@@ -157,15 +159,47 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
           !ready.ok ||
           ready.value.documentUri !== documentUri ||
           ready.value.sessionId !== sessionId ||
-          trackingReady ||
           lifecycle.disposed
         ) {
           diagnostics.record("provider.webview.ready-rejected", { documentUri, sessionId });
           return;
         }
-        trackingReady = true;
-        trackingDisposable = this.registerSession(documentUri, sessionId, webviewPanel);
-        diagnostics.record("provider.webview.ready", { documentUri, sessionId });
+        controllerActivationOrdinal += 1;
+        const activationOrdinal = controllerActivationOrdinal;
+        const controllerId = ready.value.controllerId;
+        diagnostics.record("provider.webview.ready", { documentUri, sessionId, controllerId });
+        void this.coordinator
+          .activateController(documentUri, sessionId, endpoint, controllerId)
+          .then((activated): void => {
+            if (lifecycle.disposed || activationOrdinal !== controllerActivationOrdinal) {
+              return;
+            }
+            if (!activated.ok) {
+              endpoint.postMessage({ kind: "protocol-error", note: activated.error });
+              return;
+            }
+            if (!trackingReady) {
+              trackingReady = true;
+              trackingDisposable = this.registerSession(documentUri, sessionId, webviewPanel);
+            }
+            endpoint.postMessage({
+              kind: "controller-ready",
+              protocolVersion: PROTOCOL_VERSION,
+              documentUri,
+              documentVersion: activated.snapshot.documentVersion,
+              sessionId,
+              controllerId,
+              nextSequence: activated.nextSequence,
+              text: activated.snapshot.text,
+            });
+            diagnostics.record("provider.controller.activated", {
+              documentUri,
+              sessionId,
+              controllerId,
+              nextSequence: activated.nextSequence,
+              documentVersion: activated.snapshot.documentVersion,
+            });
+          });
         return;
       }
       void this.coordinator.receive(value, endpoint);

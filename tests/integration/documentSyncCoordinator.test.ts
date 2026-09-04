@@ -143,6 +143,7 @@ function edit(
     protocolVersion: PROTOCOL_VERSION,
     documentUri: DOCUMENT_URI,
     sessionId: "session-a",
+    controllerId: "controller-a",
     sequence,
     documentVersion,
     changes: [insertionChange(sourceText, text)],
@@ -160,6 +161,7 @@ function fullReplacementEdit(
     protocolVersion: PROTOCOL_VERSION,
     documentUri: DOCUMENT_URI,
     sessionId: "session-a",
+    controllerId: "controller-a",
     sequence,
     documentVersion,
     changes: [
@@ -192,9 +194,10 @@ function barrier(
   sequence: number,
 ): {
   readonly kind: "save" | "undo" | "redo";
-  readonly protocolVersion: 1;
+  readonly protocolVersion: typeof PROTOCOL_VERSION;
   readonly documentUri: string;
   readonly sessionId: string;
+  readonly controllerId: string;
   readonly sequence: number;
 } {
   return {
@@ -202,6 +205,7 @@ function barrier(
     protocolVersion: PROTOCOL_VERSION,
     documentUri: DOCUMENT_URI,
     sessionId: "session-a",
+    controllerId: "controller-a",
     sequence,
   };
 }
@@ -681,5 +685,55 @@ describe("DocumentSyncCoordinator", () => {
       expect.objectContaining({ kind: "operation-ack", sequence: 1 }),
     );
     expect(port.calls).toEqual(["replace:saved", "replace:saved!"]);
+  });
+
+  it("continues the session sequence across controller recreation and rejects the stale controller", async () => {
+    const port = new FakeDocumentPort("");
+    const coordinator = new DocumentSyncCoordinator(port);
+    const endpoint = new RecordingEndpoint();
+    await coordinator.openSession(DOCUMENT_URI, "session-a", endpoint);
+
+    const first = await coordinator.activateController(
+      DOCUMENT_URI,
+      "session-a",
+      endpoint,
+      "controller-a",
+    );
+    expect(first).toMatchObject({ ok: true, nextSequence: 1 });
+    for (let sequence = 1; sequence <= 132; sequence += 1) {
+      await coordinator.receive(
+        { ...barrier("save", sequence), controllerId: "controller-a" },
+        endpoint,
+      );
+    }
+
+    const recreated = await coordinator.activateController(
+      DOCUMENT_URI,
+      "session-a",
+      endpoint,
+      "controller-b",
+    );
+    expect(recreated).toMatchObject({ ok: true, nextSequence: 133 });
+
+    await coordinator.receive(
+      {
+        ...fullReplacementEdit(133, 1, "", "stale"),
+        controllerId: "controller-a",
+      },
+      endpoint,
+    );
+    expect(port.calls.some((call) => call === "replace:stale")).toBe(false);
+
+    await coordinator.receive(
+      {
+        ...fullReplacementEdit(133, 1, "", "current"),
+        controllerId: "controller-b",
+      },
+      endpoint,
+    );
+    expect(endpoint.messages).toContainEqual(
+      expect.objectContaining({ kind: "operation-ack", sequence: 133, text: "current" }),
+    );
+    expect(port.calls.filter((call) => call.startsWith("replace:"))).toEqual(["replace:current"]);
   });
 });

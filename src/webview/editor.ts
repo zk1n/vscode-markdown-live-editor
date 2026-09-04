@@ -45,6 +45,8 @@ import {
 
 interface VsCodeApi {
   postMessage(message: WebviewToHostMessage | EditorReadyMessage): void;
+  getState?(): unknown;
+  setState?(state: unknown): void;
 }
 
 interface WebviewBootstrap {
@@ -54,6 +56,17 @@ interface WebviewBootstrap {
   readonly sessionId: string;
   readonly nextSequence: number;
   readonly text: string;
+}
+
+interface PersistedWebviewState {
+  readonly protocolVersion: typeof PROTOCOL_VERSION;
+  readonly documentUri: string;
+  readonly sessionId: string;
+  readonly authorityText: string;
+  readonly localText: string;
+  readonly selectionAnchor: number;
+  readonly selectionHead: number;
+  readonly recoveryActive: boolean;
 }
 
 /**
@@ -91,6 +104,7 @@ class MarkdownWebviewController {
   private readonly diagnostics: DiagnosticTrace;
   private readonly view: EditorView;
   private readonly pendingEdits: PendingEditQueue;
+  private readonly restoredState: PersistedWebviewState | undefined;
   private documentVersion: number;
   private nextSequence: number;
   private inFlightSequence: number | undefined;
@@ -105,6 +119,7 @@ class MarkdownWebviewController {
   private nextShortcutAttempt = 1;
   private nextRecoveryIncidentId = 1;
   private recoveryActive = false;
+  private controllerReady: boolean;
   private disposed = false;
   private outlineHighlightTimer: number | undefined;
   private outlineNavigationGeneration = 0;
@@ -112,17 +127,23 @@ class MarkdownWebviewController {
   public constructor(
     private readonly vscode: VsCodeApi,
     private readonly bootstrap: WebviewBootstrap,
+    private readonly controllerId: string,
     private readonly statusElement: HTMLElement,
     parent: HTMLElement,
   ) {
-    this.pendingEdits = new PendingEditQueue(bootstrap.text);
+    this.restoredState = readPersistedWebviewState(vscode, bootstrap);
+    const initialText = this.restoredState?.localText ?? bootstrap.text;
+    const initialAuthority = this.restoredState?.authorityText ?? bootstrap.text;
+    this.pendingEdits = new PendingEditQueue(initialAuthority);
     this.documentVersion = bootstrap.documentVersion;
     this.nextSequence = bootstrap.nextSequence;
+    this.controllerReady = !usesDocumentSync(bootstrap.diagnosticMode);
     this.diagnostics = createDiagnosticTrace(bootstrap.diagnosticMode, (event, details): void => {
       this.vscode.postMessage({
         kind: "diagnostic",
         documentUri: bootstrap.documentUri,
         sessionId: bootstrap.sessionId,
+        controllerId,
         event,
         details: definedDiagnosticDetails(details),
       });
@@ -132,7 +153,7 @@ class MarkdownWebviewController {
       : undefined;
     const extensions: Extension[] = [
       vscodeEditorTheme,
-      this.editable.of(EditorView.editable.of(true)),
+      this.editable.of(EditorView.editable.of(this.controllerReady)),
       EditorView.updateListener.of((update): void => {
         this.handleUpdate(update);
       }),
@@ -171,7 +192,15 @@ class MarkdownWebviewController {
     extensions.push(createDiagnosticDomEventTrace(this.diagnostics));
     this.view = new EditorView({
       state: EditorState.create({
-        doc: bootstrap.text,
+        doc: initialText,
+        ...(this.restoredState === undefined
+          ? {}
+          : {
+              selection: {
+                anchor: Math.min(this.restoredState.selectionAnchor, initialText.length),
+                head: Math.min(this.restoredState.selectionHead, initialText.length),
+              },
+            }),
         extensions,
       }),
       parent,
@@ -182,7 +211,10 @@ class MarkdownWebviewController {
       livePreview: usesLivePreview(bootstrap.diagnosticMode),
       markdown: usesMarkdownLanguage(bootstrap.diagnosticMode),
       barrierKeymap: usesBarrierKeymap(bootstrap.diagnosticMode),
+      controllerId,
+      restoredState: this.restoredState !== undefined,
     });
+    this.persistState();
   }
 
   public receive(value: unknown): void {
@@ -215,6 +247,7 @@ class MarkdownWebviewController {
       return;
     }
     this.disposed = true;
+    this.persistState();
     if (this.outlineHighlightTimer !== undefined) {
       window.clearTimeout(this.outlineHighlightTimer);
       this.outlineHighlightTimer = undefined;
@@ -225,6 +258,7 @@ class MarkdownWebviewController {
 
   private handleUpdate(update: ViewUpdate): void {
     this.traceCodeMirrorUpdate(update);
+    this.persistState();
     if (
       !update.docChanged ||
       this.disposed ||
@@ -246,6 +280,7 @@ class MarkdownWebviewController {
         compositionStarted: update.view.compositionStarted,
         textFingerprint: textFingerprint(this.view.state.doc.toString()),
       });
+      this.persistState();
       return;
     }
 
@@ -256,6 +291,7 @@ class MarkdownWebviewController {
       compositionStarted: update.view.compositionStarted,
       textFingerprint: textFingerprint(this.view.state.doc.toString()),
     });
+    this.persistState();
   }
 
   private filterBarrierInput(transaction: Transaction): Transaction | readonly Transaction[] {
@@ -377,7 +413,12 @@ class MarkdownWebviewController {
   }
 
   private sendPendingEdit(): void {
-    if (this.inFlightSequence !== undefined || this.recoveryActive || this.disposed) {
+    if (
+      !this.controllerReady ||
+      this.inFlightSequence !== undefined ||
+      this.recoveryActive ||
+      this.disposed
+    ) {
       return;
     }
 
@@ -394,6 +435,7 @@ class MarkdownWebviewController {
       protocolVersion: PROTOCOL_VERSION,
       documentUri: this.bootstrap.documentUri,
       sessionId: this.bootstrap.sessionId,
+      controllerId: this.controllerId,
       sequence,
       documentVersion: this.documentVersion,
       changes: [fullDocumentReplacement(this.pendingEdits.authority, text)],
@@ -408,10 +450,11 @@ class MarkdownWebviewController {
       ...this.syncStateDetails(),
     });
     this.vscode.postMessage(message);
+    this.persistState();
   }
 
   private requestBarrier(action: BarrierAction): void {
-    if (this.recoveryActive || this.disposed) {
+    if (!this.controllerReady || this.recoveryActive || this.disposed) {
       return;
     }
 
@@ -449,13 +492,19 @@ class MarkdownWebviewController {
 
   private handleHostMessage(message: HostToWebviewMessage): void {
     switch (message.kind) {
+      case "controller-ready":
+        this.handleControllerReady(message);
+        return;
       case "operation-ack":
+        if (!this.controllerReady) return;
         this.handleAcknowledgement(message);
         return;
       case "document-update":
+        if (!this.controllerReady) return;
         this.handleDocumentUpdate(message);
         return;
       case "resync":
+        if (!this.controllerReady) return;
         this.resolveDeferredInFlightSnapshot("resync", message.documentVersion);
         this.documentVersion = message.documentVersion;
         this.nextSequence = message.nextSequence;
@@ -474,14 +523,74 @@ class MarkdownWebviewController {
             `Resynchronization is required after ${message.reason}; local text remains visible: ${message.note}`,
           );
         }
+        this.persistState();
         return;
       case "protocol-error":
         this.enterRecovery(message.note);
         return;
       case "navigate-to-heading":
+        if (!this.controllerReady) return;
         this.navigateToHeading(message);
         return;
     }
+  }
+
+  private handleControllerReady(
+    message: Extract<HostToWebviewMessage, { kind: "controller-ready" }>,
+  ): void {
+    if (
+      message.documentUri !== this.bootstrap.documentUri ||
+      message.sessionId !== this.bootstrap.sessionId ||
+      message.controllerId !== this.controllerId
+    ) {
+      this.diagnostics.record("sync.controller.ready-rejected", {
+        controllerId: message.controllerId,
+        sessionId: message.sessionId,
+      });
+      return;
+    }
+    if (this.controllerReady) {
+      this.diagnostics.record("sync.controller.ready-duplicate", {
+        controllerId: message.controllerId,
+      });
+      return;
+    }
+
+    const localText = this.view.state.doc.toString();
+    const hasUnconfirmedLocalText =
+      localText !== this.bootstrap.text ||
+      (this.restoredState !== undefined &&
+        (this.restoredState.recoveryActive ||
+          this.restoredState.localText !== this.restoredState.authorityText));
+    this.documentVersion = message.documentVersion;
+    this.nextSequence = message.nextSequence;
+    this.inFlightSequence = undefined;
+    this.deferredInFlightSnapshot = undefined;
+    this.barriers.reset();
+    this.composition.abandon();
+    this.compositionEndObserved = false;
+    this.pendingEdits.reset(message.text);
+    this.controllerReady = true;
+
+    if (hasUnconfirmedLocalText && localText !== message.text) {
+      this.enterRecovery(
+        "The Webview controller restarted while local text was not confirmed by the host; local text remains visible.",
+      );
+      this.persistState();
+      return;
+    }
+
+    this.applyAuthoritativeSnapshot(message);
+    this.recoveryActive = false;
+    this.view.dispatch({ effects: this.editable.reconfigure(EditorView.editable.of(true)) });
+    this.statusElement.hidden = true;
+    this.diagnostics.record("sync.controller.ready", {
+      controllerId: this.controllerId,
+      nextSequence: this.nextSequence,
+      documentVersion: this.documentVersion,
+      restoredState: this.restoredState !== undefined,
+    });
+    this.persistState();
   }
 
   private navigateToHeading(
@@ -633,6 +742,7 @@ class MarkdownWebviewController {
         this.sendNextBarrier();
       }
       this.assertBarrierLiveness();
+      this.persistState();
       return;
     }
 
@@ -641,6 +751,7 @@ class MarkdownWebviewController {
       this.sendNextBarrier();
     }
     this.assertBarrierLiveness();
+    this.persistState();
   }
 
   private handleDocumentUpdate(
@@ -667,6 +778,7 @@ class MarkdownWebviewController {
         documentVersion: message.documentVersion,
         textFingerprint: textFingerprint(message.text),
       });
+      this.persistState();
       return;
     }
     if (message.documentVersion < this.documentVersion) {
@@ -676,6 +788,7 @@ class MarkdownWebviewController {
         currentDocumentVersion: this.documentVersion,
         textFingerprint: textFingerprint(message.text),
       });
+      this.persistState();
       return;
     }
     // ACK/update ordering matrix:
@@ -697,6 +810,7 @@ class MarkdownWebviewController {
         reason: message.reason,
         targetFingerprint: textFingerprint(message.text),
       });
+      this.persistState();
       return;
     }
     if (message.text === this.pendingEdits.authority) {
@@ -705,9 +819,11 @@ class MarkdownWebviewController {
         documentVersion: message.documentVersion,
         reason: message.reason,
       });
+      this.persistState();
       return;
     }
     if (
+      !this.controllerReady ||
       this.inFlightSequence !== undefined ||
       this.pendingEdits.hasPending ||
       this.composition.isActive
@@ -716,10 +832,12 @@ class MarkdownWebviewController {
         "The document changed outside this webview while local edits were pending.",
         message.correlation,
       );
+      this.persistState();
       return;
     }
     this.applyAuthoritativeSnapshot(message);
     this.assertBarrierLiveness();
+    this.persistState();
   }
 
   private applyAuthoritativeSnapshot(snapshot: DocumentSnapshotMessage): void {
@@ -728,6 +846,7 @@ class MarkdownWebviewController {
     const before = this.view.state.doc.toString();
     const replacement = minimalTextReplacement(before, snapshot.text);
     if (replacement === undefined) {
+      this.persistState();
       return;
     }
     this.diagnostics.record("sync.authority.applied", {
@@ -742,6 +861,7 @@ class MarkdownWebviewController {
       changes: replacement,
       annotations: remoteUpdate.of(true),
     });
+    this.persistState();
   }
 
   private enterRecovery(note: string, correlation?: HostMessageCorrelation): void {
@@ -769,6 +889,7 @@ class MarkdownWebviewController {
     this.showStatus(
       `Editing paused to protect unsynchronized text: ${note} [incident ${String(recoveryIncidentId)}]`,
     );
+    this.persistState();
   }
 
   private sendNextBarrier(): void {
@@ -798,6 +919,7 @@ class MarkdownWebviewController {
       protocolVersion: PROTOCOL_VERSION,
       documentUri: this.bootstrap.documentUri,
       sessionId: this.bootstrap.sessionId,
+      controllerId: this.controllerId,
       sequence,
       shortcutAttemptId: request.shortcutAttemptId,
     };
@@ -810,6 +932,7 @@ class MarkdownWebviewController {
       ...this.syncStateDetails(),
     });
     this.vscode.postMessage(message);
+    this.persistState();
   }
 
   private assertBarrierLiveness(): void {
@@ -896,7 +1019,7 @@ class MarkdownWebviewController {
       pendingLocalChanges: this.pendingEdits.hasPending,
       recoveryActive: this.recoveryActive,
       selection: `${String(this.view.state.selection.main.from)}:${String(this.view.state.selection.main.to)}`,
-      editable: !this.recoveryActive,
+      editable: this.controllerReady && !this.recoveryActive,
       webviewActive: document.visibilityState === "visible",
     };
   }
@@ -907,6 +1030,7 @@ class MarkdownWebviewController {
     const pending = this.pendingEdits.pendingTarget;
     return {
       sessionId: this.bootstrap.sessionId,
+      controllerId: this.controllerId,
       authorityFingerprint: authority.fingerprint,
       authorityLength: authority.length,
       inFlightTargetFingerprint: inFlight === undefined ? "none" : textFingerprint(inFlight),
@@ -918,6 +1042,23 @@ class MarkdownWebviewController {
       compositionFinalFingerprint: this.compositionFinalMetadata?.fingerprint ?? "none",
       compositionFinalLength: this.compositionFinalMetadata?.length ?? -1,
     };
+  }
+
+  private persistState(): void {
+    if (this.vscode.setState === undefined) {
+      return;
+    }
+    const selection = this.view.state.selection.main;
+    this.vscode.setState({
+      protocolVersion: PROTOCOL_VERSION,
+      documentUri: this.bootstrap.documentUri,
+      sessionId: this.bootstrap.sessionId,
+      authorityText: this.pendingEdits.authority,
+      localText: this.view.state.doc.toString(),
+      selectionAnchor: selection.anchor,
+      selectionHead: selection.head,
+      recoveryActive: this.recoveryActive,
+    } satisfies PersistedWebviewState);
   }
 
   private correlationDetails(
@@ -997,6 +1138,40 @@ function isBootstrap(value: unknown): value is WebviewBootstrap {
   );
 }
 
+function readPersistedWebviewState(
+  vscode: VsCodeApi,
+  bootstrap: WebviewBootstrap,
+): PersistedWebviewState | undefined {
+  const value = vscode.getState?.();
+  if (
+    !isRecord(value) ||
+    value["protocolVersion"] !== PROTOCOL_VERSION ||
+    value["documentUri"] !== bootstrap.documentUri ||
+    value["sessionId"] !== bootstrap.sessionId ||
+    typeof value["authorityText"] !== "string" ||
+    typeof value["localText"] !== "string" ||
+    typeof value["recoveryActive"] !== "boolean" ||
+    typeof value["selectionAnchor"] !== "number" ||
+    !Number.isSafeInteger(value["selectionAnchor"]) ||
+    value["selectionAnchor"] < 0 ||
+    typeof value["selectionHead"] !== "number" ||
+    !Number.isSafeInteger(value["selectionHead"]) ||
+    value["selectionHead"] < 0
+  ) {
+    return undefined;
+  }
+  return {
+    protocolVersion: PROTOCOL_VERSION,
+    documentUri: bootstrap.documentUri,
+    sessionId: bootstrap.sessionId,
+    authorityText: value["authorityText"],
+    localText: value["localText"],
+    selectionAnchor: value["selectionAnchor"],
+    selectionHead: value["selectionHead"],
+    recoveryActive: value["recoveryActive"],
+  };
+}
+
 function isDiagnosticMode(value: unknown): value is DiagnosticMode {
   return (
     typeof value === "string" &&
@@ -1066,6 +1241,15 @@ function createDiagnosticTrace(
 
 function createDiagnosticDomEventTrace(trace: DiagnosticTrace): Extension {
   return EditorView.domEventObservers({
+    copy: (): void => {
+      trace.record("dom.copy", {});
+    },
+    cut: (): void => {
+      trace.record("dom.cut", {});
+    },
+    paste: (): void => {
+      trace.record("dom.paste", {});
+    },
     compositionstart: (event): void => {
       traceCompositionEvent(trace, "compositionstart", event);
     },
@@ -1182,7 +1366,8 @@ if (root === null || status === null) {
 
 const vscodeApi = acquireVsCodeApi();
 const bootstrap = readBootstrap();
-const controller = new MarkdownWebviewController(vscodeApi, bootstrap, status, root);
+const controllerId = globalThis.crypto.randomUUID();
+const controller = new MarkdownWebviewController(vscodeApi, bootstrap, controllerId, status, root);
 window.addEventListener("message", (event: MessageEvent<unknown>): void => {
   controller.receive(event.data);
 });
@@ -1194,4 +1379,5 @@ vscodeApi.postMessage({
   protocolVersion: PROTOCOL_VERSION,
   documentUri: bootstrap.documentUri,
   sessionId: bootstrap.sessionId,
+  controllerId,
 });

@@ -15,6 +15,7 @@ describe("protocol decoding", () => {
         protocolVersion: PROTOCOL_VERSION,
         documentUri: "file:///note.md",
         sessionId: "session-1",
+        controllerId: "controller-1",
       }),
     ).toMatchObject({ ok: true });
     expect(
@@ -23,6 +24,7 @@ describe("protocol decoding", () => {
         protocolVersion: PROTOCOL_VERSION,
         documentUri: "file:///note.md",
         sessionId: "",
+        controllerId: "controller-1",
       }).ok,
     ).toBe(false);
   });
@@ -32,6 +34,7 @@ describe("protocol decoding", () => {
       kind: "diagnostic",
       documentUri: "file:///workspace/note.md",
       sessionId: "session-a",
+      controllerId: "controller-a",
       event: "shortcut.keymap.handled",
       details: { action: "save", repeat: false },
     });
@@ -42,6 +45,7 @@ describe("protocol decoding", () => {
         kind: "diagnostic",
         documentUri: "file:///workspace/note.md",
         sessionId: "session-a",
+        controllerId: "controller-a",
         event: "shortcut.keymap.handled",
         details: { action: "save", repeat: false },
       },
@@ -53,6 +57,7 @@ describe("protocol decoding", () => {
       kind: "diagnostic",
       documentUri: "file:///workspace/note.md",
       sessionId: "session-a",
+      controllerId: "controller-a",
       event: "shortcut.keymap.handled",
       details: { note: "x".repeat(161) },
     });
@@ -66,6 +71,7 @@ describe("protocol decoding", () => {
       protocolVersion: PROTOCOL_VERSION,
       documentUri: "file:///note.md",
       sessionId: "session-1",
+      controllerId: "controller-1",
       sequence: 1,
       documentVersion: 3,
       changes: [
@@ -87,6 +93,7 @@ describe("protocol decoding", () => {
         protocolVersion: PROTOCOL_VERSION,
         documentUri: "file:///note.md",
         sessionId: "session-1",
+        controllerId: "controller-1",
         sequence: 1,
         documentVersion: 3,
         changes: [
@@ -99,6 +106,33 @@ describe("protocol decoding", () => {
             text: "B",
           },
         ],
+      },
+    });
+  });
+
+  it("decodes a controller generation handshake with the host sequence", () => {
+    expect(
+      decodeHostToWebviewMessage({
+        kind: "controller-ready",
+        protocolVersion: PROTOCOL_VERSION,
+        documentUri: "file:///note.md",
+        documentVersion: 8,
+        sessionId: "session-1",
+        controllerId: "controller-2",
+        nextSequence: 133,
+        text: "authoritative",
+      }),
+    ).toEqual({
+      ok: true,
+      value: {
+        kind: "controller-ready",
+        protocolVersion: PROTOCOL_VERSION,
+        documentUri: "file:///note.md",
+        documentVersion: 8,
+        sessionId: "session-1",
+        controllerId: "controller-2",
+        nextSequence: 133,
+        text: "authoritative",
       },
     });
   });

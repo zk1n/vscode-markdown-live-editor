@@ -32,6 +32,7 @@ const MIXED_LIST_SAVE_PROBE_FILE_NAME = "extension-host-mixed-list-save-probe.md
 const OWN_CHANGE_FILE_NAME = "extension-host-own-change.md";
 const PRODUCTION_LISTENER_FILE_NAME = "extension-host-production-listener.md";
 const AUTOSAVE_TRIM_FILE_NAME = "extension-host-autosave-trim.md";
+const SEQUENCE_LIFECYCLE_FILE_NAME = "extension-host-sequence-lifecycle.md";
 
 export async function run(): Promise<void> {
   const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
@@ -95,6 +96,7 @@ export async function run(): Promise<void> {
   }
 
   await verifyFirstEditProtocolPath(workspaceFolder.uri);
+  await verifySequenceLifecycleIntegrity(workspaceFolder.uri);
   await verifyCompositionHistoryPath(workspaceFolder.uri);
   await verifyWorkspaceEditUndoGrouping(workspaceFolder.uri);
   await verifySaveSemantics(workspaceFolder.uri);
@@ -102,6 +104,118 @@ export async function run(): Promise<void> {
   await verifyOwnChangeClassification(workspaceFolder.uri);
   await verifyProductionDocumentChangeListener(workspaceFolder.uri);
   await verifyAutosaveTrailingWhitespaceProtection(workspaceFolder.uri);
+}
+
+async function verifySequenceLifecycleIntegrity(workspaceUri: vscode.Uri): Promise<void> {
+  const documentUri = vscode.Uri.joinPath(workspaceUri, SEQUENCE_LIFECYCLE_FILE_NAME);
+  await removeSmokeFile(documentUri);
+
+  try {
+    const diskBaseline = "disk baseline\n";
+    await vscode.workspace.fs.writeFile(documentUri, new TextEncoder().encode(diskBaseline));
+    const document = await vscode.workspace.openTextDocument(documentUri);
+    const coordinator = new DocumentSyncCoordinator(new VscodeDocumentPort());
+    const endpoint = new RecordingEndpoint();
+    const sessionId = "sequence-lifecycle";
+    const opened = await coordinator.openSession(documentUri.toString(), sessionId, endpoint);
+    assert.ok(opened.ok, "Sequence lifecycle session did not open.");
+    const activatedA = await coordinator.activateController(
+      documentUri.toString(),
+      sessionId,
+      endpoint,
+      "controller-a",
+    );
+    assert.ok(activatedA.ok, "The first controller did not activate.");
+
+    await coordinator.receive(
+      fullReplacementMessage(
+        documentUri.toString(),
+        sessionId,
+        1,
+        activatedA.snapshot.documentVersion,
+        activatedA.snapshot.text,
+        "first controller text\n",
+        "controller-a",
+      ),
+      endpoint,
+    );
+    assert.equal(document.getText(), "first controller text\n");
+    assert.equal(
+      await readDiskText(documentUri),
+      diskBaseline,
+      "An edit changed disk before Save.",
+    );
+
+    const activatedB = await coordinator.activateController(
+      documentUri.toString(),
+      sessionId,
+      endpoint,
+      "controller-b",
+    );
+    assert.ok(activatedB.ok, "The recreated controller did not activate.");
+    assert.equal(activatedB.nextSequence, 2, "Controller recreation reset the client sequence.");
+    assert.equal(activatedB.snapshot.text, "first controller text\n");
+
+    const messageCountBeforeStale = endpoint.messages.length;
+    await coordinator.receive(
+      fullReplacementMessage(
+        documentUri.toString(),
+        sessionId,
+        2,
+        activatedB.snapshot.documentVersion,
+        activatedB.snapshot.text,
+        "stale controller text\n",
+        "controller-a",
+      ),
+      endpoint,
+    );
+    assert.equal(
+      document.getText(),
+      "first controller text\n",
+      "A stale controller mutated TextDocument.",
+    );
+    assert.equal(await readDiskText(documentUri), diskBaseline, "A stale controller mutated disk.");
+    assert.equal(
+      endpoint.messages.length,
+      messageCountBeforeStale,
+      "A stale controller received a host response.",
+    );
+
+    await coordinator.receive(
+      fullReplacementMessage(
+        documentUri.toString(),
+        sessionId,
+        2,
+        activatedB.snapshot.documentVersion,
+        activatedB.snapshot.text,
+        "current controller text\n",
+        "controller-b",
+      ),
+      endpoint,
+    );
+    assert.equal(document.getText(), "current controller text\n");
+    assert.equal(
+      await readDiskText(documentUri),
+      diskBaseline,
+      "The current edit changed disk before Save.",
+    );
+
+    await coordinator.receive(
+      barrierMessage(documentUri.toString(), sessionId, "save", 3, "controller-b"),
+      endpoint,
+    );
+    assert.equal(await readDiskText(documentUri), "current controller text\n");
+    assert.equal(
+      endpoint.messages.some(
+        (message) => message.kind === "operation-ack" && message.sequence === 2,
+      ),
+      true,
+      "The active controller did not receive its acknowledgement.",
+    );
+    coordinator.closeSession(documentUri.toString(), sessionId);
+  } finally {
+    await removeSmokeFile(documentUri);
+  }
 }
 
 interface SaveParticipantObservation {
@@ -1225,6 +1339,7 @@ async function verifyProtocolFirstEdit(
           protocolVersion: PROTOCOL_VERSION,
           documentUri: documentUri.toString(),
           sessionId: "first-edit",
+          controllerId: "extension-host-controller",
           sequence: 1,
           documentVersion: opened.snapshot.documentVersion,
           changes: [
@@ -1315,11 +1430,13 @@ function fullReplacementMessage(
   documentVersion: number,
   expectedText: string,
   text: string,
+  controllerId = "extension-host-controller",
 ): {
   readonly kind: "edit";
-  readonly protocolVersion: 1;
+  readonly protocolVersion: typeof PROTOCOL_VERSION;
   readonly documentUri: string;
   readonly sessionId: string;
+  readonly controllerId: string;
   readonly sequence: number;
   readonly documentVersion: number;
   readonly changes: readonly [
@@ -1338,6 +1455,7 @@ function fullReplacementMessage(
     protocolVersion: PROTOCOL_VERSION,
     documentUri,
     sessionId,
+    controllerId,
     sequence,
     documentVersion,
     changes: [
@@ -1358,14 +1476,23 @@ function barrierMessage(
   sessionId: string,
   kind: "save" | "undo" | "redo",
   sequence: number,
+  controllerId = "extension-host-controller",
 ): {
   readonly kind: "save" | "undo" | "redo";
-  readonly protocolVersion: 1;
+  readonly protocolVersion: typeof PROTOCOL_VERSION;
   readonly documentUri: string;
   readonly sessionId: string;
+  readonly controllerId: string;
   readonly sequence: number;
 } {
-  return { kind, protocolVersion: PROTOCOL_VERSION, documentUri, sessionId, sequence };
+  return {
+    kind,
+    protocolVersion: PROTOCOL_VERSION,
+    documentUri,
+    sessionId,
+    controllerId,
+    sequence,
+  };
 }
 
 function diagnostic(label: string, document: vscode.TextDocument, expectedText: string): string {

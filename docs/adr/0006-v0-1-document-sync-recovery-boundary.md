@@ -2,6 +2,7 @@
 
 Status: Accepted
 Date: 2026-09-02
+Updated: 2026-09-04
 
 ## Context
 
@@ -19,8 +20,17 @@ limits would risk silent source corruption.
 
 For v0.1:
 
-- Every webview operation is validated from `unknown`, names the document and
-  session, and carries a monotonic client sequence.
+- Every webview operation is validated from `unknown`, names the document,
+  session, and ephemeral controller generation, and carries a monotonic client
+  sequence.
+- The host mints the panel session identity and owns its expected client
+  sequence. Each Webview runtime mints a `controllerId`, announces
+  `editor-ready`, and remains read-only until `controller-ready` returns the
+  current authoritative snapshot and the session's unchanged `nextSequence`.
+  Recreating a controller does not recreate or reset the panel session.
+- Exactly one controller generation is active for a session. Operations from
+  an older generation are rejected before reading or mutating the
+  `TextDocument`; an unexpected lower sequence never resets host state.
 - A client edit names its base `TextDocument.version`, uses UTF-16
   line/character ranges, and includes the exact source it expects to replace.
 - The host serializes every operation for a document in one FIFO queue. A
@@ -38,6 +48,11 @@ For v0.1:
 - The webview holds only transient state, sends stable CodeMirror transactions
   immediately, and has at most one edit operation in flight. It does not add
   CodeMirror persistent history.
+- Webview `getState` / `setState` retains only transient local/authority text,
+  selection, and recovery state across standard Webview content recreation.
+  This state is never persisted authority. On the next handshake, equal or
+  confirmed state adopts the host snapshot; unconfirmed divergent local text
+  remains visible in recovery and is not silently overwritten.
 - Webview `Mod+S`, `Mod+Z`, `Mod+Y`, and `Mod+Shift+Z` are routed through the
   host queue. `onWillSaveTextDocument` flushes work already received by the
   host as a best-effort Auto Save barrier. A Save initiated by that same host
@@ -75,6 +90,13 @@ The following remain manual/extension-host validation items before release:
 - host command/menu Undo and Redo behavior while the custom editor has focus;
 - Auto Save and forced-save behavior;
 - concurrent external file replacement close to a webview edit.
+- physical clipboard Cut and lifecycle transitions in the actual VS Code
+  Webview, including hide/show, split, close, and reopen.
+
+Protocol version 2 adds `controllerId` and `controller-ready`. Host and Webview
+ship in the same extension bundle, and no external/public protocol consumer is
+supported, so incompatible v1 messages fail closed instead of being upgraded
+or accepted ambiguously.
 
 Synthetic DOM tests prove the CodeMirror propagation boundary but cannot make
 an event trusted to VS Code. Actual OS/VS Code shortcut delivery, menu/command
