@@ -71,6 +71,7 @@ export function activate(context: vscode.ExtensionContext): void {
     showCollapseAll: true,
     treeDataProvider: outlineProvider,
   });
+  outlineProvider.attachTreeView(outlineView);
 
   const customEditorRegistration = vscode.window.registerCustomEditorProvider(
     MARKDOWN_EDITOR_VIEW_TYPE,

@@ -69,7 +69,8 @@
       "explorer": [
         {
           "id": "vscodeMarkdownLiveEditor.markdownOutline",
-          "name": "Markdown Outline"
+          "name": "Markdown Outline",
+          "contextualTitle": "Outline"
         }
       ]
     }

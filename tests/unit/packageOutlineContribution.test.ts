@@ -6,7 +6,14 @@ interface PackageManifest {
   readonly activationEvents?: readonly string[];
   readonly contributes?: {
     readonly views?: Readonly<
-      Record<string, readonly { readonly id?: string; readonly name?: string }[]>
+      Record<
+        string,
+        readonly {
+          readonly id?: string;
+          readonly name?: string;
+          readonly contextualTitle?: string;
+        }[]
+      >
     >;
   };
 }
@@ -18,6 +25,7 @@ describe("Markdown Outline package contribution", () => {
     expect(manifest.contributes?.views?.["explorer"]).toContainEqual({
       id: "vscodeMarkdownLiveEditor.markdownOutline",
       name: "Markdown Outline",
+      contextualTitle: "Outline",
     });
   });
 });

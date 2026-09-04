@@ -10,8 +10,8 @@ export class TreeItem {
   public command: unknown;
 
   public constructor(
-    public readonly label: string,
-    public readonly collapsibleState: TreeItemCollapsibleState = TreeItemCollapsibleState.None,
+    public label: string,
+    public collapsibleState: TreeItemCollapsibleState = TreeItemCollapsibleState.None,
   ) {}
 }
 
