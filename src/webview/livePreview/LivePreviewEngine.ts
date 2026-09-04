@@ -1,3 +1,4 @@
+import { deleteCharForward } from "@codemirror/commands";
 import { type Extension, StateField, type EditorState } from "@codemirror/state";
 import { Decoration, type DecorationSet, EditorView } from "@codemirror/view";
 
@@ -9,8 +10,8 @@ export interface LivePreviewEngine {
 }
 
 /**
- * The v0.1 renderer owns only CodeMirror presentation state. Its extension
- * contains no commands, history, document transactions, or host integration.
+ * The v0.1 renderer owns CodeMirror presentation state and one source-aware
+ * forward line-join guard. It contains no history or host integration.
  */
 export function createLivePreviewEngine(): LivePreviewEngine {
   return new CodeMirrorDecorationLivePreviewEngine();
@@ -122,12 +123,52 @@ const livePreviewTheme = EditorView.baseTheme({
   },
 });
 
+const sourceAwareForwardLineJoin = EditorView.domEventHandlers({
+  beforeinput: (event, view): boolean =>
+    event.inputType === "deleteContentForward" &&
+    !event.isComposing &&
+    !view.composing &&
+    hasHiddenOpeningMarkerAfterLineBreak(view.state) &&
+    deleteCharForward(view),
+});
+
 class CodeMirrorDecorationLivePreviewEngine implements LivePreviewEngine {
-  public readonly extension: Extension = [livePreviewState, livePreviewTheme];
+  public readonly extension: Extension = [
+    livePreviewState,
+    livePreviewTheme,
+    sourceAwareForwardLineJoin,
+  ];
 
   public dispose(): void {
     // CodeMirror owns the field and theme lifetime through EditorView.destroy().
   }
+}
+
+function hasHiddenOpeningMarkerAfterLineBreak(state: EditorState): boolean {
+  if (state.selection.ranges.length !== 1) {
+    return false;
+  }
+  const selection = state.selection.main;
+  if (!selection.empty) {
+    return false;
+  }
+  const caret = selection.head;
+  const line = state.doc.lineAt(caret);
+  if (caret !== line.to || line.number === state.doc.lines) {
+    return false;
+  }
+  const nextLineStart = caret + 1;
+  const documentText = state.doc.toString();
+  const selections = [{ from: caret, to: caret }];
+  return findPresentationSyntax(documentText).some(
+    (syntax): boolean =>
+      !isSyntaxActive(syntax, selections) &&
+      syntax.markers.some(
+        (marker): boolean =>
+          marker.from === nextLineStart &&
+          (marker.presentation === undefined || marker.presentation === "hidden"),
+      ),
+  );
 }
 
 function buildDecorations(state: EditorState): DecorationSet {

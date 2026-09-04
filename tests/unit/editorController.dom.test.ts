@@ -11,7 +11,10 @@ import {
 
 const messages: WebviewToHostMessage[] = [];
 
-async function createController(): Promise<{
+async function createController(
+  text = "- ",
+  diagnosticMode = "off",
+): Promise<{
   readonly content: HTMLElement;
   readonly view: EditorView;
 }> {
@@ -23,8 +26,16 @@ async function createController(): Promise<{
   document.body.innerHTML = `
     <main id="editor-root"></main>
     <div id="editor-status" hidden></div>
+    <pre id="editor-diagnostics"></pre>
     <script id="markdown-live-editor-bootstrap" type="application/json">
-      {"diagnosticMode":"off","documentUri":"file:///composition.md","documentVersion":1,"sessionId":"session-a","nextSequence":1,"text":"- "}
+      ${JSON.stringify({
+        diagnosticMode,
+        documentUri: "file:///composition.md",
+        documentVersion: 1,
+        sessionId: "session-a",
+        nextSequence: 1,
+        text,
+      })}
     </script>
   `;
   await import("../../src/webview/editor.js");
@@ -37,6 +48,69 @@ async function createController(): Promise<{
     throw new Error("CodeMirror view was not found from its content DOM.");
   }
   return { content, view };
+}
+
+async function emulateNativeLineJoin(
+  content: HTMLElement,
+  inputType: "deleteContentBackward" | "deleteContentForward",
+): Promise<InputEvent> {
+  const beforeInput = new InputEvent("beforeinput", {
+    bubbles: true,
+    cancelable: true,
+    inputType,
+  });
+  content.dispatchEvent(beforeInput);
+  if (!beforeInput.defaultPrevented) {
+    const lines = [...content.querySelectorAll<HTMLElement>(".cm-line")];
+    const firstLine = lines[0];
+    const secondLine = lines[1];
+    if (firstLine === undefined || secondLine === undefined) {
+      throw new Error("Expected two CodeMirror lines for a native line join.");
+    }
+    firstLine.textContent = `${firstLine.textContent}${secondLine.textContent}`;
+    secondLine.remove();
+    content.dispatchEvent(
+      new InputEvent("input", {
+        bubbles: true,
+        inputType,
+      }),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+  return beforeInput;
+}
+
+function dispatchBarrierShortcut(content: HTMLElement, key: "y" | "z"): KeyboardEvent {
+  const event = new KeyboardEvent("keydown", {
+    bubbles: true,
+    cancelable: true,
+    code: `Key${key.toUpperCase()}`,
+    ctrlKey: true,
+    key,
+  });
+  Object.defineProperty(event, "keyCode", { value: key.toUpperCase().charCodeAt(0) });
+  content.dispatchEvent(event);
+  return event;
+}
+
+function acknowledge(
+  operation: "edit" | "redo" | "undo",
+  sequence: number,
+  documentVersion: number,
+  text: string,
+): void {
+  window.dispatchEvent(
+    new MessageEvent("message", {
+      data: {
+        kind: "operation-ack",
+        operation,
+        documentUri: "file:///composition.md",
+        documentVersion,
+        sequence,
+        text,
+      },
+    }),
+  );
 }
 
 function editMessages(): Extract<WebviewToHostMessage, { readonly kind: "edit" }>[] {
@@ -59,6 +133,110 @@ afterEach((): void => {
   messages.length = 0;
   vi.unstubAllGlobals();
   vi.resetModules();
+});
+
+describe("MarkdownWebviewController Live Preview source integrity", () => {
+  it("preserves a next-line Markdown link when forward Delete joins the lines", async () => {
+    const source = "plain\n[label](target.md)";
+    const { content, view } = await createController(source, "preview");
+    view.dispatch({ selection: { anchor: "plain".length } });
+
+    expect(
+      [...content.querySelectorAll<HTMLElement>(".cm-line")].map((line) => line.textContent),
+    ).toEqual(["plain", "label"]);
+    const beforeInput = await emulateNativeLineJoin(content, "deleteContentForward");
+
+    expect(view.state.doc.toString()).toBe("plain[label](target.md)");
+    expect(beforeInput.defaultPrevented).toBe(true);
+    expect(view.state.selection.main).toMatchObject({ anchor: 5, head: 5 });
+    expect(editMessages().at(-1)).toMatchObject({
+      changes: [
+        expect.objectContaining({
+          expectedText: source,
+          text: "plain[label](target.md)",
+        }),
+      ],
+    });
+    expect(editMessages()).toHaveLength(1);
+
+    acknowledge("edit", 1, 2, "plain[label](target.md)");
+    expect(dispatchBarrierShortcut(content, "z").defaultPrevented).toBe(true);
+    expect(messages.at(-1)).toMatchObject({ kind: "undo", sequence: 2 });
+    acknowledge("undo", 2, 3, source);
+    expect(view.state.doc.toString()).toBe(source);
+
+    expect(dispatchBarrierShortcut(content, "y").defaultPrevented).toBe(true);
+    expect(messages.at(-1)).toMatchObject({ kind: "redo", sequence: 3 });
+    acknowledge("redo", 3, 4, "plain[label](target.md)");
+    expect(view.state.doc.toString()).toBe("plain[label](target.md)");
+  });
+
+  it("preserves the Backspace mirror at the start of a Markdown link", async () => {
+    const source = "plain\n[label](target.md)";
+    const { content, view } = await createController(source, "preview");
+    view.dispatch({ selection: { anchor: "plain\n".length } });
+
+    expect(
+      [...content.querySelectorAll<HTMLElement>(".cm-line")].map((line) => line.textContent),
+    ).toEqual(["plain", "[label](target.md)"]);
+    const beforeInput = await emulateNativeLineJoin(content, "deleteContentBackward");
+
+    expect(beforeInput.defaultPrevented).toBe(false);
+    expect(view.state.doc.toString()).toBe("plain[label](target.md)");
+    expect(view.state.selection.main).toMatchObject({ anchor: 5, head: 5 });
+    expect(editMessages()).toHaveLength(1);
+  });
+
+  it("leaves a plain-to-plain forward line join on the native path", async () => {
+    const source = "first\nsecond";
+    const { content, view } = await createController(source, "preview");
+    view.dispatch({ selection: { anchor: "first".length } });
+
+    const beforeInput = await emulateNativeLineJoin(content, "deleteContentForward");
+
+    expect(beforeInput.defaultPrevented).toBe(false);
+    expect(view.state.doc.toString()).toBe("firstsecond");
+    expect(view.state.selection.main).toMatchObject({ anchor: 5, head: 5 });
+    expect(editMessages()).toHaveLength(1);
+  });
+
+  it("does not intercept forward deletion for a non-collapsed selection", async () => {
+    const source = "plain\n[label](target.md)";
+    const { content, view } = await createController(source, "preview");
+    view.dispatch({ selection: { anchor: 4, head: 6 } });
+
+    const beforeInput = new InputEvent("beforeinput", {
+      bubbles: true,
+      cancelable: true,
+      inputType: "deleteContentForward",
+    });
+    content.dispatchEvent(beforeInput);
+
+    expect(beforeInput.defaultPrevented).toBe(false);
+    expect(view.state.doc.toString()).toBe(source);
+    expect(editMessages()).toHaveLength(0);
+  });
+
+  it("does not intercept forward deletion during composition", async () => {
+    const source = "plain\n[label](target.md)";
+    const { content, view } = await createController(source, "preview");
+    view.dispatch({ selection: { anchor: "plain".length } });
+    content.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
+
+    const beforeInput = new InputEvent("beforeinput", {
+      bubbles: true,
+      cancelable: true,
+      inputType: "deleteContentForward",
+      isComposing: true,
+    });
+    content.dispatchEvent(beforeInput);
+
+    expect(beforeInput.defaultPrevented).toBe(false);
+    expect(view.state.doc.toString()).toBe(source);
+    expect(editMessages()).toHaveLength(0);
+    content.dispatchEvent(new CompositionEvent("compositionend", { bubbles: true }));
+    await Promise.resolve();
+  });
 });
 
 describe("MarkdownWebviewController recovery", () => {
