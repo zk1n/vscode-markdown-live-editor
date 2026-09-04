@@ -1,3 +1,5 @@
+import { parseAtxHeadingLine } from "../../core/markdown/atxHeadings.js";
+
 export type PresentationSyntaxKind =
   | "heading"
   | "strong"
@@ -91,26 +93,18 @@ export function isSyntaxActive(
 }
 
 function findHeading(line: string, offset: number): PresentationSyntaxRange | undefined {
-  const match = /^( {0,3})(#{1,6})(?:[ \t]+)(?=\S)/.exec(line);
-  if (match === null) {
+  const heading = parseAtxHeadingLine(line, offset);
+  if (heading === undefined) {
     return undefined;
   }
-  const indentation = match[1];
-  const marker = match[2];
-  if (indentation === undefined || marker === undefined) {
-    return undefined;
-  }
-
-  const markerFrom = offset + indentation.length;
-  const markerTo = offset + match[0].length;
   return {
     kind: "heading",
-    from: offset,
-    to: offset + line.length,
-    contentFrom: markerTo,
-    contentTo: offset + line.length,
-    markers: [{ from: markerFrom, to: markerTo }],
-    headingLevel: marker.length,
+    from: heading.from,
+    to: heading.to,
+    contentFrom: heading.contentFrom,
+    contentTo: heading.contentTo,
+    markers: [{ from: heading.markerFrom, to: heading.markerTo }],
+    headingLevel: heading.level,
   };
 }
 

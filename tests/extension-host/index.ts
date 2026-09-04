@@ -19,6 +19,7 @@ import { PROTOCOL_VERSION, type HostToWebviewMessage } from "../../src/protocol/
 import { VscodeDocumentPort } from "../../src/extension/sync/VscodeDocumentPort.js";
 
 const COMMAND_ID = "vscodeMarkdownLiveEditor.showProjectInfo";
+const OUTLINE_COMMAND_ID = "vscodeMarkdownLiveEditor.navigateToOutlineHeading";
 const VIEW_TYPE = "vscodeMarkdownLiveEditor.editor";
 const EXTENSION_ID = "local-dev.vscode-markdown-live-editor";
 const SMOKE_FILE_NAME = "extension-host-smoke.md";
@@ -42,6 +43,15 @@ export async function run(): Promise<void> {
 
   const commands = await vscode.commands.getCommands(true);
   assert.ok(commands.includes(COMMAND_ID), `Command '${COMMAND_ID}' was not registered.`);
+  assert.ok(
+    commands.includes(OUTLINE_COMMAND_ID),
+    `Command '${OUTLINE_COMMAND_ID}' was not registered.`,
+  );
+  assert.equal(
+    await vscode.commands.executeCommand<boolean>(OUTLINE_COMMAND_ID, { invalid: true }),
+    false,
+    "The Outline navigation command did not reject an invalid item.",
+  );
 
   const documentUri = vscode.Uri.joinPath(workspaceFolder.uri, SMOKE_FILE_NAME);
   await removeSmokeFile(documentUri);

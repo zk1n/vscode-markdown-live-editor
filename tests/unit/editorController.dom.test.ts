@@ -6,6 +6,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   decodeWebviewToHostMessage,
+  PROTOCOL_VERSION,
+  type NavigateToHeadingMessage,
   type WebviewToHostMessage,
 } from "../../src/protocol/messages.js";
 
@@ -80,7 +82,7 @@ async function emulateNativeLineJoin(
   return beforeInput;
 }
 
-function dispatchBarrierShortcut(content: HTMLElement, key: "y" | "z"): KeyboardEvent {
+function dispatchBarrierShortcut(content: HTMLElement, key: "s" | "y" | "z"): KeyboardEvent {
   const event = new KeyboardEvent("keydown", {
     bubbles: true,
     cancelable: true,
@@ -127,7 +129,26 @@ function diagnosticMessages(): Extract<WebviewToHostMessage, { readonly kind: "d
   );
 }
 
+function navigateToHeading(
+  overrides: Partial<NavigateToHeadingMessage> = {},
+): NavigateToHeadingMessage {
+  const message: NavigateToHeadingMessage = {
+    kind: "navigate-to-heading",
+    protocolVersion: PROTOCOL_VERSION,
+    documentUri: "file:///composition.md",
+    documentVersion: 1,
+    sessionId: "session-a",
+    targetOffset: 2,
+    highlightFrom: 0,
+    highlightTo: 9,
+    ...overrides,
+  };
+  window.dispatchEvent(new MessageEvent("message", { data: message }));
+  return message;
+}
+
 afterEach((): void => {
+  vi.useRealTimers();
   window.dispatchEvent(new Event("unload"));
   document.body.replaceChildren();
   messages.length = 0;
@@ -236,6 +257,110 @@ describe("MarkdownWebviewController Live Preview source integrity", () => {
     expect(editMessages()).toHaveLength(0);
     content.dispatchEvent(new CompositionEvent("compositionend", { bubbles: true }));
     await Promise.resolve();
+  });
+});
+
+describe("MarkdownWebviewController Outline navigation", () => {
+  it("moves the caret, scrolls, focuses, and clears a transient source-safe highlight", async () => {
+    const source = "# Heading\nbody";
+    const { view } = await createController(source);
+    vi.useFakeTimers();
+
+    navigateToHeading();
+
+    expect(view.state.doc.toString()).toBe(source);
+    expect(view.state.selection.main).toMatchObject({ anchor: 2, head: 2 });
+    expect(view.hasFocus).toBe(true);
+    expect(document.querySelector(".cm-outline-navigation-highlight")).not.toBeNull();
+    expect(editMessages()).toEqual([]);
+
+    vi.advanceTimersByTime(800);
+    expect(document.querySelector(".cm-outline-navigation-highlight")).toBeNull();
+    expect(view.state.doc.toString()).toBe(source);
+    expect(editMessages()).toEqual([]);
+    vi.useRealTimers();
+  });
+
+  it("rejects stale identity, version, and heading ranges without moving or editing", async () => {
+    const source = "# Heading\nbody";
+    const { view } = await createController(source);
+    const initialSelection = view.state.selection.main.anchor;
+
+    navigateToHeading({ sessionId: "stale-session" });
+    navigateToHeading({ documentUri: "file:///other.md" });
+    navigateToHeading({ documentVersion: 2 });
+    navigateToHeading({ highlightTo: 8 });
+
+    expect(view.state.selection.main.anchor).toBe(initialSelection);
+    expect(document.querySelector(".cm-outline-navigation-highlight")).toBeNull();
+    expect(view.state.doc.toString()).toBe(source);
+    expect(editMessages()).toEqual([]);
+  });
+
+  it("rejects navigation while local work or composition is pending", async () => {
+    const source = "# Heading\nbody";
+    const { content, view } = await createController(source);
+    view.dispatch({ changes: { from: source.length, insert: "!" } });
+    const selectionAfterEdit = view.state.selection.main.anchor;
+
+    navigateToHeading({ highlightTo: 9 });
+    expect(view.state.selection.main.anchor).toBe(selectionAfterEdit);
+    expect(document.querySelector(".cm-outline-navigation-highlight")).toBeNull();
+    expect(editMessages()).toHaveLength(1);
+
+    acknowledge("edit", 1, 2, `${source}!`);
+    content.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
+    navigateToHeading({ documentVersion: 2 });
+    expect(view.state.selection.main.anchor).toBe(selectionAfterEdit);
+    expect(document.querySelector(".cm-outline-navigation-highlight")).toBeNull();
+    content.dispatchEvent(new CompositionEvent("compositionend", { bubbles: true }));
+  });
+
+  it("rejects navigation during a Save barrier without creating another operation", async () => {
+    const source = "# Heading\nbody";
+    const { content, view } = await createController(source);
+    const initialSelection = view.state.selection.main.anchor;
+    dispatchBarrierShortcut(content, "s");
+    expect(messages.at(-1)).toMatchObject({ kind: "save", sequence: 1 });
+
+    navigateToHeading();
+    expect(view.state.selection.main.anchor).toBe(initialSelection);
+    expect(view.state.doc.toString()).toBe(source);
+    expect(messages.filter((message) => message.kind === "save")).toHaveLength(1);
+    expect(editMessages()).toEqual([]);
+  });
+
+  it("rejects navigation in recovery without changing protected source", async () => {
+    const source = "# Heading\nbody";
+    const { view } = await createController(source);
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        data: { kind: "protocol-error", note: "fixture recovery" },
+      }),
+    );
+    const initialSelection = view.state.selection.main.anchor;
+
+    navigateToHeading();
+    expect(view.state.selection.main.anchor).toBe(initialSelection);
+    expect(view.state.doc.toString()).toBe(source);
+    expect(document.querySelector(".cm-outline-navigation-highlight")).toBeNull();
+    expect(editMessages()).toEqual([]);
+  });
+
+  it("does not let the highlight timer touch a disposed editor", async () => {
+    const source = "# Heading\nbody";
+    await createController(source);
+    vi.useFakeTimers();
+    navigateToHeading();
+    expect(document.querySelector(".cm-outline-navigation-highlight")).not.toBeNull();
+
+    window.dispatchEvent(new Event("unload"));
+    expect((): void => {
+      navigateToHeading();
+    }).not.toThrow();
+    expect((): void => {
+      vi.advanceTimersByTime(800);
+    }).not.toThrow();
   });
 });
 
