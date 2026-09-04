@@ -1,4 +1,4 @@
-export const PROTOCOL_VERSION = 1 as const;
+export const PROTOCOL_VERSION = 2 as const;
 
 export interface WirePosition {
   readonly line: number;
@@ -24,6 +24,7 @@ interface ClientOperationBase {
   readonly protocolVersion: typeof PROTOCOL_VERSION;
   readonly documentUri: string;
   readonly sessionId: string;
+  readonly controllerId: string;
   readonly sequence: number;
 }
 
@@ -42,6 +43,7 @@ export interface ClientDiagnosticMessage {
   readonly kind: "diagnostic";
   readonly documentUri: string;
   readonly sessionId: string;
+  readonly controllerId: string;
   readonly event: string;
   readonly details: Readonly<Record<string, boolean | number | string>>;
 }
@@ -102,6 +104,16 @@ export interface EditorReadyMessage {
   readonly protocolVersion: typeof PROTOCOL_VERSION;
   readonly documentUri: string;
   readonly sessionId: string;
+  readonly controllerId: string;
+}
+
+/** Host acknowledgement for one active Webview controller generation. */
+export interface ControllerReadyMessage extends DocumentSnapshotMessage {
+  readonly kind: "controller-ready";
+  readonly protocolVersion: typeof PROTOCOL_VERSION;
+  readonly sessionId: string;
+  readonly controllerId: string;
+  readonly nextSequence: number;
 }
 
 /** Presentation-only request. It never carries or authorizes a source edit. */
@@ -117,6 +129,7 @@ export interface NavigateToHeadingMessage {
 }
 
 export type HostToWebviewMessage =
+  | ControllerReadyMessage
   | OperationAcknowledgement
   | DocumentUpdateMessage
   | ResyncMessage
@@ -243,6 +256,11 @@ function decodeOperationBase(
     return sessionId;
   }
 
+  const controllerId = readNonEmptyString(value["controllerId"], "controllerId");
+  if (!controllerId.ok) {
+    return controllerId;
+  }
+
   const sequence = readNonNegativeInteger(value["sequence"], "sequence");
   if (!sequence.ok) {
     return sequence;
@@ -253,6 +271,7 @@ function decodeOperationBase(
     value: {
       documentUri: documentUri.value,
       sessionId: sessionId.value,
+      controllerId: controllerId.value,
       sequence: sequence.value,
     },
   };
@@ -270,7 +289,13 @@ export function decodeWebviewToHostMessage(
   if (kind === "diagnostic") {
     const documentUri = readNonEmptyString(value["documentUri"], "documentUri");
     const sessionId = readNonEmptyString(value["sessionId"], "sessionId");
-    if (!documentUri.ok || !sessionId.ok || typeof value["event"] !== "string") {
+    const controllerId = readNonEmptyString(value["controllerId"], "controllerId");
+    if (
+      !documentUri.ok ||
+      !sessionId.ok ||
+      !controllerId.ok ||
+      typeof value["event"] !== "string"
+    ) {
       return { ok: false, error: "Diagnostic message is invalid." };
     }
     if (value["event"].length > 96 || !isRecord(value["details"])) {
@@ -297,6 +322,7 @@ export function decodeWebviewToHostMessage(
         kind,
         documentUri: documentUri.value,
         sessionId: sessionId.value,
+        controllerId: controllerId.value,
         event: value["event"],
         details,
       },
@@ -371,6 +397,10 @@ export function decodeEditorReadyMessage(value: unknown): ProtocolDecodeResult<E
   if (!sessionId.ok) {
     return sessionId;
   }
+  const controllerId = readNonEmptyString(value["controllerId"], "controllerId");
+  if (!controllerId.ok) {
+    return controllerId;
+  }
   return {
     ok: true,
     value: {
@@ -378,6 +408,7 @@ export function decodeEditorReadyMessage(value: unknown): ProtocolDecodeResult<E
       protocolVersion: PROTOCOL_VERSION,
       documentUri: documentUri.value,
       sessionId: sessionId.value,
+      controllerId: controllerId.value,
     },
   };
 }
@@ -496,6 +527,31 @@ export function decodeHostToWebviewMessage(
 ): ProtocolDecodeResult<HostToWebviewMessage> {
   if (!isRecord(value)) {
     return { ok: false, error: "Message must be an object." };
+  }
+
+  if (value["kind"] === "controller-ready") {
+    if (value["protocolVersion"] !== PROTOCOL_VERSION) {
+      return { ok: false, error: `protocolVersion must be ${String(PROTOCOL_VERSION)}.` };
+    }
+    const snapshot = decodeSnapshot(value);
+    const sessionId = readNonEmptyString(value["sessionId"], "sessionId");
+    const controllerId = readNonEmptyString(value["controllerId"], "controllerId");
+    const nextSequence = readNonNegativeInteger(value["nextSequence"], "nextSequence");
+    if (!snapshot.ok) return snapshot;
+    if (!sessionId.ok) return sessionId;
+    if (!controllerId.ok) return controllerId;
+    if (!nextSequence.ok) return nextSequence;
+    return {
+      ok: true,
+      value: {
+        kind: "controller-ready",
+        protocolVersion: PROTOCOL_VERSION,
+        ...snapshot.value,
+        sessionId: sessionId.value,
+        controllerId: controllerId.value,
+        nextSequence: nextSequence.value,
+      },
+    };
   }
 
   if (value["kind"] === "protocol-error") {

@@ -58,8 +58,17 @@ export type OpenSessionResult =
   | { readonly ok: true; readonly snapshot: DocumentSnapshot }
   | { readonly ok: false; readonly error: string };
 
+export type ActivateControllerResult =
+  | {
+      readonly ok: true;
+      readonly snapshot: DocumentSnapshot;
+      readonly nextSequence: number;
+    }
+  | { readonly ok: false; readonly error: string };
+
 interface SessionState {
   readonly endpoint: WebviewEndpoint;
+  controllerId: string | undefined;
   nextSequence: number;
 }
 
@@ -121,7 +130,12 @@ export class DocumentSyncCoordinator {
           sessions = new Map<string, SessionState>();
           this.sessionsByDocument.set(documentUri, sessions);
         }
-        sessions.set(sessionId, { endpoint, nextSequence: 1 });
+        if (sessions.has(sessionId)) {
+          const error = "Document session identity is already open.";
+          this.post(endpoint, { kind: "protocol-error", note: error });
+          return { ok: false, error };
+        }
+        sessions.set(sessionId, { endpoint, controllerId: undefined, nextSequence: 1 });
         this.post(endpoint, {
           kind: "document-update",
           reason: "opened",
@@ -148,6 +162,48 @@ export class DocumentSyncCoordinator {
         const message = `Unable to open document session: ${errorNote(error)}`;
         this.post(endpoint, { kind: "protocol-error", note: message });
         return { ok: false, error: message };
+      }
+    });
+  }
+
+  /**
+   * Activates exactly one Webview controller generation for an open panel
+   * session. Re-activation preserves the session's expected client sequence.
+   */
+  public async activateController(
+    documentUri: string,
+    sessionId: string,
+    endpoint: WebviewEndpoint,
+    controllerId: string,
+  ): Promise<ActivateControllerResult> {
+    return this.enqueue(documentUri, async (queue): Promise<ActivateControllerResult> => {
+      const session = this.getSession(documentUri, sessionId);
+      if (session?.endpoint !== endpoint) {
+        return { ok: false, error: "The controller does not belong to an open document session." };
+      }
+      try {
+        const snapshot = await this.documentPort.readDocument(documentUri);
+        if (!isUsableSnapshot(documentUri, snapshot)) {
+          return { ok: false, error: "Document port returned an invalid controller snapshot." };
+        }
+        const previousControllerId = session.controllerId;
+        session.controllerId = controllerId;
+        this.diagnostics.record("coordinator.controller.activated", {
+          documentUri,
+          sessionId,
+          controllerId,
+          previousControllerId: previousControllerId ?? "none",
+          nextSequence: session.nextSequence,
+          documentVersion: snapshot.documentVersion,
+          queueEnqueueOrdinal: queue.enqueueOrdinal,
+          queueStartOrdinal: queue.startOrdinal,
+        });
+        return { ok: true, snapshot, nextSequence: session.nextSequence };
+      } catch (error: unknown) {
+        return {
+          ok: false,
+          error: `Unable to activate Webview controller: ${errorNote(error)}`,
+        };
       }
     });
   }
@@ -186,7 +242,7 @@ export class DocumentSyncCoordinator {
     const message = decoded.value;
     if (message.kind === "diagnostic") {
       const session = this.getSession(message.documentUri, message.sessionId);
-      if (session?.endpoint === endpoint) {
+      if (session?.endpoint === endpoint && session.controllerId === message.controllerId) {
         this.diagnostics.record(`webview.${message.event}`, message.details);
       }
       return;
@@ -279,6 +335,24 @@ export class DocumentSyncCoordinator {
       this.post(receivedEndpoint, {
         kind: "protocol-error",
         note: "The message does not belong to an open document session.",
+      });
+      return;
+    }
+    if (session.controllerId === undefined) {
+      session.controllerId = message.controllerId;
+      this.diagnostics.record("coordinator.controller.bound-by-first-operation", {
+        documentUri: message.documentUri,
+        sessionId: message.sessionId,
+        controllerId: message.controllerId,
+      });
+    } else if (session.controllerId !== message.controllerId) {
+      this.diagnostics.record("coordinator.receive.stale-controller", {
+        documentUri: message.documentUri,
+        sessionId: message.sessionId,
+        controllerId: message.controllerId,
+        activeControllerId: session.controllerId,
+        sequence: message.sequence,
+        messageKind: message.kind,
       });
       return;
     }
