@@ -10,7 +10,11 @@ import {
 } from "../../src/core/sync/documentSyncCoordinator.js";
 import { BoundedDiagnosticLog } from "../../src/core/diagnostics/diagnosticLog.js";
 import { textFingerprint } from "../../src/core/diagnostics/textFingerprint.js";
-import { createDocumentChangeHandler } from "../../src/extension/extension.js";
+import {
+  createDocumentChangeHandler,
+  createWillSaveTextDocumentHandler,
+} from "../../src/extension/extension.js";
+import { shouldWarnForMarkdownTrailingWhitespace } from "../../src/extension/markdownTrailingWhitespace.js";
 import { PROTOCOL_VERSION, type HostToWebviewMessage } from "../../src/protocol/messages.js";
 import { VscodeDocumentPort } from "../../src/extension/sync/VscodeDocumentPort.js";
 
@@ -26,6 +30,7 @@ const SAVE_PROBE_FILE_NAME = "extension-host-save-probe.md";
 const MIXED_LIST_SAVE_PROBE_FILE_NAME = "extension-host-mixed-list-save-probe.md";
 const OWN_CHANGE_FILE_NAME = "extension-host-own-change.md";
 const PRODUCTION_LISTENER_FILE_NAME = "extension-host-production-listener.md";
+const AUTOSAVE_TRIM_FILE_NAME = "extension-host-autosave-trim.md";
 
 export async function run(): Promise<void> {
   const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
@@ -86,6 +91,189 @@ export async function run(): Promise<void> {
   await verifyMixedListSaveParticipantSemantics(workspaceFolder.uri);
   await verifyOwnChangeClassification(workspaceFolder.uri);
   await verifyProductionDocumentChangeListener(workspaceFolder.uri);
+  await verifyAutosaveTrailingWhitespaceProtection(workspaceFolder.uri);
+}
+
+interface SaveParticipantObservation {
+  readonly documentVersion: number;
+  readonly fingerprint: string;
+  readonly contentChangeCount: number;
+  readonly firstChangeRange: string;
+  readonly firstChangeTextFingerprint: string;
+  readonly textLength: number;
+}
+
+async function verifyAutosaveTrailingWhitespaceProtection(workspaceUri: vscode.Uri): Promise<void> {
+  const documentUri = vscode.Uri.joinPath(workspaceUri, AUTOSAVE_TRIM_FILE_NAME);
+  await removeSmokeFile(documentUri);
+
+  const settings = captureAutosaveTrimSettings(documentUri);
+  try {
+    await setAutosaveTrimSettings(documentUri, {
+      autoSave: "afterDelay",
+      autoSaveDelay: 1000,
+      markdownTrimTrailingWhitespace: undefined,
+      trimTrailingWhitespace: true,
+    });
+    await vscode.workspace.fs.writeFile(documentUri, new TextEncoder().encode("-"));
+    const document = await vscode.workspace.openTextDocument(documentUri);
+    await vscode.commands.executeCommand("vscode.openWith", documentUri, VIEW_TYPE);
+    assertCustomEditorOpened(documentUri);
+    assert.equal(
+      vscode.window.visibleTextEditors.some(
+        (editor) => editor.document.uri.toString() === documentUri.toString(),
+      ),
+      false,
+      "The Auto Save trim fixture unexpectedly has a visible normal TextEditor.",
+    );
+
+    const files = markdownFilesConfiguration(document);
+    assert.equal(
+      files.get<boolean>("trimTrailingWhitespace"),
+      false,
+      `The Markdown language default did not override the non-language trim setting: ${JSON.stringify(files.inspect<boolean>("trimTrailingWhitespace"))}`,
+    );
+    const trimInspection = files.inspect<boolean>("trimTrailingWhitespace");
+    assert.ok(trimInspection, "The trailing-whitespace setting is not inspectable.");
+    assert.equal(
+      trimInspection.defaultLanguageValue,
+      false,
+      "The Markdown configuration default was not contributed.",
+    );
+    assert.equal(
+      trimInspection.globalValue,
+      true,
+      "The non-language trim setting was not retained for precedence coverage.",
+    );
+    assert.equal(
+      trimInspection.globalLanguageValue,
+      undefined,
+      "The default regression must not install a Markdown override.",
+    );
+    const endpoint = new RecordingEndpoint();
+    const diagnostics = new BoundedDiagnosticLog();
+    const port = new VscodeDocumentPort(diagnostics);
+    const coordinator = new DocumentSyncCoordinator(port, diagnostics);
+    const opened = await coordinator.openSession(
+      documentUri.toString(),
+      "autosave-trim-default",
+      endpoint,
+    );
+    assert.ok(opened.ok, "The Auto Save trim coordinator session did not open.");
+
+    const observations = observeAutosaveTrim(documentUri);
+    const saveListener = vscode.workspace.onWillSaveTextDocument(
+      createWillSaveTextDocumentHandler(port, coordinator, diagnostics),
+    );
+    try {
+      await coordinator.receive(
+        fullReplacementMessage(
+          documentUri.toString(),
+          "autosave-trim-default",
+          1,
+          opened.snapshot.documentVersion,
+          opened.snapshot.text,
+          "- ",
+        ),
+        endpoint,
+      );
+      const acknowledgement = endpoint.messages.find(
+        (message): message is Extract<HostToWebviewMessage, { readonly kind: "operation-ack" }> =>
+          message.kind === "operation-ack" && message.sequence === 1,
+      );
+      assert.ok(acknowledgement, "The trailing-space edit did not receive an exact ACK.");
+      assert.equal(acknowledgement.text, "- ", "The ACK did not preserve the trailing space.");
+
+      await observations.waitForAfterDelaySave();
+      assert.equal(
+        document.getText(),
+        "- ",
+        "After-delay Save removed the Markdown trailing space.",
+      );
+      assert.equal(
+        await readDiskText(documentUri),
+        "- ",
+        "Disk did not retain the Markdown trailing space.",
+      );
+      assert.equal(
+        observations.hasDestructiveTrim(),
+        false,
+        "A destructive B -> A event was emitted.",
+      );
+
+      const trace = diagnostics.copyText();
+      assert.match(trace, /extension\.will-save/, "Production will-save listener was not invoked.");
+      assert.match(trace, /saveReason="after-delay"/, "After-delay save reason was not recorded.");
+      assert.match(trace, /files\.autoSave="afterDelay"/, "Effective Auto Save was not recorded.");
+      assert.match(
+        trace,
+        /files\.autoSaveDelay=1000/,
+        "Effective Auto Save delay was not recorded.",
+      );
+      assert.match(
+        trace,
+        /files\.trimTrailingWhitespace=false/,
+        "Effective Markdown trailing-whitespace setting was not recorded.",
+      );
+      assert.match(
+        trace,
+        /editor\.formatOnSave=false/,
+        "Effective format-on-save setting was not recorded.",
+      );
+      assert.match(
+        trace,
+        /hasVisibleTextEditor=false/,
+        "Custom-editor-only visibility was not recorded.",
+      );
+      assert.equal(trace.includes("- "), false, "Diagnostic metadata exposed source text.");
+
+      await setAutosaveTrimSettings(documentUri, {
+        autoSave: "afterDelay",
+        autoSaveDelay: 1000,
+        markdownTrimTrailingWhitespace: true,
+        trimTrailingWhitespace: true,
+      });
+      assert.equal(
+        markdownFilesConfiguration(document).get<boolean>("trimTrailingWhitespace"),
+        true,
+        "An explicit Markdown override did not take precedence over the language default.",
+      );
+      assert.equal(
+        shouldWarnForMarkdownTrailingWhitespace(
+          markdownFilesConfiguration(document).get<boolean>("trimTrailingWhitespace"),
+        ),
+        true,
+        "The explicit incompatible override did not enable the compatibility warning.",
+      );
+      assert.equal(
+        markdownFilesConfiguration(document).inspect<boolean>("trimTrailingWhitespace")
+          ?.globalLanguageValue,
+        true,
+        "The extension changed the user-owned explicit Markdown override.",
+      );
+      await setAutosaveTrimSettings(documentUri, {
+        autoSave: "afterDelay",
+        autoSaveDelay: 1000,
+        markdownTrimTrailingWhitespace: false,
+        trimTrailingWhitespace: true,
+      });
+      assert.equal(
+        shouldWarnForMarkdownTrailingWhitespace(
+          markdownFilesConfiguration(document).get<boolean>("trimTrailingWhitespace"),
+        ),
+        false,
+        "An explicit safe Markdown override still requests a warning.",
+      );
+    } finally {
+      saveListener.dispose();
+      observations.dispose();
+      coordinator.closeSession(documentUri.toString(), "autosave-trim-default");
+    }
+  } finally {
+    await restoreAutosaveTrimSettings(documentUri, settings);
+    await closeCustomEditor(documentUri);
+    await removeSmokeFile(documentUri);
+  }
 }
 
 async function verifyProductionDocumentChangeListener(workspaceUri: vscode.Uri): Promise<void> {
@@ -1201,6 +1389,155 @@ function waitForDocumentChange(documentUri: vscode.Uri, priorVersion: number): P
       }
     });
   });
+}
+
+interface AutosaveTrimSettings {
+  readonly autoSave: string | undefined;
+  readonly autoSaveDelay: number | undefined;
+  readonly markdownTrimTrailingWhitespace: boolean | undefined;
+  readonly trimTrailingWhitespace: boolean | undefined;
+}
+
+function markdownFilesConfiguration(document: vscode.TextDocument): vscode.WorkspaceConfiguration {
+  return vscode.workspace.getConfiguration("files", {
+    uri: document.uri,
+    languageId: document.languageId,
+  });
+}
+
+function captureAutosaveTrimSettings(documentUri: vscode.Uri): AutosaveTrimSettings {
+  const files = vscode.workspace.getConfiguration("files", documentUri);
+  const markdownFiles = vscode.workspace.getConfiguration("files", {
+    uri: documentUri,
+    languageId: "markdown",
+  });
+  return {
+    autoSave: files.inspect<string>("autoSave")?.globalValue,
+    autoSaveDelay: files.inspect<number>("autoSaveDelay")?.globalValue,
+    markdownTrimTrailingWhitespace:
+      markdownFiles.inspect<boolean>("trimTrailingWhitespace")?.globalLanguageValue,
+    trimTrailingWhitespace: files.inspect<boolean>("trimTrailingWhitespace")?.globalValue,
+  };
+}
+
+async function setAutosaveTrimSettings(
+  documentUri: vscode.Uri,
+  settings: AutosaveTrimSettings,
+): Promise<void> {
+  const files = vscode.workspace.getConfiguration("files", documentUri);
+  const markdownFiles = vscode.workspace.getConfiguration("files", {
+    uri: documentUri,
+    languageId: "markdown",
+  });
+  await files.update("autoSave", settings.autoSave, vscode.ConfigurationTarget.Global);
+  await files.update("autoSaveDelay", settings.autoSaveDelay, vscode.ConfigurationTarget.Global);
+  await files.update(
+    "trimTrailingWhitespace",
+    settings.trimTrailingWhitespace,
+    vscode.ConfigurationTarget.Global,
+  );
+  await markdownFiles.update(
+    "trimTrailingWhitespace",
+    settings.markdownTrimTrailingWhitespace,
+    vscode.ConfigurationTarget.Global,
+    true,
+  );
+}
+
+async function restoreAutosaveTrimSettings(
+  documentUri: vscode.Uri,
+  settings: AutosaveTrimSettings,
+): Promise<void> {
+  await setAutosaveTrimSettings(documentUri, settings);
+}
+
+function observeAutosaveTrim(documentUri: vscode.Uri): {
+  readonly dispose: () => void;
+  readonly hasDestructiveTrim: () => boolean;
+  readonly waitForAfterDelaySave: () => Promise<void>;
+} {
+  const changes: SaveParticipantObservation[] = [];
+  let afterDelayObserved = false;
+  let didSaveObserved = false;
+  let resolve: (() => void) | undefined;
+  let reject: ((reason?: unknown) => void) | undefined;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const tryResolve = (): void => {
+    if (afterDelayObserved && didSaveObserved) {
+      if (timer !== undefined) {
+        clearTimeout(timer);
+      }
+      resolve?.();
+    }
+  };
+  const willSaveSubscription = vscode.workspace.onWillSaveTextDocument((event): void => {
+    if (event.document.uri.toString() === documentUri.toString()) {
+      afterDelayObserved ||= event.reason === vscode.TextDocumentSaveReason.AfterDelay;
+      tryResolve();
+    }
+  });
+  const changeSubscription = vscode.workspace.onDidChangeTextDocument((event): void => {
+    if (event.document.uri.toString() === documentUri.toString()) {
+      const first = event.contentChanges[0];
+      changes.push({
+        documentVersion: event.document.version,
+        fingerprint: textFingerprint(event.document.getText()),
+        contentChangeCount: event.contentChanges.length,
+        firstChangeRange:
+          first === undefined
+            ? "none"
+            : `${String(first.range.start.line)}:${String(first.range.start.character)}-${String(first.range.end.line)}:${String(first.range.end.character)}`,
+        firstChangeTextFingerprint: first === undefined ? "none" : textFingerprint(first.text),
+        textLength: event.document.getText().length,
+      });
+      tryResolve();
+    }
+  });
+  const didSaveSubscription = vscode.workspace.onDidSaveTextDocument((document): void => {
+    if (document.uri.toString() === documentUri.toString()) {
+      didSaveObserved = true;
+      tryResolve();
+    }
+  });
+  return {
+    dispose: (): void => {
+      if (timer !== undefined) {
+        clearTimeout(timer);
+      }
+      willSaveSubscription.dispose();
+      changeSubscription.dispose();
+      didSaveSubscription.dispose();
+    },
+    hasDestructiveTrim: (): boolean =>
+      changes.some(
+        (candidate) =>
+          candidate.textLength === 1 &&
+          candidate.contentChangeCount === 1 &&
+          candidate.firstChangeRange === "0:1-0:2" &&
+          candidate.firstChangeTextFingerprint === textFingerprint(""),
+      ),
+    waitForAfterDelaySave: (): Promise<void> =>
+      new Promise((resolvePromise, rejectPromise): void => {
+        resolve = resolvePromise;
+        reject = rejectPromise;
+        timer = setTimeout((): void => {
+          reject?.(
+            new Error(`Timed out waiting for an after-delay Save: ${JSON.stringify(changes)}`),
+          );
+        }, 7_000);
+        tryResolve();
+      }),
+  };
+}
+
+async function closeCustomEditor(documentUri: vscode.Uri): Promise<void> {
+  const activeTab = vscode.window.tabGroups.activeTabGroup.activeTab;
+  if (
+    activeTab?.input instanceof vscode.TabInputCustom &&
+    activeTab.input.uri.toString() === documentUri.toString()
+  ) {
+    await vscode.commands.executeCommand("workbench.action.closeActiveEditor");
+  }
 }
 
 function assertPortApplied(result: DocumentPortResult, message: string): void {

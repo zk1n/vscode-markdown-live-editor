@@ -25,6 +25,7 @@ interface MarkdownEditorBootstrap {
 export interface MarkdownEditorProviderOptions {
   readonly diagnosticMode: DiagnosticMode;
   readonly diagnostics?: DiagnosticLog;
+  readonly onCustomEditorOpened?: (document: vscode.TextDocument) => void;
   readonly webviewScriptPath: vscode.Uri;
 }
 
@@ -44,6 +45,7 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
     webviewPanel: vscode.WebviewPanel,
     cancellationToken: vscode.CancellationToken,
   ): Promise<void> {
+    this.options.onCustomEditorOpened?.(document);
     const { webview } = webviewPanel;
     webview.options = {
       enableScripts: true,

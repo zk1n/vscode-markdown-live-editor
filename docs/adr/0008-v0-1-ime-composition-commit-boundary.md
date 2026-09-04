@@ -46,6 +46,11 @@ composition相当commit 2回にも適用すると同じ結果だった（VS Code
 - recoveryの原因が未確定な間は、authority/Port guardを緩めず、event ID、FIFO queue ordinal、publication ID、
   session/operation causal ID、Webview recovery incident IDを本文なしで相関する。event時点とqueue実行時の
   snapshot version/fingerprintが異なる場合はtemporal driftとして明示記録する。
+- VS Codeの`TrimWhitespaceParticipant`がCustom Editorだけを開いたMarkdownでafter-delay Save時に`- `を
+  `-`へ変更する実回帰を確認した。`package.json`のlanguage-specific defaultとして
+  `[markdown].files.trimTrailingWhitespace=false`を提供し、非言語別のuser / workspace設定は永続変更しない。
+  明示的な`[markdown]`設定はこのdefaultより優先する。effective値が`true`ならCustom Editor開始時に一度だけ
+  互換性warningを出し、利用者が選んだ場合だけMarkdown設定画面を開く。
 
 実装は`compositionStarted`およびinput / composition eventsで裏付けた意味的な状態だけを使う。
 timeout、dummy edit、whitespace / newline、hidden editor、internal / proposed APIは使わない。
