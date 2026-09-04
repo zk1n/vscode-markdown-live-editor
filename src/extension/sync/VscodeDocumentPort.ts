@@ -50,6 +50,9 @@ export class VscodeDocumentPort implements DocumentPort {
       documentUri: document.uri.toString(),
       documentVersion: document.version,
       historyInvocationId: historyInvocationId ?? "",
+      pendingCausalId: pending?.causalId ?? "",
+      pendingMarkerPresent: pending !== undefined,
+      applyEditSettled: pending?.applyEditSettled ?? false,
       pendingExpectedVersion: pending?.expectedVersion ?? -1,
       replacementMatches,
       targetMatches,
@@ -66,6 +69,7 @@ export class VscodeDocumentPort implements DocumentPort {
     documentUri: string,
     expectedVersion: number,
     text: string,
+    causalId?: string,
   ): Promise<DocumentPortResult> {
     const document = this.requireDocument(documentUri);
     this.diagnostics.record("port.replace.requested", {
@@ -73,6 +77,7 @@ export class VscodeDocumentPort implements DocumentPort {
       expectedVersion,
       textLength: text.length,
       version: document.version,
+      causalId: causalId ?? "untraced",
     });
     if (document.version !== expectedVersion) {
       return this.rejected(
@@ -98,12 +103,18 @@ export class VscodeDocumentPort implements DocumentPort {
       );
     }
 
-    const pending: PendingReplacement = { expectedVersion, targetText: text };
+    const pending: PendingReplacement = {
+      expectedVersion,
+      targetText: text,
+      causalId: causalId ?? "untraced",
+      applyEditSettled: false,
+    };
     this.replacementsInProgress.set(documentUri, pending);
     let applied: boolean;
     let snapshot: DocumentSnapshot;
     try {
       applied = await vscode.workspace.applyEdit(workspaceEdit);
+      pending.applyEditSettled = true;
       snapshot = await this.readDocument(documentUri);
     } finally {
       if (this.replacementsInProgress.get(documentUri) === pending) {
@@ -114,6 +125,7 @@ export class VscodeDocumentPort implements DocumentPort {
       applied,
       dirty: document.isDirty,
       documentVersion: snapshot.documentVersion,
+      causalId: pending.causalId,
       textLength: snapshot.text.length,
     });
     return applied
@@ -266,6 +278,8 @@ export class VscodeDocumentPort implements DocumentPort {
 interface PendingReplacement {
   readonly expectedVersion: number;
   readonly targetText: string;
+  readonly causalId: string;
+  applyEditSettled: boolean;
 }
 
 function saveFailureNote(saved: boolean, clean: boolean, diskMatches: boolean): string {

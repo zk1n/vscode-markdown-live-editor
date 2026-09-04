@@ -8,7 +8,9 @@ import {
   type DocumentPortResult,
   type WebviewEndpoint,
 } from "../../src/core/sync/documentSyncCoordinator.js";
+import { BoundedDiagnosticLog } from "../../src/core/diagnostics/diagnosticLog.js";
 import { textFingerprint } from "../../src/core/diagnostics/textFingerprint.js";
+import { createDocumentChangeHandler } from "../../src/extension/extension.js";
 import { PROTOCOL_VERSION, type HostToWebviewMessage } from "../../src/protocol/messages.js";
 import { VscodeDocumentPort } from "../../src/extension/sync/VscodeDocumentPort.js";
 
@@ -23,6 +25,7 @@ const COMPOSITION_GROUPING_FILE_NAME = "extension-host-composition-grouping.md";
 const SAVE_PROBE_FILE_NAME = "extension-host-save-probe.md";
 const MIXED_LIST_SAVE_PROBE_FILE_NAME = "extension-host-mixed-list-save-probe.md";
 const OWN_CHANGE_FILE_NAME = "extension-host-own-change.md";
+const PRODUCTION_LISTENER_FILE_NAME = "extension-host-production-listener.md";
 
 export async function run(): Promise<void> {
   const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
@@ -82,6 +85,68 @@ export async function run(): Promise<void> {
   await verifySaveSemantics(workspaceFolder.uri);
   await verifyMixedListSaveParticipantSemantics(workspaceFolder.uri);
   await verifyOwnChangeClassification(workspaceFolder.uri);
+  await verifyProductionDocumentChangeListener(workspaceFolder.uri);
+}
+
+async function verifyProductionDocumentChangeListener(workspaceUri: vscode.Uri): Promise<void> {
+  const documentUri = vscode.Uri.joinPath(workspaceUri, PRODUCTION_LISTENER_FILE_NAME);
+  await removeSmokeFile(documentUri);
+
+  try {
+    await vscode.workspace.fs.writeFile(documentUri, new TextEncoder().encode("- \r\n"));
+    const document = await vscode.workspace.openTextDocument(documentUri);
+    const diagnostics = new BoundedDiagnosticLog();
+    const port = new VscodeDocumentPort(diagnostics);
+    const coordinator = new DocumentSyncCoordinator(port, diagnostics);
+    const endpoint = new RecordingEndpoint();
+    const opened = await coordinator.openSession(
+      documentUri.toString(),
+      "production-listener",
+      endpoint,
+    );
+    assert.ok(opened.ok, "Production-listener session did not open.");
+    const listener = createDocumentChangeHandler(port, coordinator, diagnostics);
+    const subscription = vscode.workspace.onDidChangeTextDocument(listener);
+    try {
+      await coordinator.receive(
+        fullReplacementMessage(
+          documentUri.toString(),
+          "production-listener",
+          1,
+          opened.snapshot.documentVersion,
+          opened.snapshot.text,
+          "- 日本\n",
+        ),
+        endpoint,
+      );
+      await coordinator.flush(documentUri.toString());
+    } finally {
+      subscription.dispose();
+    }
+
+    assert.equal(document.getText(), "- 日本\r\n", "Production listener changed source text.");
+    const acknowledgement = endpoint.messages.find(
+      (message): message is Extract<HostToWebviewMessage, { readonly kind: "operation-ack" }> =>
+        message.kind === "operation-ack" && message.sequence === 1,
+    );
+    assert.ok(acknowledgement, "Origin did not receive its exact edit acknowledgement.");
+    assert.match(
+      String(acknowledgement.correlation?.causalId),
+      /^operation:production-listener:1$/,
+      "ACK lacks operation correlation.",
+    );
+    const trace = diagnostics.copyText();
+    assert.match(trace, /extension\.document\.changed/, "Production listener was not invoked.");
+    assert.match(trace, /eventId="document-change-/, "Listener event ID was not recorded.");
+    assert.match(trace, /coordinator\.queue\.enqueued/, "Queue correlation was not recorded.");
+    assert.equal(
+      trace.includes("日本"),
+      false,
+      "Diagnostic metadata must not contain source text.",
+    );
+  } finally {
+    await removeSmokeFile(documentUri);
+  }
 }
 
 async function verifyOwnChangeClassification(workspaceUri: vscode.Uri): Promise<void> {

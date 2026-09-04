@@ -43,6 +43,9 @@ composition相当commit 2回にも適用すると同じ結果だった（VS Code
 - edit ACK前に届いた`document-update`がin-flight targetと完全一致する場合は、外部競合と即断せず
   ACK/resyncまでmetadata-onlyでdeferする。host ACKなしに成功扱いせず、本文が異なる場合は
   `reason: "edit"`でもvisible recoveryへ入る。
+- recoveryの原因が未確定な間は、authority/Port guardを緩めず、event ID、FIFO queue ordinal、publication ID、
+  session/operation causal ID、Webview recovery incident IDを本文なしで相関する。event時点とqueue実行時の
+  snapshot version/fingerprintが異なる場合はtemporal driftとして明示記録する。
 
 実装は`compositionStarted`およびinput / composition eventsで裏付けた意味的な状態だけを使う。
 timeout、dummy edit、whitespace / newline、hidden editor、internal / proposed APIは使わない。

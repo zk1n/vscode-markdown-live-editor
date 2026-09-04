@@ -4,7 +4,10 @@ import { Transaction } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import type { WebviewToHostMessage } from "../../src/protocol/messages.js";
+import {
+  decodeWebviewToHostMessage,
+  type WebviewToHostMessage,
+} from "../../src/protocol/messages.js";
 
 const messages: WebviewToHostMessage[] = [];
 
@@ -375,6 +378,58 @@ describe("MarkdownWebviewController recovery", () => {
       ),
     ).toBe(true);
     expect(JSON.stringify(diagnosticMessages())).not.toContain("different external text");
+  });
+
+  it("reports a correlated recovery incident with valid metadata and no source text in off mode", async () => {
+    const { content, view } = await createController();
+    content.dispatchEvent(new FocusEvent("focus", { bubbles: true }));
+    view.dispatch({ changes: { from: 2, insert: "confidential-local" } });
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        data: {
+          kind: "document-update",
+          reason: "external",
+          documentUri: "file:///composition.md",
+          documentVersion: 2,
+          text: "external-secret",
+          correlation: {
+            causalId: "cause-17",
+            publicationId: "publication-22",
+            source: "external-event",
+            queueEnqueueOrdinal: 6,
+            queueStartOrdinal: 7,
+            externalEventId: "external-9",
+          },
+        },
+      }),
+    );
+
+    const update = diagnosticMessages().find((message) => message.event === "sync.document.update");
+    const recovery = diagnosticMessages().find((message) => message.event === "sync.recovery");
+    expect(update?.details).toMatchObject({
+      sessionId: "session-a",
+      correlationCausalId: "cause-17",
+      correlationPublicationId: "publication-22",
+      correlationSource: "external-event",
+      correlationQueueEnqueueOrdinal: 6,
+      correlationQueueStartOrdinal: 7,
+      correlationExternalEventId: "external-9",
+    });
+    expect(recovery?.details).toMatchObject({
+      recoveryIncidentId: 1,
+      correlationCausalId: "cause-17",
+      correlationPublicationId: "publication-22",
+      correlationSource: "external-event",
+    });
+    expect(recovery?.details).not.toHaveProperty("correlationOriginSessionId");
+    expect(document.getElementById("editor-status")?.textContent).toContain("[incident 1]");
+    const invalidDiagnostic = diagnosticMessages().find(
+      (message) => !decodeWebviewToHostMessage(message).ok,
+    );
+    expect(invalidDiagnostic).toBeUndefined();
+    const serialized = JSON.stringify(diagnosticMessages());
+    expect(serialized).not.toContain("confidential-local");
+    expect(serialized).not.toContain("external-secret");
   });
 
   it("uses a newer same-text snapshot after ACK as the next edit base version", async () => {

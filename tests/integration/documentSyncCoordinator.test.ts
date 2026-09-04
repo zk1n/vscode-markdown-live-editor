@@ -276,13 +276,19 @@ describe("DocumentSyncCoordinator", () => {
         (message) => message.kind === "document-update" && message.reason === "edit",
       ),
     ).toHaveLength(0);
-    expect(endpointB.messages).toContainEqual({
+    const peerUpdate = endpointB.messages.find(
+      (message): message is Extract<HostToWebviewMessage, { readonly kind: "document-update" }> =>
+        message.kind === "document-update" && message.documentVersion === 3,
+    );
+    expect(peerUpdate).toMatchObject({
       kind: "document-update",
       reason: "edit",
       documentUri: DOCUMENT_URI,
       documentVersion: 3,
       text: "AB",
     });
+    expect(peerUpdate?.correlation?.causalId).toBe("operation:session-a:2");
+    expect(peerUpdate?.correlation?.source).toBe("operation-peer");
   });
 
   it("rejects a sequence gap without applying it, then accepts the expected sequence", async () => {
@@ -541,8 +547,53 @@ describe("DocumentSyncCoordinator", () => {
       documentVersion: 2,
       text: "after",
     };
-    expect(endpointA.messages.at(-1)).toEqual(expectedUpdate);
-    expect(endpointB.messages.at(-1)).toEqual(expectedUpdate);
+    expect(endpointA.messages.at(-1)).toMatchObject(expectedUpdate);
+    expect(endpointB.messages.at(-1)).toMatchObject(expectedUpdate);
+    const externalUpdate = endpointA.messages.at(-1);
+    expect(externalUpdate?.kind).toBe("document-update");
+    if (externalUpdate?.kind === "document-update") {
+      expect(externalUpdate.correlation?.source).toBe("external-event");
+    }
+  });
+
+  it("records event-time to queue-time drift without broadcasting the event text as metadata", async () => {
+    const port = new FakeDocumentPort("before");
+    const diagnostics = new BoundedDiagnosticLog();
+    const coordinator = new DocumentSyncCoordinator(port, diagnostics);
+    const endpoint = new RecordingEndpoint();
+    await coordinator.openSession(DOCUMENT_URI, "session-a", endpoint);
+    const eventVersion = 1;
+    const eventFingerprint = textFingerprint("before");
+    port.applyExternalChange("after");
+
+    await coordinator.publishExternalChange(DOCUMENT_URI, {
+      eventId: "document-change-1",
+      eventDocumentVersion: eventVersion,
+      eventTextFingerprint: eventFingerprint,
+      eventTextLength: "before".length,
+      contentChangeCount: 0,
+      classification: "external",
+    });
+
+    const update = endpoint.messages.at(-1);
+    expect(update).toMatchObject({
+      kind: "document-update",
+      reason: "external",
+      text: "after",
+    });
+    if (update?.kind === "document-update") {
+      expect(update.correlation?.causalId).toBe("external:document-change-1");
+      expect(update.correlation?.externalEventId).toBe("document-change-1");
+      expect(update.correlation?.source).toBe("external-event");
+    }
+    const trace = diagnostics.copyText();
+    expect(trace).toContain("coordinator.external.publish-enqueued");
+    expect(trace).toContain('eventId="document-change-1"');
+    expect(trace).toContain("coordinator.external.publish-executed");
+    expect(trace).toContain("temporalDrift=true");
+    expect(trace).toContain(eventFingerprint);
+    expect(trace).not.toContain("before");
+    expect(trace).not.toContain("after");
   });
 
   it("sends ACKs to the origin and authoritative snapshots to peers for edit, Save, Undo, and Redo", async () => {

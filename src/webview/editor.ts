@@ -23,6 +23,7 @@ import {
   PROTOCOL_VERSION,
   decodeHostToWebviewMessage,
   type DocumentSnapshotMessage,
+  type HostMessageCorrelation,
   type HostToWebviewMessage,
   type WebviewToHostMessage,
   type WirePosition,
@@ -59,6 +60,11 @@ interface DeferredInFlightSnapshot {
   readonly reason: Extract<HostToWebviewMessage, { kind: "document-update" }>["reason"];
 }
 
+interface TextDiagnosticMetadata {
+  readonly fingerprint: string;
+  readonly length: number;
+}
+
 declare function acquireVsCodeApi(): VsCodeApi;
 
 const remoteUpdate = Annotation.define<boolean>();
@@ -86,8 +92,11 @@ class MarkdownWebviewController {
   private readonly composition = new CompositionBuffer();
   private compositionGeneration = 0;
   private compositionEndObserved = false;
+  private compositionBaseMetadata: TextDiagnosticMetadata | undefined;
+  private compositionFinalMetadata: TextDiagnosticMetadata | undefined;
   private deferredInFlightSnapshot: DeferredInFlightSnapshot | undefined;
   private nextShortcutAttempt = 1;
+  private nextRecoveryIncidentId = 1;
   private recoveryActive = false;
   private disposed = false;
 
@@ -106,7 +115,7 @@ class MarkdownWebviewController {
         documentUri: bootstrap.documentUri,
         sessionId: bootstrap.sessionId,
         event,
-        details: details as Readonly<Record<string, boolean | number | string>>,
+        details: definedDiagnosticDetails(details),
       });
     });
     this.livePreview = usesLivePreview(bootstrap.diagnosticMode)
@@ -210,6 +219,7 @@ class MarkdownWebviewController {
       );
       this.beginComposition(compositionTransaction?.startState.doc.toString());
       this.composition.update(this.view.state.doc.toString());
+      this.compositionFinalMetadata = diagnosticTextMetadata(this.view.state.doc.toString());
       this.diagnostics.record("sync.composition.buffered", {
         composing: update.view.composing,
         compositionStarted: update.view.compositionStarted,
@@ -269,6 +279,8 @@ class MarkdownWebviewController {
     this.composition.begin(this.documentVersion, localBase);
     this.compositionGeneration += 1;
     this.compositionEndObserved = false;
+    this.compositionBaseMetadata = diagnosticTextMetadata(localBase);
+    this.compositionFinalMetadata = undefined;
     this.diagnostics.record("sync.composition.started", {
       baseDocumentVersion: this.documentVersion,
       baseTextFingerprint: textFingerprint(localBase),
@@ -327,6 +339,7 @@ class MarkdownWebviewController {
       return;
     }
 
+    this.compositionFinalMetadata = diagnosticTextMetadata(commit.finalText);
     this.diagnostics.record("sync.composition.commit-ready", {
       baseDocumentVersion: commit.baseDocumentVersion,
       documentVersion: this.documentVersion,
@@ -370,9 +383,8 @@ class MarkdownWebviewController {
       composing: this.view.composing,
       compositionStarted: this.view.compositionStarted,
       expectedTextFingerprint: textFingerprint(this.pendingEdits.authority),
-      inFlightTargetFingerprint: textFingerprint(this.pendingEdits.inFlightTarget ?? ""),
-      pendingTargetFingerprint: textFingerprint(this.pendingEdits.pendingTarget ?? ""),
       textFingerprint: textFingerprint(text),
+      ...this.syncStateDetails(),
     });
     this.vscode.postMessage(message);
   }
@@ -454,7 +466,6 @@ class MarkdownWebviewController {
     this.diagnostics.record("sync.operation.ack", {
       currentDocumentVersion: this.documentVersion,
       deferredInFlightSnapshot: this.deferredInFlightSnapshot !== undefined,
-      inFlightTargetFingerprint: textFingerprint(this.pendingEdits.inFlightTarget ?? ""),
       matchesInFlightSequence:
         message.operation === "edit" && message.sequence === this.inFlightSequence,
       matchesInFlightTarget: message.text === this.pendingEdits.inFlightTarget,
@@ -463,6 +474,8 @@ class MarkdownWebviewController {
       sequence: message.sequence,
       documentVersion: message.documentVersion,
       incomingFingerprint: textFingerprint(message.text),
+      ...this.syncStateDetails(),
+      ...this.correlationDetails(message.correlation),
     });
     if (this.recoveryActive) {
       return;
@@ -471,6 +484,7 @@ class MarkdownWebviewController {
       if (message.operation === "edit" && message.sequence === this.inFlightSequence) {
         this.enterRecovery(
           "An edit acknowledgement was older than the current authoritative document version.",
+          message.correlation,
         );
         return;
       }
@@ -485,6 +499,7 @@ class MarkdownWebviewController {
       if (message.text !== this.pendingEdits.inFlightTarget) {
         this.enterRecovery(
           "The edit acknowledgement did not match the exact in-flight target snapshot.",
+          message.correlation,
         );
         return;
       }
@@ -523,21 +538,19 @@ class MarkdownWebviewController {
     message: Extract<HostToWebviewMessage, { kind: "document-update" }>,
   ): void {
     this.diagnostics.record("sync.document.update", {
-      authorityFingerprint: textFingerprint(this.pendingEdits.authority),
       compositionActive: this.composition.isActive,
       currentDocumentVersion: this.documentVersion,
       documentVersion: message.documentVersion,
-      inFlightTargetFingerprint: textFingerprint(this.pendingEdits.inFlightTarget ?? ""),
       incomingFingerprint: textFingerprint(message.text),
       inFlightSequence: this.inFlightSequence,
       matchesAuthority: message.text === this.pendingEdits.authority,
       matchesInFlightTarget: message.text === this.pendingEdits.inFlightTarget,
       matchesPendingTarget: message.text === this.pendingEdits.pendingTarget,
       messageOrdinal: this.hostMessageOrdinal,
-      pendingTargetFingerprint: textFingerprint(this.pendingEdits.pendingTarget ?? ""),
       pendingLocalChanges: this.pendingEdits.hasPending,
       reason: message.reason,
-      ...this.focusTraceDetails(),
+      ...this.syncStateDetails(),
+      ...this.correlationDetails(message.correlation),
     });
     if (this.recoveryActive) {
       this.diagnostics.record("sync.document.update.ignored-recovery", {
@@ -592,6 +605,7 @@ class MarkdownWebviewController {
     ) {
       this.enterRecovery(
         "The document changed outside this webview while local edits were pending.",
+        message.correlation,
       );
       return;
     }
@@ -621,22 +635,31 @@ class MarkdownWebviewController {
     });
   }
 
-  private enterRecovery(note: string): void {
+  private enterRecovery(note: string, correlation?: HostMessageCorrelation): void {
+    const recoveryIncidentId = this.nextRecoveryIncidentId;
+    this.nextRecoveryIncidentId += 1;
     this.diagnostics.record("sync.recovery", {
+      recoveryIncidentId,
       compositionActive: this.composition.isActive,
       currentDocumentVersion: this.documentVersion,
       inFlightSequence: this.inFlightSequence,
       messageOrdinal: this.hostMessageOrdinal,
       note,
       pendingLocalChanges: this.pendingEdits.hasPending,
+      ...this.syncStateDetails(),
+      ...this.correlationDetails(correlation),
     });
     this.recoveryActive = true;
     this.deferredInFlightSnapshot = undefined;
     this.barriers.reset();
     this.composition.abandon();
     this.compositionEndObserved = false;
+    this.compositionBaseMetadata = undefined;
+    this.compositionFinalMetadata = undefined;
     this.view.dispatch({ effects: this.editable.reconfigure(EditorView.editable.of(false)) });
-    this.showStatus(`Editing paused to protect unsynchronized text: ${note}`);
+    this.showStatus(
+      `Editing paused to protect unsynchronized text: ${note} [incident ${String(recoveryIncidentId)}]`,
+    );
   }
 
   private sendNextBarrier(): void {
@@ -675,7 +698,7 @@ class MarkdownWebviewController {
       shortcutAttemptId: request.shortcutAttemptId,
       documentVersion: this.documentVersion,
       composing: this.view.composing,
-      ...this.focusTraceDetails(),
+      ...this.syncStateDetails(),
     });
     this.vscode.postMessage(message);
   }
@@ -768,6 +791,44 @@ class MarkdownWebviewController {
       webviewActive: document.visibilityState === "visible",
     };
   }
+
+  private syncStateDetails(): Readonly<Record<string, TraceValue>> {
+    const authority = diagnosticTextMetadata(this.pendingEdits.authority);
+    const inFlight = this.pendingEdits.inFlightTarget;
+    const pending = this.pendingEdits.pendingTarget;
+    return {
+      sessionId: this.bootstrap.sessionId,
+      authorityFingerprint: authority.fingerprint,
+      authorityLength: authority.length,
+      inFlightTargetFingerprint: inFlight === undefined ? "none" : textFingerprint(inFlight),
+      inFlightTargetLength: inFlight?.length ?? -1,
+      pendingTargetFingerprint: pending === undefined ? "none" : textFingerprint(pending),
+      pendingTargetLength: pending?.length ?? -1,
+      compositionBaseFingerprint: this.compositionBaseMetadata?.fingerprint ?? "none",
+      compositionBaseLength: this.compositionBaseMetadata?.length ?? -1,
+      compositionFinalFingerprint: this.compositionFinalMetadata?.fingerprint ?? "none",
+      compositionFinalLength: this.compositionFinalMetadata?.length ?? -1,
+    };
+  }
+
+  private correlationDetails(
+    correlation: HostMessageCorrelation | undefined,
+  ): Readonly<Record<string, TraceValue>> {
+    return {
+      correlationCausalId: correlation?.causalId,
+      correlationPublicationId: correlation?.publicationId,
+      correlationSource: correlation?.source,
+      correlationQueueEnqueueOrdinal: correlation?.queueEnqueueOrdinal,
+      correlationQueueStartOrdinal: correlation?.queueStartOrdinal,
+      correlationOriginSessionId: correlation?.originSessionId,
+      correlationOperationSequence: correlation?.operationSequence,
+      correlationExternalEventId: correlation?.externalEventId,
+    };
+  }
+}
+
+function diagnosticTextMetadata(text: string): TextDiagnosticMetadata {
+  return { fingerprint: textFingerprint(text), length: text.length };
 }
 
 function fullDocumentReplacement(
@@ -843,6 +904,16 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 type TraceValue = boolean | number | string | undefined;
+
+function definedDiagnosticDetails(
+  details: Readonly<Record<string, TraceValue>>,
+): Readonly<Record<string, boolean | number | string>> {
+  return Object.fromEntries(
+    Object.entries(details).filter(
+      (entry): entry is [string, boolean | number | string] => entry[1] !== undefined,
+    ),
+  );
+}
 
 interface DiagnosticTrace {
   record(kind: string, details: Readonly<Record<string, TraceValue>>): void;

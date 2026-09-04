@@ -5,6 +5,7 @@ import {
   recordsDiagnosticTrace,
 } from "../core/diagnostics/diagnosticMode.js";
 import { BoundedDiagnosticLog } from "../core/diagnostics/diagnosticLog.js";
+import { textFingerprint } from "../core/diagnostics/textFingerprint.js";
 import { PROJECT_IDENTITY } from "../core/projectIdentity.js";
 import { DocumentSyncCoordinator } from "../core/sync/documentSyncCoordinator.js";
 import { MarkdownEditorProvider } from "./editor/MarkdownEditorProvider.js";
@@ -23,6 +24,7 @@ export function activate(context: vscode.ExtensionContext): void {
   const coordinator = new DocumentSyncCoordinator(documentPort, diagnostics);
   const editorProvider = new MarkdownEditorProvider(coordinator, {
     diagnosticMode,
+    diagnostics,
     webviewScriptPath: vscode.Uri.joinPath(context.extensionUri, "dist", "webview.js"),
   });
 
@@ -50,22 +52,8 @@ export function activate(context: vscode.ExtensionContext): void {
     { supportsMultipleEditorsPerDocument: true },
   );
 
-  const documentChangeRegistration = vscode.workspace.onDidChangeTextDocument((event): void => {
-    if (event.document.languageId !== "markdown") {
-      return;
-    }
-    const changeClassification = documentPort.classifyDocumentChange(event);
-    diagnostics.record("extension.document.changed", {
-      classification: changeClassification,
-      dirty: event.document.isDirty,
-      documentVersion: event.document.version,
-      textLength: event.document.getText().length,
-    });
-    if (changeClassification === "own") {
-      return;
-    }
-    void coordinator.publishExternalChange(event.document.uri.toString());
-  });
+  const handleDocumentChange = createDocumentChangeHandler(documentPort, coordinator, diagnostics);
+  const documentChangeRegistration = vscode.workspace.onDidChangeTextDocument(handleDocumentChange);
 
   const saveBarrierRegistration = vscode.workspace.onWillSaveTextDocument((event): void => {
     if (event.document.languageId !== "markdown") {
@@ -94,8 +82,57 @@ export function activate(context: vscode.ExtensionContext): void {
   );
 }
 
+function toProtocolText(text: string): string {
+  return text.replaceAll("\r\n", "\n");
+}
+
 export function deactivate(): void {
   // No global resources are retained by the scaffold.
+}
+
+/** The production listener body is exported solely for Extension Host regression coverage. */
+export function createDocumentChangeHandler(
+  documentPort: VscodeDocumentPort,
+  coordinator: DocumentSyncCoordinator,
+  diagnostics: BoundedDiagnosticLog,
+): (event: vscode.TextDocumentChangeEvent) => void {
+  let nextDocumentChangeEventId = 1;
+  return (event: vscode.TextDocumentChangeEvent): void => {
+    if (event.document.languageId !== "markdown") {
+      return;
+    }
+    const changeClassification = documentPort.classifyDocumentChange(event);
+    const eventId = `document-change-${String(nextDocumentChangeEventId)}`;
+    nextDocumentChangeEventId += 1;
+    const eventText = toProtocolText(event.document.getText());
+    const firstChange = event.contentChanges[0];
+    diagnostics.record("extension.document.changed", {
+      eventId,
+      classification: changeClassification,
+      contentChangeCount: event.contentChanges.length,
+      dirty: event.document.isDirty,
+      documentVersion: event.document.version,
+      eventTextFingerprint: textFingerprint(eventText),
+      textLength: eventText.length,
+      firstChangeTextFingerprint:
+        firstChange === undefined ? "none" : textFingerprint(toProtocolText(firstChange.text)),
+      firstChangeRange:
+        firstChange === undefined
+          ? "none"
+          : `${String(firstChange.range.start.line)}:${String(firstChange.range.start.character)}-${String(firstChange.range.end.line)}:${String(firstChange.range.end.character)}`,
+    });
+    if (changeClassification === "own") {
+      return;
+    }
+    void coordinator.publishExternalChange(event.document.uri.toString(), {
+      eventId,
+      eventDocumentVersion: event.document.version,
+      eventTextFingerprint: textFingerprint(eventText),
+      eventTextLength: eventText.length,
+      contentChangeCount: event.contentChanges.length,
+      classification: changeClassification,
+    });
+  };
 }
 
 function createDiagnostics(
