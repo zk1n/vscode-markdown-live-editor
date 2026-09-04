@@ -17,7 +17,8 @@
   "main": "./dist/extension.cjs",
   "activationEvents": [
     "onCommand:vscodeMarkdownLiveEditor.showProjectInfo",
-    "onCustomEditor:vscodeMarkdownLiveEditor.editor"
+    "onCustomEditor:vscodeMarkdownLiveEditor.editor",
+    "onView:vscodeMarkdownLiveEditor.markdownOutline"
   ],
   "contributes": {
     "configurationDefaults": {
@@ -63,7 +64,15 @@
         ],
         "priority": "option"
       }
-    ]
+    ],
+    "views": {
+      "explorer": [
+        {
+          "id": "vscodeMarkdownLiveEditor.markdownOutline",
+          "name": "Markdown Outline"
+        }
+      ]
+    }
   },
   "scripts": {
     "clean": "node ./scripts/clean.mjs",

@@ -1,12 +1,32 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  decodeEditorReadyMessage,
   decodeHostToWebviewMessage,
   decodeWebviewToHostMessage,
   PROTOCOL_VERSION,
 } from "../../src/protocol/messages.js";
 
 describe("protocol decoding", () => {
+  it("decodes the provider-only editor-ready lifecycle message", () => {
+    expect(
+      decodeEditorReadyMessage({
+        kind: "editor-ready",
+        protocolVersion: PROTOCOL_VERSION,
+        documentUri: "file:///note.md",
+        sessionId: "session-1",
+      }),
+    ).toMatchObject({ ok: true });
+    expect(
+      decodeEditorReadyMessage({
+        kind: "editor-ready",
+        protocolVersion: PROTOCOL_VERSION,
+        documentUri: "file:///note.md",
+        sessionId: "",
+      }).ok,
+    ).toBe(false);
+  });
+
   it("accepts metadata-only diagnostic messages without a client sequence", () => {
     const decoded = decodeWebviewToHostMessage({
       kind: "diagnostic",
@@ -190,6 +210,85 @@ describe("protocol decoding", () => {
         documentVersion: 4,
         text: "authoritative",
         correlation: { causalId: "missing-required-fields" },
+      }).ok,
+    ).toBe(false);
+  });
+
+  it("decodes valid navigate-to-heading messages and enforces strict range bounds", () => {
+    expect(
+      decodeHostToWebviewMessage({
+        kind: "navigate-to-heading",
+        protocolVersion: PROTOCOL_VERSION,
+        documentUri: "file:///note.md",
+        documentVersion: 7,
+        sessionId: "session-1",
+        targetOffset: 14,
+        highlightFrom: 10,
+        highlightTo: 20,
+      }),
+    ).toMatchObject({ ok: true });
+  });
+
+  it("rejects malformed protocol versions and session identifiers", () => {
+    expect(
+      decodeHostToWebviewMessage({
+        kind: "navigate-to-heading",
+        protocolVersion: 0,
+        documentUri: "file:///note.md",
+        documentVersion: 7,
+        sessionId: "session-1",
+        targetOffset: 14,
+        highlightFrom: 10,
+        highlightTo: 20,
+      }).ok,
+    ).toBe(false);
+
+    expect(
+      decodeHostToWebviewMessage({
+        kind: "navigate-to-heading",
+        protocolVersion: PROTOCOL_VERSION,
+        documentUri: "",
+        documentVersion: 7,
+        sessionId: "session-1",
+        targetOffset: 14,
+        highlightFrom: 10,
+        highlightTo: 20,
+      }).ok,
+    ).toBe(false);
+  });
+
+  it("rejects malformed navigation ranges and malformed edit ranges from webview messages", () => {
+    expect(
+      decodeHostToWebviewMessage({
+        kind: "navigate-to-heading",
+        protocolVersion: PROTOCOL_VERSION,
+        documentUri: "file:///note.md",
+        documentVersion: 7,
+        sessionId: "session-1",
+        targetOffset: 10,
+        highlightFrom: 12,
+        highlightTo: 11,
+      }).ok,
+    ).toBe(false);
+
+    expect(
+      decodeWebviewToHostMessage({
+        kind: "edit",
+        protocolVersion: PROTOCOL_VERSION,
+        documentUri: "file:///note.md",
+        sessionId: "session-1",
+        sequence: 9,
+        documentVersion: 1,
+        changes: [
+          {
+            range: {
+              start: { line: 3, character: 0 },
+              end: { line: 2, character: 0 },
+            },
+            expectedText: "",
+            text: "",
+          },
+        ],
       }).ok,
     ).toBe(false);
   });

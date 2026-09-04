@@ -12,6 +12,8 @@ import type {
   DocumentSyncCoordinator,
   WebviewEndpoint,
 } from "../../core/sync/documentSyncCoordinator.js";
+import { decodeEditorReadyMessage } from "../../protocol/messages.js";
+import type { MarkdownEditorSessionRegistry } from "./MarkdownEditorSessionRegistry.js";
 
 interface MarkdownEditorBootstrap {
   readonly diagnosticMode: DiagnosticMode;
@@ -26,6 +28,7 @@ export interface MarkdownEditorProviderOptions {
   readonly diagnosticMode: DiagnosticMode;
   readonly diagnostics?: DiagnosticLog;
   readonly onCustomEditorOpened?: (document: vscode.TextDocument) => void;
+  readonly sessionRegistry?: MarkdownEditorSessionRegistry;
   readonly webviewScriptPath: vscode.Uri;
 }
 
@@ -89,7 +92,13 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
       );
     }
 
-    return this.openStandaloneDiagnosticSession(document, webview, sessionId);
+    return this.openStandaloneDiagnosticSession(
+      document,
+      webview,
+      webviewPanel,
+      cancellationToken,
+      sessionId,
+    );
   }
 
   private async openSyncedSession(
@@ -103,10 +112,16 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
   ): Promise<void> {
     const lifecycle = { disposed: false };
     let receiveDisposable: vscode.Disposable = vscode.Disposable.from();
+    let trackingDisposable: vscode.Disposable = vscode.Disposable.from();
+    let trackingReady = false;
     const disposeSession = (): void => {
+      if (lifecycle.disposed) {
+        return;
+      }
       lifecycle.disposed = true;
       diagnostics.record("provider.session.disposed", { documentUri, sessionId });
       receiveDisposable.dispose();
+      trackingDisposable.dispose();
       this.coordinator.closeSession(documentUri, sessionId);
     };
     const panelDispose = webviewPanel.onDidDispose(disposeSession);
@@ -135,6 +150,26 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
       nextSequence: 1,
       text: opened.snapshot.text,
     };
+    receiveDisposable = webview.onDidReceiveMessage((value: unknown) => {
+      if (isEditorReadyCandidate(value)) {
+        const ready = decodeEditorReadyMessage(value);
+        if (
+          !ready.ok ||
+          ready.value.documentUri !== documentUri ||
+          ready.value.sessionId !== sessionId ||
+          trackingReady ||
+          lifecycle.disposed
+        ) {
+          diagnostics.record("provider.webview.ready-rejected", { documentUri, sessionId });
+          return;
+        }
+        trackingReady = true;
+        trackingDisposable = this.registerSession(documentUri, sessionId, webviewPanel);
+        diagnostics.record("provider.webview.ready", { documentUri, sessionId });
+        return;
+      }
+      void this.coordinator.receive(value, endpoint);
+    });
     webview.html = createWebviewHtml(
       webview,
       webview.asWebviewUri(this.options.webviewScriptPath),
@@ -145,10 +180,6 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
       sessionId,
       documentVersion: opened.snapshot.documentVersion,
     });
-
-    receiveDisposable = webview.onDidReceiveMessage((value: unknown) => {
-      void this.coordinator.receive(value, endpoint);
-    });
   }
 
   /**
@@ -158,6 +189,8 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
   private openStandaloneDiagnosticSession(
     document: vscode.TextDocument,
     webview: vscode.Webview,
+    webviewPanel: vscode.WebviewPanel,
+    cancellationToken: vscode.CancellationToken,
     sessionId: string,
   ): Promise<void> {
     const bootstrap: MarkdownEditorBootstrap = {
@@ -168,6 +201,41 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
       nextSequence: 1,
       text: toProtocolText(document.getText()),
     };
+    let trackingDisposable = vscode.Disposable.from();
+    let receiveDisposable = vscode.Disposable.from();
+    let disposed = false;
+    let trackingReady = false;
+    let panelDispose = vscode.Disposable.from();
+    let cancellationDispose = vscode.Disposable.from();
+    const disposeSession = (): void => {
+      if (disposed) {
+        return;
+      }
+      disposed = true;
+      trackingDisposable.dispose();
+      receiveDisposable.dispose();
+      panelDispose.dispose();
+      cancellationDispose.dispose();
+    };
+    panelDispose = webviewPanel.onDidDispose(disposeSession);
+    cancellationDispose = cancellationToken.onCancellationRequested(disposeSession);
+    receiveDisposable = webview.onDidReceiveMessage((value: unknown): void => {
+      if (!isEditorReadyCandidate(value)) {
+        return;
+      }
+      const ready = decodeEditorReadyMessage(value);
+      if (
+        !ready.ok ||
+        ready.value.documentUri !== document.uri.toString() ||
+        ready.value.sessionId !== sessionId ||
+        trackingReady ||
+        disposed
+      ) {
+        return;
+      }
+      trackingReady = true;
+      trackingDisposable = this.registerSession(document.uri.toString(), sessionId, webviewPanel);
+    });
     webview.html = createWebviewHtml(
       webview,
       webview.asWebviewUri(this.options.webviewScriptPath),
@@ -175,6 +243,40 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
     );
     return Promise.resolve();
   }
+
+  private registerSession(
+    documentUri: string,
+    sessionId: string,
+    webviewPanel: vscode.WebviewPanel,
+  ): vscode.Disposable {
+    const registry = this.options.sessionRegistry;
+    if (registry === undefined) {
+      return vscode.Disposable.from();
+    }
+    const registration = registry.register(
+      {
+        documentUri,
+        sessionId,
+        reveal: (): void => {
+          webviewPanel.reveal(undefined, false);
+        },
+        postMessage: (message) => webviewPanel.webview.postMessage(message),
+      },
+      webviewPanel.active,
+    );
+    const viewStateRegistration = webviewPanel.onDidChangeViewState((event): void => {
+      if (event.webviewPanel.active) {
+        registry.markActive(sessionId);
+      }
+    });
+    return vscode.Disposable.from(registration, viewStateRegistration);
+  }
+}
+
+function isEditorReadyCandidate(value: unknown): boolean {
+  return (
+    typeof value === "object" && value !== null && Reflect.get(value, "kind") === "editor-ready"
+  );
 }
 
 function createWebviewHtml(

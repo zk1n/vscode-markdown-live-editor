@@ -1,0 +1,37 @@
+# ADR 0009: Native Markdown Outline Tree View
+
+状態: Accepted（実装済み、Human Gate 待ち）  
+日付: 2026-09-04
+
+## Context
+
+v0.1 に見出し階層と見出しへの移動を加える。Markdown の唯一の authority は VS Code `TextDocument` であり、
+Live Preview の rendered DOM、Webview の一時 state、Outline の表示 state を新しい source authority にしてはならない。
+複数 custom editor、document change、IME composition、未ACK edit、Save/Undo/Redo barrier、recovery 中に古い outline item を
+クリックしても、文字列、Undo history、同期順序を壊さない必要がある。
+
+## Decision
+
+- Explorer に VS Code native Tree View `Markdown Outline` を寄与する。Webview 内の Outline panel や custom CSS tree は作らない。
+- `MarkdownOutlineTreeProvider` は last-active `MarkdownEditorSessionRegistry` session の authoritative open `TextDocument` だけから、
+  LF に正規化した本文を pure heading parser へ渡し、H1–H6 tree を構築する。rendered DOM は入力にしない。
+- session registry はWebviewの `editor-ready` handshake後だけpanelを登録し、active 化、disposeを通知する。providerはlast-active
+  sessionの切替、close、そのdocument changeでsnapshotを更新し、Side Barへfocusが移っても直前のLive Editorを保持する。
+- Tree item は document URI、document version、heading identity/range を保持する。navigation 前に host と Webview の双方で
+  session、URI、version、range を再照合する。
+- 一致時だけ Webview は caret/focus/scroll と約800 msの行 highlight を presentation effect として適用する。source text、
+  Save、Undo/Redo、host sync、composition state を変更しない。
+- stale version、session mismatch、recovery、composition、pending local edit、barrier、authority mismatch、不正位置は
+  navigation を no-op とする。host は必要に応じて tree snapshot を refresh し、Webview は diagnostic metadata のみ記録する。
+
+## Consequences
+
+- Tree の表示と操作は VS Code theme/accessibility/keyboard semantics に従う。extension の custom CSS は native tree を上書きしない。
+- Outline は開いている custom editor session がないと空であり、workspace 全体 index ではない。workspace-wide outline/search は別 slice の責務である。
+- navigation は見出し本文の編集ではないため、physical Save/Undo/Redo shortcut を増やさず、IME preedit を host へ送らない。
+- stale item の無操作は古い offset への移動より安全だが、ユーザーは最新 tree の再表示後に再クリックする必要がある。
+
+## Status and validation boundary
+
+自動検証は heading extraction/tree、session registry、TreeDataProvider、package contribution、protocol/Webview navigation guardを対象とする。
+実 VS Code Human Gate は別途必要であり、現在の branch は local のみで `develop` へ未merge、remote 未push である。

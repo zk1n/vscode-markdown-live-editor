@@ -30,7 +30,7 @@ VS Code Extension Host
 │  └─ AttachmentService     (later)
 │
 └─ UI Providers
-   ├─ OutlineProvider
+   ├─ MarkdownOutlineTreeProvider (native Explorer Tree View)
    └─ BacklinkProvider      (later)
 
         typed Webview protocol
@@ -50,6 +50,26 @@ VS Code Webview
 ├─ MermaidRenderer          (later)
 └─ ImageRenderer            (later)
 ```
+
+### 2.1 Native Markdown Outline
+
+`Markdown Outline` は Explorer に寄与する native `TreeDataProvider` であり、Webview 内の独自パネルではない。
+見出しはレンダリング DOM ではなく、last-active custom-editor session が示す authoritative `TextDocument` の本文から
+純粋関数で抽出し、H1–H6 の入れ子 tree として表示する。Tree のテーマ、selection、hover、keyboard 操作は VS Code
+native control の責務である。
+
+`MarkdownEditorSessionRegistry` は開いている custom-editor panel を session ID で管理し、Webviewの `editor-ready` 後にだけ
+sessionを公開する。panelがactiveになったview-stateと直近利用順からlast-active sessionを選び、Side Barへfocusが移っても保持する。
+session の登録、active 化、close は Outline の snapshot refresh を通知する。複数 editor では常にlast-active sessionの
+document だけを表示し、panel close 後は次の最近使用 session に移るか、
+session がなければ空 tree になる。document change も active document のときだけ tree を更新する。
+
+クリック時は item の document URI、`TextDocument.version`、heading identity/range と active session を再照合する。
+一致した場合だけ host は `navigate-to-heading` を送る。Webview は同じ session/version、authority と CodeMirror text の
+一致、pending edit なし、Save/Undo/Redo barrier なし、recovery なし、IME composition なしを確認してから、caret、focus、
+center scroll と heading 行の一時 highlight を dispatch する。これは presentation-only transaction であり、source edit、
+host sync、Save、Undo/Redo entry を生成しない。stale item、別 session、composition、pending local work、recovery、
+不正 range は no-op として拒否し、tree を refresh する。highlight は短時間で解除され、timer は Webview dispose 時に破棄する。
 
 ## 3. Object-oriented boundaries
 

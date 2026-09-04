@@ -9,7 +9,14 @@ import { textFingerprint } from "../core/diagnostics/textFingerprint.js";
 import { PROJECT_IDENTITY } from "../core/projectIdentity.js";
 import { DocumentSyncCoordinator } from "../core/sync/documentSyncCoordinator.js";
 import { MarkdownEditorProvider } from "./editor/MarkdownEditorProvider.js";
+import { MarkdownEditorSessionRegistry } from "./editor/MarkdownEditorSessionRegistry.js";
 import { shouldWarnForMarkdownTrailingWhitespace } from "./markdownTrailingWhitespace.js";
+import {
+  MARKDOWN_OUTLINE_VIEW_ID,
+  NAVIGATE_TO_OUTLINE_HEADING_COMMAND,
+  MarkdownOutlineTreeItem,
+  MarkdownOutlineTreeProvider,
+} from "./outline/MarkdownOutlineTreeProvider.js";
 import { VscodeDocumentPort } from "./sync/VscodeDocumentPort.js";
 
 const MARKDOWN_EDITOR_VIEW_TYPE = "vscodeMarkdownLiveEditor.editor";
@@ -25,12 +32,15 @@ export function activate(context: vscode.ExtensionContext): void {
   const documentPort = new VscodeDocumentPort(diagnostics);
   const coordinator = new DocumentSyncCoordinator(documentPort, diagnostics);
   const warnedTrailingWhitespaceDocuments = new Set<string>();
+  const editorSessions = new MarkdownEditorSessionRegistry();
+  const outlineProvider = new MarkdownOutlineTreeProvider(editorSessions);
   const editorProvider = new MarkdownEditorProvider(coordinator, {
     diagnosticMode,
     diagnostics,
     onCustomEditorOpened: (document): void => {
       warnForMarkdownTrailingWhitespace(document, warnedTrailingWhitespaceDocuments);
     },
+    sessionRegistry: editorSessions,
     webviewScriptPath: vscode.Uri.joinPath(context.extensionUri, "dist", "webview.js"),
   });
 
@@ -51,6 +61,16 @@ export function activate(context: vscode.ExtensionContext): void {
       );
     },
   );
+  const navigateToOutlineHeading = vscode.commands.registerCommand(
+    NAVIGATE_TO_OUTLINE_HEADING_COMMAND,
+    async (value: unknown): Promise<boolean> =>
+      value instanceof MarkdownOutlineTreeItem ? await outlineProvider.navigateTo(value) : false,
+  );
+
+  const outlineView = vscode.window.createTreeView(MARKDOWN_OUTLINE_VIEW_ID, {
+    showCollapseAll: true,
+    treeDataProvider: outlineProvider,
+  });
 
   const customEditorRegistration = vscode.window.registerCustomEditorProvider(
     MARKDOWN_EDITOR_VIEW_TYPE,
@@ -60,6 +80,11 @@ export function activate(context: vscode.ExtensionContext): void {
 
   const handleDocumentChange = createDocumentChangeHandler(documentPort, coordinator, diagnostics);
   const documentChangeRegistration = vscode.workspace.onDidChangeTextDocument(handleDocumentChange);
+  const outlineDocumentChangeRegistration = vscode.workspace.onDidChangeTextDocument(
+    (event): void => {
+      outlineProvider.handleDocumentChange(event.document);
+    },
+  );
 
   const saveBarrierRegistration = vscode.workspace.onWillSaveTextDocument(
     createWillSaveTextDocumentHandler(documentPort, coordinator, diagnostics),
@@ -68,8 +93,12 @@ export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(
     disposable,
     copyDiagnostics,
+    navigateToOutlineHeading,
     customEditorRegistration,
+    outlineView,
+    outlineProvider,
     documentChangeRegistration,
+    outlineDocumentChangeRegistration,
     saveBarrierRegistration,
   );
 }

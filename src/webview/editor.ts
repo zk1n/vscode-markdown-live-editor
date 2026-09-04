@@ -23,6 +23,7 @@ import {
   PROTOCOL_VERSION,
   decodeHostToWebviewMessage,
   type DocumentSnapshotMessage,
+  type EditorReadyMessage,
   type HostMessageCorrelation,
   type HostToWebviewMessage,
   type WebviewToHostMessage,
@@ -36,9 +37,14 @@ import { BarrierInputGate, type BarrierAction } from "./barrierInputGate.js";
 import { createBarrierKeymap } from "./barrierKeymap.js";
 import { CompositionBuffer } from "./compositionBuffer.js";
 import { PendingEditQueue } from "./pendingEditQueue.js";
+import {
+  outlineNavigationHighlightState,
+  outlineNavigationHighlightTheme,
+  setOutlineNavigationHighlight,
+} from "./outline/navigationHighlight.js";
 
 interface VsCodeApi {
-  postMessage(message: WebviewToHostMessage): void;
+  postMessage(message: WebviewToHostMessage | EditorReadyMessage): void;
 }
 
 interface WebviewBootstrap {
@@ -68,6 +74,7 @@ interface TextDiagnosticMetadata {
 declare function acquireVsCodeApi(): VsCodeApi;
 
 const remoteUpdate = Annotation.define<boolean>();
+const OUTLINE_HIGHLIGHT_DURATION_MS = 800;
 
 const vscodeEditorTheme = EditorView.theme({
   ".cm-content": {
@@ -99,6 +106,8 @@ class MarkdownWebviewController {
   private nextRecoveryIncidentId = 1;
   private recoveryActive = false;
   private disposed = false;
+  private outlineHighlightTimer: number | undefined;
+  private outlineNavigationGeneration = 0;
 
   public constructor(
     private readonly vscode: VsCodeApi,
@@ -139,6 +148,8 @@ class MarkdownWebviewController {
           this.recordFocusEvent(kind);
         },
       ),
+      outlineNavigationHighlightState,
+      outlineNavigationHighlightTheme,
     ];
     if (usesMarkdownLanguage(bootstrap.diagnosticMode)) {
       extensions.unshift(markdown());
@@ -186,6 +197,12 @@ class MarkdownWebviewController {
     });
     const decoded = decodeHostToWebviewMessage(value);
     if (!decoded.ok) {
+      if (messageSummary(value)["kind"] === "navigate-to-heading") {
+        this.diagnostics.record("outline.navigation.rejected", {
+          reason: "invalid-message",
+        });
+        return;
+      }
       this.enterRecovery(`Invalid host message: ${decoded.error}`);
       return;
     }
@@ -198,6 +215,10 @@ class MarkdownWebviewController {
       return;
     }
     this.disposed = true;
+    if (this.outlineHighlightTimer !== undefined) {
+      window.clearTimeout(this.outlineHighlightTimer);
+      this.outlineHighlightTimer = undefined;
+    }
     this.view.destroy();
     this.livePreview?.dispose();
   }
@@ -457,7 +478,95 @@ class MarkdownWebviewController {
       case "protocol-error":
         this.enterRecovery(message.note);
         return;
+      case "navigate-to-heading":
+        this.navigateToHeading(message);
+        return;
     }
+  }
+
+  private navigateToHeading(
+    message: Extract<HostToWebviewMessage, { kind: "navigate-to-heading" }>,
+  ): void {
+    const blockedReason = this.outlineNavigationBlockedReason(message);
+    if (blockedReason !== undefined) {
+      this.diagnostics.record("outline.navigation.rejected", {
+        documentVersion: message.documentVersion,
+        reason: blockedReason,
+      });
+      return;
+    }
+
+    this.outlineNavigationGeneration += 1;
+    const generation = this.outlineNavigationGeneration;
+    if (this.outlineHighlightTimer !== undefined) {
+      window.clearTimeout(this.outlineHighlightTimer);
+    }
+    this.view.dispatch({
+      selection: { anchor: message.targetOffset },
+      effects: [
+        EditorView.scrollIntoView(message.targetOffset, { y: "center" }),
+        setOutlineNavigationHighlight.of(message.highlightFrom),
+      ],
+    });
+    this.view.focus();
+    this.diagnostics.record("outline.navigation.applied", {
+      documentVersion: message.documentVersion,
+      targetOffset: message.targetOffset,
+    });
+    this.outlineHighlightTimer = window.setTimeout((): void => {
+      if (this.disposed || this.outlineNavigationGeneration !== generation) {
+        return;
+      }
+      this.outlineHighlightTimer = undefined;
+      this.view.dispatch({ effects: setOutlineNavigationHighlight.of(null) });
+    }, OUTLINE_HIGHLIGHT_DURATION_MS);
+  }
+
+  private outlineNavigationBlockedReason(
+    message: Extract<HostToWebviewMessage, { kind: "navigate-to-heading" }>,
+  ): string | undefined {
+    if (
+      message.documentUri !== this.bootstrap.documentUri ||
+      message.sessionId !== this.bootstrap.sessionId
+    ) {
+      return "session-mismatch";
+    }
+    if (message.documentVersion !== this.documentVersion) {
+      return "stale-version";
+    }
+    if (this.recoveryActive) {
+      return "recovery-active";
+    }
+    if (this.composition.isActive || this.view.composing) {
+      return "composition-active";
+    }
+    if (this.inFlightSequence !== undefined || this.pendingEdits.hasPending) {
+      return "local-work-pending";
+    }
+    if (this.barriers.isFrozen) {
+      return "barrier-active";
+    }
+    if (this.view.state.doc.toString() !== this.pendingEdits.authority) {
+      return "authority-mismatch";
+    }
+    const documentLength = this.view.state.doc.length;
+    if (
+      message.highlightFrom > documentLength ||
+      message.highlightTo > documentLength ||
+      message.targetOffset > documentLength
+    ) {
+      return "invalid-position";
+    }
+    const line = this.view.state.doc.lineAt(message.highlightFrom);
+    if (
+      line.from !== message.highlightFrom ||
+      line.to !== message.highlightTo ||
+      message.targetOffset < line.from ||
+      message.targetOffset > line.to
+    ) {
+      return "invalid-heading-range";
+    }
+    return undefined;
   }
 
   private handleAcknowledgement(
@@ -1071,10 +1180,18 @@ if (root === null || status === null) {
   throw new Error("The editor webview root is missing.");
 }
 
-const controller = new MarkdownWebviewController(acquireVsCodeApi(), readBootstrap(), status, root);
+const vscodeApi = acquireVsCodeApi();
+const bootstrap = readBootstrap();
+const controller = new MarkdownWebviewController(vscodeApi, bootstrap, status, root);
 window.addEventListener("message", (event: MessageEvent<unknown>): void => {
   controller.receive(event.data);
 });
 window.addEventListener("unload", (): void => {
   controller.dispose();
+});
+vscodeApi.postMessage({
+  kind: "editor-ready",
+  protocolVersion: PROTOCOL_VERSION,
+  documentUri: bootstrap.documentUri,
+  sessionId: bootstrap.sessionId,
 });

@@ -96,8 +96,32 @@ export interface ProtocolErrorMessage {
   readonly note: string;
 }
 
+/** Lifecycle-only control message, intercepted by the provider before sync. */
+export interface EditorReadyMessage {
+  readonly kind: "editor-ready";
+  readonly protocolVersion: typeof PROTOCOL_VERSION;
+  readonly documentUri: string;
+  readonly sessionId: string;
+}
+
+/** Presentation-only request. It never carries or authorizes a source edit. */
+export interface NavigateToHeadingMessage {
+  readonly kind: "navigate-to-heading";
+  readonly protocolVersion: typeof PROTOCOL_VERSION;
+  readonly documentUri: string;
+  readonly documentVersion: number;
+  readonly sessionId: string;
+  readonly targetOffset: number;
+  readonly highlightFrom: number;
+  readonly highlightTo: number;
+}
+
 export type HostToWebviewMessage =
-  OperationAcknowledgement | DocumentUpdateMessage | ResyncMessage | ProtocolErrorMessage;
+  | OperationAcknowledgement
+  | DocumentUpdateMessage
+  | ResyncMessage
+  | ProtocolErrorMessage
+  | NavigateToHeadingMessage;
 
 export type ProtocolDecodeResult<T> =
   { readonly ok: true; readonly value: T } | { readonly ok: false; readonly error: string };
@@ -332,6 +356,32 @@ export function decodeWebviewToHostMessage(
   return { ok: false, error: "kind must be edit, save, undo, or redo." };
 }
 
+export function decodeEditorReadyMessage(value: unknown): ProtocolDecodeResult<EditorReadyMessage> {
+  if (!isRecord(value) || value["kind"] !== "editor-ready") {
+    return { ok: false, error: "kind must be editor-ready." };
+  }
+  if (value["protocolVersion"] !== PROTOCOL_VERSION) {
+    return { ok: false, error: `protocolVersion must be ${String(PROTOCOL_VERSION)}.` };
+  }
+  const documentUri = readNonEmptyString(value["documentUri"], "documentUri");
+  if (!documentUri.ok) {
+    return documentUri;
+  }
+  const sessionId = readNonEmptyString(value["sessionId"], "sessionId");
+  if (!sessionId.ok) {
+    return sessionId;
+  }
+  return {
+    ok: true,
+    value: {
+      kind: "editor-ready",
+      protocolVersion: PROTOCOL_VERSION,
+      documentUri: documentUri.value,
+      sessionId: sessionId.value,
+    },
+  };
+}
+
 function decodeSnapshot(
   value: Record<string, unknown>,
 ): ProtocolDecodeResult<DocumentSnapshotMessage> {
@@ -453,6 +503,43 @@ export function decodeHostToWebviewMessage(
       return { ok: false, error: "note must be a string." };
     }
     return { ok: true, value: { kind: "protocol-error", note: value["note"] } };
+  }
+
+  if (value["kind"] === "navigate-to-heading") {
+    if (value["protocolVersion"] !== PROTOCOL_VERSION) {
+      return { ok: false, error: `protocolVersion must be ${String(PROTOCOL_VERSION)}.` };
+    }
+    const documentUri = readNonEmptyString(value["documentUri"], "documentUri");
+    const sessionId = readNonEmptyString(value["sessionId"], "sessionId");
+    const documentVersion = readNonNegativeInteger(value["documentVersion"], "documentVersion");
+    const targetOffset = readNonNegativeInteger(value["targetOffset"], "targetOffset");
+    const highlightFrom = readNonNegativeInteger(value["highlightFrom"], "highlightFrom");
+    const highlightTo = readNonNegativeInteger(value["highlightTo"], "highlightTo");
+    if (!documentUri.ok) return documentUri;
+    if (!sessionId.ok) return sessionId;
+    if (!documentVersion.ok) return documentVersion;
+    if (!targetOffset.ok) return targetOffset;
+    if (!highlightFrom.ok) return highlightFrom;
+    if (!highlightTo.ok) return highlightTo;
+    if (highlightFrom.value > targetOffset.value || targetOffset.value > highlightTo.value) {
+      return {
+        ok: false,
+        error: "targetOffset must be inside the highlight range.",
+      };
+    }
+    return {
+      ok: true,
+      value: {
+        kind: "navigate-to-heading",
+        protocolVersion: PROTOCOL_VERSION,
+        documentUri: documentUri.value,
+        documentVersion: documentVersion.value,
+        sessionId: sessionId.value,
+        targetOffset: targetOffset.value,
+        highlightFrom: highlightFrom.value,
+        highlightTo: highlightTo.value,
+      },
+    };
   }
 
   const snapshot = decodeSnapshot(value);
