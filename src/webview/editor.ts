@@ -327,7 +327,7 @@ class MarkdownWebviewController {
   }
 
   private sendPendingEdit(): void {
-    if (this.inFlightSequence !== undefined || this.disposed) {
+    if (this.inFlightSequence !== undefined || this.recoveryActive || this.disposed) {
       return;
     }
 
@@ -362,7 +362,7 @@ class MarkdownWebviewController {
   }
 
   private requestBarrier(action: BarrierAction): void {
-    if (this.disposed) {
+    if (this.recoveryActive || this.disposed) {
       return;
     }
 
@@ -416,6 +416,7 @@ class MarkdownWebviewController {
         this.compositionEndObserved = false;
         if (this.view.state.doc.toString() === this.pendingEdits.authority) {
           this.applyAuthoritativeSnapshot(message);
+          this.recoveryActive = false;
           this.view.dispatch({ effects: this.editable.reconfigure(EditorView.editable.of(true)) });
           this.showStatus(`Resynchronized after ${message.reason}: ${message.note}`);
         } else {
@@ -439,10 +440,27 @@ class MarkdownWebviewController {
       documentVersion: message.documentVersion,
       textFingerprint: textFingerprint(message.text),
     });
-    this.documentVersion = message.documentVersion;
+    if (this.recoveryActive) {
+      return;
+    }
+    if (message.documentVersion < this.documentVersion) {
+      if (message.operation === "edit" && message.sequence === this.inFlightSequence) {
+        this.enterRecovery(
+          "An edit acknowledgement was older than the current authoritative document version.",
+        );
+        return;
+      }
+      this.diagnostics.record("sync.operation.ack.ignored-stale", {
+        sequence: message.sequence,
+        documentVersion: message.documentVersion,
+        currentDocumentVersion: this.documentVersion,
+      });
+      return;
+    }
     if (message.operation === "edit" && message.sequence === this.inFlightSequence) {
       this.inFlightSequence = undefined;
       this.pendingEdits.acknowledge(message.text);
+      this.documentVersion = message.documentVersion;
       this.sendPendingEdit();
       if (this.composition.isActive) {
         this.finalizeCompositionIfSafe();
@@ -472,8 +490,25 @@ class MarkdownWebviewController {
       compositionActive: this.composition.isActive,
       ...this.focusTraceDetails(),
     });
-    this.documentVersion = message.documentVersion;
+    if (this.recoveryActive) {
+      this.diagnostics.record("sync.document.update.ignored-recovery", {
+        reason: message.reason,
+        documentVersion: message.documentVersion,
+        textFingerprint: textFingerprint(message.text),
+      });
+      return;
+    }
+    if (message.documentVersion < this.documentVersion) {
+      this.diagnostics.record("sync.document.update.ignored-stale", {
+        reason: message.reason,
+        documentVersion: message.documentVersion,
+        currentDocumentVersion: this.documentVersion,
+        textFingerprint: textFingerprint(message.text),
+      });
+      return;
+    }
     if (message.text === this.pendingEdits.authority) {
+      this.documentVersion = message.documentVersion;
       return;
     }
     if (
@@ -491,6 +526,7 @@ class MarkdownWebviewController {
   }
 
   private applyAuthoritativeSnapshot(snapshot: DocumentSnapshotMessage): void {
+    this.documentVersion = snapshot.documentVersion;
     this.pendingEdits.replaceAuthority(snapshot.text);
     const before = this.view.state.doc.toString();
     const replacement = minimalTextReplacement(before, snapshot.text);
@@ -515,6 +551,8 @@ class MarkdownWebviewController {
     this.diagnostics.record("sync.recovery", { note });
     this.recoveryActive = true;
     this.barriers.reset();
+    this.composition.abandon();
+    this.compositionEndObserved = false;
     this.view.dispatch({ effects: this.editable.reconfigure(EditorView.editable.of(false)) });
     this.showStatus(`Editing paused to protect unsynchronized text: ${note}`);
   }
@@ -532,6 +570,7 @@ class MarkdownWebviewController {
       this.barriers.barrierInFlightSequence !== undefined ||
       this.pendingEdits.hasPending ||
       this.composition.isActive ||
+      this.recoveryActive ||
       this.disposed
     ) {
       return;
