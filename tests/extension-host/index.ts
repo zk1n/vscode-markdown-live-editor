@@ -33,6 +33,7 @@ const OWN_CHANGE_FILE_NAME = "extension-host-own-change.md";
 const PRODUCTION_LISTENER_FILE_NAME = "extension-host-production-listener.md";
 const AUTOSAVE_TRIM_FILE_NAME = "extension-host-autosave-trim.md";
 const SEQUENCE_LIFECYCLE_FILE_NAME = "extension-host-sequence-lifecycle.md";
+const M7_CRLF_LINE_JOIN_FILE_NAME = "extension-host-m7-crlf-line-join.md";
 
 export async function run(): Promise<void> {
   const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
@@ -96,6 +97,7 @@ export async function run(): Promise<void> {
   }
 
   await verifyFirstEditProtocolPath(workspaceFolder.uri);
+  await verifyM7CrlfLineJoinThreeLayer(workspaceFolder.uri);
   await verifySequenceLifecycleIntegrity(workspaceFolder.uri);
   await verifyCompositionHistoryPath(workspaceFolder.uri);
   await verifyWorkspaceEditUndoGrouping(workspaceFolder.uri);
@@ -1297,6 +1299,110 @@ async function verifyFirstEditProtocolPath(workspaceUri: vscode.Uri): Promise<vo
     requestedProtocolText: "aXbc",
     expectedDocumentText: "aXbc",
   });
+}
+
+/**
+ * This is an Extension Host boundary probe, not a native webview keyboard test.
+ * It models the canonical-LF edit emitted after a single forward line join and
+ * verifies that the adapter keeps the remaining CRLF document projection when
+ * the authoritative document is saved.
+ */
+async function verifyM7CrlfLineJoinThreeLayer(workspaceUri: vscode.Uri): Promise<void> {
+  const documentUri = vscode.Uri.joinPath(workspaceUri, M7_CRLF_LINE_JOIN_FILE_NAME);
+  const initialCanonicalText = "- list item\n- [link](target.md)\n";
+  const expectedCanonicalText = "- list item- [link](target.md)\n";
+  const expectedDocumentText = "- list item- [link](target.md)\r\n";
+  const sessionId = "m7-crlf-line-join";
+  await removeSmokeFile(documentUri);
+
+  try {
+    await vscode.workspace.fs.writeFile(
+      documentUri,
+      new TextEncoder().encode("- list item\r\n- [link](target.md)\r\n"),
+    );
+    const document = await vscode.workspace.openTextDocument(documentUri);
+    assert.equal(document.eol, vscode.EndOfLine.CRLF, "The M7 fixture did not open as CRLF.");
+
+    const coordinator = new DocumentSyncCoordinator(new VscodeDocumentPort());
+    const endpoint = new RecordingEndpoint();
+    const opened = await coordinator.openSession(documentUri.toString(), sessionId, endpoint);
+    assert.ok(opened.ok, "The M7 CRLF line-join session did not open.");
+    assert.equal(
+      opened.snapshot.text,
+      initialCanonicalText,
+      "The M7 CRLF fixture was not normalized to canonical LF for the adapter.",
+    );
+
+    await coordinator.receive(
+      fullReplacementMessage(
+        documentUri.toString(),
+        sessionId,
+        1,
+        opened.snapshot.documentVersion,
+        opened.snapshot.text,
+        expectedCanonicalText,
+      ),
+      endpoint,
+    );
+
+    const editAcknowledgement = endpoint.messages.find(
+      (message): message is Extract<HostToWebviewMessage, { readonly kind: "operation-ack" }> =>
+        message.kind === "operation-ack" && message.operation === "edit" && message.sequence === 1,
+    );
+    assert.ok(editAcknowledgement, "The M7 line join did not receive an edit acknowledgement.");
+    assert.equal(
+      editAcknowledgement.text,
+      expectedCanonicalText,
+      "The M7 edit acknowledgement did not retain canonical LF text.",
+    );
+    assert.equal(
+      document.getText(),
+      expectedDocumentText,
+      "The authoritative TextDocument did not retain CRLF after the M7 line join.",
+    );
+
+    await vscode.commands.executeCommand("vscode.openWith", documentUri, VIEW_TYPE);
+    assertCustomEditorOpened(documentUri);
+    await coordinator.receive(
+      barrierMessage(documentUri.toString(), sessionId, "undo", 2),
+      endpoint,
+    );
+    assert.equal(document.getText(), "- list item\r\n- [link](target.md)\r\n");
+    await coordinator.receive(
+      barrierMessage(documentUri.toString(), sessionId, "redo", 3),
+      endpoint,
+    );
+    assert.equal(
+      document.getText(),
+      expectedDocumentText,
+      "Redo did not restore the M7 line join as one semantic edit.",
+    );
+
+    await coordinator.receive(
+      barrierMessage(documentUri.toString(), sessionId, "save", 4),
+      endpoint,
+    );
+    const diskText = await readDiskText(documentUri);
+    assert.equal(document.isDirty, false, "The M7 line-join Save left TextDocument dirty.");
+    assert.equal(
+      diskText,
+      expectedDocumentText,
+      "Disk did not retain the CRLF projection after the M7 line-join Save.",
+    );
+    assert.equal(
+      diskText.replaceAll("\r\n", "\n"),
+      expectedCanonicalText,
+      "Saved CRLF disk text does not normalize to the local canonical expected text.",
+    );
+    assert.equal(
+      endpoint.messages.some((message) => message.kind === "resync"),
+      false,
+      "The M7 CRLF line-join path unexpectedly entered recovery.",
+    );
+  } finally {
+    await closeCustomEditor(documentUri);
+    await removeSmokeFile(documentUri);
+  }
 }
 
 interface FirstEditScenario {

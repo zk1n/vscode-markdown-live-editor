@@ -1,6 +1,7 @@
 // @vitest-environment happy-dom
 
-import { Transaction } from "@codemirror/state";
+import { deleteCharBackward } from "@codemirror/commands";
+import { EditorSelection, EditorState, StateEffect, Transaction } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -114,6 +115,102 @@ async function emulateNativeLineJoin(
   return beforeInput;
 }
 
+type MarkdownLineJoinDirection = "deleteContentBackward" | "deleteContentForward";
+
+type MarkdownLineJoinFixture = Readonly<{
+  readonly leftLine: string;
+  readonly rightLine: string;
+  readonly direction: MarkdownLineJoinDirection;
+}>;
+
+const markdownLineJoinLeftLines: readonly Readonly<{ label: string; markdown: string }>[] = [
+  { label: "plain", markdown: "left" },
+  { label: "presented strong", markdown: "**left**" },
+];
+
+const markdownLineJoinFixtures: readonly Readonly<{ label: string; markdown: string }>[] = [
+  { label: "link", markdown: "[link](target.md)" },
+  { label: "strong", markdown: "**strong**" },
+  { label: "emphasis", markdown: "_emphasis_" },
+  { label: "strike", markdown: "~~strike~~" },
+  { label: "inline code", markdown: "`inline code`" },
+];
+
+const markdownLineJoinPrefixes: readonly Readonly<{ label: string; prefix: string }>[] = [
+  { label: "none", prefix: "" },
+  { label: "bullet", prefix: "- " },
+  { label: "ordered", prefix: "1. " },
+  { label: "blockquote", prefix: "> " },
+  { label: "task list", prefix: "- [ ] " },
+  { label: "heading", prefix: "# " },
+  { label: "nested list", prefix: "  - " },
+];
+
+async function expectLineBoundaryJoinFixture({
+  leftLine,
+  rightLine,
+  direction,
+}: MarkdownLineJoinFixture): Promise<void> {
+  const source = `${leftLine}\n${rightLine}`;
+  const expected = source.replace("\n", "");
+  const caret = leftLine.length;
+  const initialSelection = direction === "deleteContentForward" ? caret : caret + 1;
+
+  window.dispatchEvent(new Event("unload"));
+  document.body.replaceChildren();
+  vi.resetModules();
+  messages.length = 0;
+  const { content, view } = await createController(source, "preview");
+
+  view.dispatch({ selection: { anchor: initialSelection } });
+  const lines = [...content.querySelectorAll<HTMLElement>(".cm-line")].map(
+    (line) => line.textContent,
+  );
+  expect(lines).toHaveLength(2);
+  if (leftLine === "**left**") {
+    expect(lines[0]).toBe(direction === "deleteContentForward" ? "**left**" : "left");
+  } else {
+    expect(lines[0]).toBe(leftLine);
+  }
+  expect(lines[1]).toBeTruthy();
+
+  const beforeInput = await emulateNativeLineJoin(content, direction);
+
+  expect(beforeInput.defaultPrevented).toBe(true);
+  expect(view.state.doc.toString()).toBe(expected);
+  expect(view.state.selection.main).toMatchObject({ anchor: caret, head: caret });
+  expect(editMessages()).toEqual([
+    expect.objectContaining({
+      sequence: 1,
+      documentVersion: 1,
+      changes: [expect.objectContaining({ expectedText: source, text: expected })],
+    }),
+  ]);
+  const changedTransactions = diagnosticMessages().filter(
+    (message) =>
+      message.event === "codemirror.transaction" && message.details["docChanged"] === true,
+  );
+  expect(changedTransactions).toHaveLength(1);
+  expect(changedTransactions[0]?.details).toMatchObject({
+    transactionCount: 1,
+    userEvent: direction === "deleteContentForward" ? "delete.forward" : "delete.backward",
+  });
+  expect(diagnosticMessages().some((message) => message.event === "sync.recovery")).toBe(false);
+  expect(document.getElementById("editor-status")?.hidden).toBe(true);
+
+  acknowledge("edit", 1, 2, expected);
+  expect(dispatchBarrierShortcut(content, "z").defaultPrevented).toBe(true);
+  expect(messages.at(-1)).toMatchObject({ kind: "undo", sequence: 2 });
+  acknowledge("undo", 2, 3, source);
+  expect(view.state.doc.toString()).toBe(source);
+
+  expect(dispatchBarrierShortcut(content, "y").defaultPrevented).toBe(true);
+  expect(messages.at(-1)).toMatchObject({ kind: "redo", sequence: 3 });
+  acknowledge("redo", 3, 4, expected);
+  expect(view.state.doc.toString()).toBe(expected);
+  expect(editMessages()).toHaveLength(1);
+}
+
 function dispatchBarrierShortcut(content: HTMLElement, key: "s" | "y" | "z"): KeyboardEvent {
   const event = new KeyboardEvent("keydown", {
     bubbles: true,
@@ -189,6 +286,135 @@ afterEach((): void => {
 });
 
 describe("MarkdownWebviewController Live Preview source integrity", () => {
+  it("preserves Human M7 Case 1 when Forward Delete joins a list item to a link", async () => {
+    const source = "- list item\n- [link](test.md)";
+    const expected = source.replace("\n", "");
+    const { content, view } = await createController(source, "preview");
+    const joinPosition = source.indexOf("\n");
+    view.dispatch({ selection: { anchor: joinPosition } });
+
+    expect(
+      [...content.querySelectorAll<HTMLElement>(".cm-line")].map((line) => line.textContent),
+    ).toEqual(["- list item", "- link"]);
+    const beforeInput = await emulateNativeLineJoin(content, "deleteContentForward");
+
+    expect(view.state.doc.toString()).toBe(expected);
+    expect(beforeInput.defaultPrevented).toBe(true);
+    expect(view.state.selection.main).toMatchObject({
+      anchor: joinPosition,
+      head: joinPosition,
+    });
+    expect(editMessages()).toEqual([
+      expect.objectContaining({
+        changes: [expect.objectContaining({ expectedText: source, text: expected })],
+      }),
+    ]);
+    expect(
+      diagnosticMessages().filter(
+        (message) =>
+          message.event === "codemirror.transaction" &&
+          message.details["userEvent"] === "delete.forward",
+      ),
+    ).toHaveLength(1);
+
+    acknowledge("edit", 1, 2, expected);
+    expect(dispatchBarrierShortcut(content, "z").defaultPrevented).toBe(true);
+    acknowledge("undo", 2, 3, source);
+    expect(view.state.doc.toString()).toBe(source);
+    expect(dispatchBarrierShortcut(content, "y").defaultPrevented).toBe(true);
+    acknowledge("redo", 3, 4, expected);
+    expect(view.state.doc.toString()).toBe(expected);
+    expect(editMessages()).toHaveLength(1);
+  });
+
+  it("preserves Human M7 Case 2 when Backspace joins a list item to a link", async () => {
+    const source = "- list item\n- [link](test.md)";
+    const expected = source.replace("\n", "");
+    const { content, view } = await createController(source, "preview");
+    const joinPosition = source.indexOf("\n");
+    view.dispatch({ selection: { anchor: joinPosition + 1 } });
+
+    expect(
+      [...content.querySelectorAll<HTMLElement>(".cm-line")].map((line) => line.textContent),
+    ).toEqual(["- list item", "- link"]);
+    const beforeInput = await emulateNativeLineJoin(content, "deleteContentBackward");
+
+    expect(view.state.doc.toString()).toBe(expected);
+    expect(beforeInput.defaultPrevented).toBe(true);
+    expect(view.state.selection.main).toMatchObject({
+      anchor: joinPosition,
+      head: joinPosition,
+    });
+    expect(editMessages()).toEqual([
+      expect.objectContaining({
+        changes: [expect.objectContaining({ expectedText: source, text: expected })],
+      }),
+    ]);
+    expect(
+      diagnosticMessages().filter(
+        (message) =>
+          message.event === "codemirror.transaction" &&
+          message.details["userEvent"] === "delete.backward",
+      ),
+    ).toHaveLength(1);
+
+    acknowledge("edit", 1, 2, expected);
+    expect(dispatchBarrierShortcut(content, "z").defaultPrevented).toBe(true);
+    acknowledge("undo", 2, 3, source);
+    expect(view.state.doc.toString()).toBe(source);
+    expect(dispatchBarrierShortcut(content, "y").defaultPrevented).toBe(true);
+    acknowledge("redo", 3, 4, expected);
+    expect(view.state.doc.toString()).toBe(expected);
+    expect(editMessages()).toHaveLength(1);
+  });
+
+  it("preserves Human M7 Case 3 after deleting the second-line list marker", async () => {
+    const source = "- list item\n- [link](test.md)";
+    const afterMarkerDelete = "- list item\n [link](test.md)";
+    const expected = afterMarkerDelete.replace("\n", "");
+    const { content, view } = await createController(source, "preview");
+    const markerEnd = source.indexOf("\n") + 2;
+    view.dispatch({ selection: { anchor: markerEnd } });
+
+    expect(deleteCharBackward(view)).toBe(true);
+    expect(view.state.doc.toString()).toBe(afterMarkerDelete);
+    acknowledge("edit", 1, 2, afterMarkerDelete);
+    const transactionCountBeforeJoin = diagnosticMessages().filter(
+      (message) => message.event === "codemirror.transaction",
+    ).length;
+
+    const beforeInput = await emulateNativeLineJoin(content, "deleteContentBackward");
+
+    expect(view.state.doc.toString()).toBe(expected);
+    expect(beforeInput.defaultPrevented).toBe(true);
+    expect(view.state.selection.main).toMatchObject({ anchor: 11, head: 11 });
+    expect(editMessages()).toHaveLength(2);
+    expect(editMessages().at(-1)).toMatchObject({
+      changes: [expect.objectContaining({ expectedText: afterMarkerDelete, text: expected })],
+    });
+    expect(
+      diagnosticMessages().filter((message) => message.event === "codemirror.transaction"),
+    ).toHaveLength(transactionCountBeforeJoin + 1);
+    const joinTransaction = diagnosticMessages()
+      .filter((message) => message.event === "codemirror.transaction")
+      .at(-1);
+    expect(joinTransaction?.event).toBe("codemirror.transaction");
+    expect(joinTransaction?.details).toMatchObject({
+      docChanged: true,
+      transactionCount: 1,
+      userEvent: "delete.backward",
+    });
+
+    acknowledge("edit", 2, 3, expected);
+    expect(dispatchBarrierShortcut(content, "z").defaultPrevented).toBe(true);
+    acknowledge("undo", 3, 4, afterMarkerDelete);
+    expect(view.state.doc.toString()).toBe(afterMarkerDelete);
+    expect(dispatchBarrierShortcut(content, "y").defaultPrevented).toBe(true);
+    acknowledge("redo", 4, 5, expected);
+    expect(view.state.doc.toString()).toBe(expected);
+    expect(editMessages()).toHaveLength(2);
+  });
+
   it("keeps Copy source-neutral and sends marker-boundary Cut and Paste as one atomic edit each", async () => {
     const source = "# Heading\nplain [link](target.md)\n- item\nnext";
     const { content, view } = await createController(source, "preview");
@@ -290,29 +516,161 @@ describe("MarkdownWebviewController Live Preview source integrity", () => {
     ).toEqual(["plain", "[label](target.md)"]);
     const beforeInput = await emulateNativeLineJoin(content, "deleteContentBackward");
 
-    expect(beforeInput.defaultPrevented).toBe(false);
+    expect(beforeInput.defaultPrevented).toBe(true);
     expect(view.state.doc.toString()).toBe("plain[label](target.md)");
     expect(view.state.selection.main).toMatchObject({ anchor: 5, head: 5 });
     expect(editMessages()).toHaveLength(1);
   });
 
-  it("leaves a plain-to-plain forward line join on the native path", async () => {
+  it("uses the source-aware path for a plain-to-plain forward line join", async () => {
     const source = "first\nsecond";
     const { content, view } = await createController(source, "preview");
     view.dispatch({ selection: { anchor: "first".length } });
 
     const beforeInput = await emulateNativeLineJoin(content, "deleteContentForward");
 
-    expect(beforeInput.defaultPrevented).toBe(false);
+    expect(beforeInput.defaultPrevented).toBe(true);
     expect(view.state.doc.toString()).toBe("firstsecond");
     expect(view.state.selection.main).toMatchObject({ anchor: 5, head: 5 });
     expect(editMessages()).toHaveLength(1);
   });
 
-  it("does not intercept forward deletion for a non-collapsed selection", async () => {
+  it("preserves a generic markdown source line-boundary matrix for forward and backward line join", async () => {
+    for (const leftFixture of markdownLineJoinLeftLines) {
+      for (const prefix of markdownLineJoinPrefixes) {
+        for (const syntaxFixture of markdownLineJoinFixtures) {
+          const rightLine = `${prefix.prefix}${syntaxFixture.markdown}`;
+          await expectLineBoundaryJoinFixture({
+            leftLine: leftFixture.markdown,
+            rightLine,
+            direction: "deleteContentForward",
+          });
+          await expectLineBoundaryJoinFixture({
+            leftLine: leftFixture.markdown,
+            rightLine,
+            direction: "deleteContentBackward",
+          });
+        }
+      }
+    }
+  });
+
+  it("preserves the join after a marker delete before Backspace", async () => {
+    for (const leftFixture of markdownLineJoinLeftLines) {
+      const leftLine = leftFixture.markdown;
+      const source = `${leftLine}\n- [link](target.md)`;
+      const afterMarkerDelete = `${leftLine}\n [link](target.md)`;
+      const expected = afterMarkerDelete.replace("\n", "");
+      window.dispatchEvent(new Event("unload"));
+      document.body.replaceChildren();
+      vi.resetModules();
+      messages.length = 0;
+      const { content, view } = await createController(source, "preview");
+      view.dispatch({ selection: { anchor: source.indexOf("\n") + 2 } });
+
+      expect(
+        [...content.querySelectorAll<HTMLElement>(".cm-line")]
+          .map((line) => line.textContent)
+          .slice(0, 1),
+      ).toEqual(["left"]);
+
+      expect(deleteCharBackward(view)).toBe(true);
+      expect(view.state.doc.toString()).toBe(afterMarkerDelete);
+      expect(editMessages()).toEqual([
+        expect.objectContaining({
+          changes: [expect.objectContaining({ expectedText: source, text: afterMarkerDelete })],
+        }),
+      ]);
+      acknowledge("edit", 1, 2, afterMarkerDelete);
+
+      const beforeInput = await emulateNativeLineJoin(content, "deleteContentBackward");
+      expect(beforeInput.defaultPrevented).toBe(true);
+      expect(view.state.doc.toString()).toBe(expected);
+      expect(view.state.selection.main).toMatchObject({
+        anchor: leftLine.length,
+        head: leftLine.length,
+      });
+      const edits = editMessages();
+      expect(edits).toHaveLength(2);
+      expect(edits.at(-1)).toMatchObject({
+        sequence: 2,
+        changes: [expect.objectContaining({ expectedText: afterMarkerDelete, text: expected })],
+      });
+      expect(diagnosticMessages().some((message) => message.event === "sync.recovery")).toBe(false);
+
+      acknowledge("edit", 2, 3, expected);
+      expect(dispatchBarrierShortcut(content, "z").defaultPrevented).toBe(true);
+      expect(messages.at(-1)).toMatchObject({ kind: "undo", sequence: 3 });
+      acknowledge("undo", 3, 4, afterMarkerDelete);
+      expect(view.state.doc.toString()).toBe(afterMarkerDelete);
+      expect(dispatchBarrierShortcut(content, "y").defaultPrevented).toBe(true);
+      expect(messages.at(-1)).toMatchObject({ kind: "redo", sequence: 4 });
+      acknowledge("redo", 4, 5, expected);
+      expect(view.state.doc.toString()).toBe(expected);
+    }
+  });
+
+  it("does not intercept line deletion for a non-collapsed selection", async () => {
+    for (const inputType of ["deleteContentForward", "deleteContentBackward"] as const) {
+      window.dispatchEvent(new Event("unload"));
+      document.body.replaceChildren();
+      vi.resetModules();
+      messages.length = 0;
+      const source = "plain\n[label](target.md)";
+      const { content, view } = await createController(source, "preview");
+      view.dispatch({ selection: { anchor: 4, head: 6 } });
+
+      const beforeInput = new InputEvent("beforeinput", {
+        bubbles: true,
+        cancelable: true,
+        inputType,
+      });
+      content.dispatchEvent(beforeInput);
+
+      expect(beforeInput.defaultPrevented).toBe(false);
+      expect(view.state.doc.toString()).toBe(source);
+      expect(editMessages()).toHaveLength(0);
+    }
+  });
+
+  it("does not intercept line-boundary deletion in a read-only EditorState", async () => {
+    for (const inputType of ["deleteContentForward", "deleteContentBackward"] as const) {
+      window.dispatchEvent(new Event("unload"));
+      document.body.replaceChildren();
+      vi.resetModules();
+      messages.length = 0;
+      const source = "plain\n[label](target.md)";
+      const { content, view } = await createController(source, "preview");
+      view.dispatch({
+        effects: StateEffect.appendConfig.of(EditorState.readOnly.of(true)),
+        selection: { anchor: inputType === "deleteContentForward" ? 5 : 6 },
+      });
+
+      const beforeInput = new InputEvent("beforeinput", {
+        bubbles: true,
+        cancelable: true,
+        inputType,
+      });
+      content.dispatchEvent(beforeInput);
+
+      expect(beforeInput.defaultPrevented).toBe(false);
+      expect(view.state.doc.toString()).toBe(source);
+      expect(editMessages()).toHaveLength(0);
+    }
+  });
+
+  it("does not intercept line-boundary deletion with multiple carets", async () => {
     const source = "plain\n[label](target.md)";
     const { content, view } = await createController(source, "preview");
-    view.dispatch({ selection: { anchor: 4, head: 6 } });
+    view.dispatch({
+      effects: StateEffect.appendConfig.of(EditorState.allowMultipleSelections.of(true)),
+    });
+    view.dispatch({
+      selection: EditorSelection.create([
+        EditorSelection.cursor(5),
+        EditorSelection.cursor(source.length),
+      ]),
+    });
 
     const beforeInput = new InputEvent("beforeinput", {
       bubbles: true,
@@ -326,25 +684,98 @@ describe("MarkdownWebviewController Live Preview source integrity", () => {
     expect(editMessages()).toHaveLength(0);
   });
 
-  it("does not intercept forward deletion during composition", async () => {
-    const source = "plain\n[label](target.md)";
-    const { content, view } = await createController(source, "preview");
-    view.dispatch({ selection: { anchor: "plain".length } });
-    content.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
+  it("does not intercept line deletion during composition", async () => {
+    for (const inputType of ["deleteContentForward", "deleteContentBackward"] as const) {
+      window.dispatchEvent(new Event("unload"));
+      document.body.replaceChildren();
+      vi.resetModules();
+      messages.length = 0;
+      const source = "plain\n[label](target.md)";
+      const { content, view } = await createController(source, "preview");
+      view.dispatch({
+        selection: { anchor: inputType === "deleteContentForward" ? 5 : 6 },
+      });
+      content.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
 
-    const beforeInput = new InputEvent("beforeinput", {
+      const beforeInput = new InputEvent("beforeinput", {
+        bubbles: true,
+        cancelable: true,
+        inputType,
+        isComposing: true,
+      });
+      content.dispatchEvent(beforeInput);
+
+      expect(beforeInput.defaultPrevented).toBe(false);
+      expect(view.state.doc.toString()).toBe(source);
+      expect(editMessages()).toHaveLength(0);
+      content.dispatchEvent(new CompositionEvent("compositionend", { bubbles: true }));
+      await Promise.resolve();
+    }
+  });
+
+  it("does not intercept ordinary same-line or document-edge deletion", async () => {
+    const source = "plain\n[label](target.md)";
+    const cases = [
+      { inputType: "deleteContentBackward" as const, caret: 2 },
+      { inputType: "deleteContentForward" as const, caret: 2 },
+      { inputType: "deleteContentBackward" as const, caret: 0 },
+      { inputType: "deleteContentForward" as const, caret: source.length },
+    ];
+    for (const fixture of cases) {
+      window.dispatchEvent(new Event("unload"));
+      document.body.replaceChildren();
+      vi.resetModules();
+      messages.length = 0;
+      const { content, view } = await createController(source, "preview");
+      view.dispatch({ selection: { anchor: fixture.caret } });
+      const beforeInput = new InputEvent("beforeinput", {
+        bubbles: true,
+        cancelable: true,
+        inputType: fixture.inputType,
+      });
+      content.dispatchEvent(beforeInput);
+
+      expect(beforeInput.defaultPrevented).toBe(false);
+      expect(view.state.doc.toString()).toBe(source);
+      expect(editMessages()).toHaveLength(0);
+    }
+  });
+
+  it("does not intercept line-boundary deletion without Live Preview or during recovery", async () => {
+    const source = "plain\n[label](target.md)";
+    const syncOnly = await createController(source, "sync");
+    syncOnly.view.dispatch({ selection: { anchor: 5 } });
+    const syncBeforeInput = new InputEvent("beforeinput", {
       bubbles: true,
       cancelable: true,
       inputType: "deleteContentForward",
-      isComposing: true,
     });
-    content.dispatchEvent(beforeInput);
-
-    expect(beforeInput.defaultPrevented).toBe(false);
-    expect(view.state.doc.toString()).toBe(source);
+    syncOnly.content.dispatchEvent(syncBeforeInput);
+    expect(syncBeforeInput.defaultPrevented).toBe(false);
+    expect(syncOnly.view.state.doc.toString()).toBe(source);
     expect(editMessages()).toHaveLength(0);
-    content.dispatchEvent(new CompositionEvent("compositionend", { bubbles: true }));
-    await Promise.resolve();
+
+    window.dispatchEvent(new Event("unload"));
+    document.body.replaceChildren();
+    vi.resetModules();
+    messages.length = 0;
+    const recovery = await createController(source, "preview");
+    recovery.view.dispatch({ selection: { anchor: 5 } });
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        data: { kind: "protocol-error", note: "fixture recovery" },
+      }),
+    );
+    const recoveryBeforeInput = new InputEvent("beforeinput", {
+      bubbles: true,
+      cancelable: true,
+      inputType: "deleteContentForward",
+    });
+    recovery.content.dispatchEvent(recoveryBeforeInput);
+    expect(recoveryBeforeInput.defaultPrevented).toBe(false);
+    expect(recovery.view.state.doc.toString()).toBe(source);
+    expect(editMessages()).toHaveLength(0);
+    expect(document.getElementById("editor-status")?.hidden).toBe(false);
   });
 });
 
