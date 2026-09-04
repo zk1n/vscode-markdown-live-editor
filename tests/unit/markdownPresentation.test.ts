@@ -56,7 +56,8 @@ describe("Markdown presentation syntax", () => {
     expect(tasks[1]?.markers[1]).toMatchObject({ presentation: "task-checked" });
 
     const lists = syntax.filter(({ kind }) => kind === "list");
-    expect(lists[0]?.markers[0]).toMatchObject({ presentation: "list" });
+    expect(lists[0]?.markers[0]).toMatchObject({ presentation: "list-unordered" });
+    expect(lists[1]?.markers[0]).toMatchObject({ presentation: "list-ordered" });
 
     const link = syntax.find(({ kind }) => kind === "link");
     const linkStart = source.indexOf("[site]");
@@ -127,6 +128,59 @@ describe("LivePreviewEngine", () => {
     engine.dispose();
   });
 
+  it("presents every unordered marker as a bullet while preserving ordered and task markers", () => {
+    const source = "- item\n+ item\n* item\n1. ordered\n- [ ] open\nplain";
+    const syntax = findPresentationSyntax(source);
+    const lists = syntax.filter(({ kind }) => kind === "list");
+    const tasks = syntax.filter(({ kind }) => kind === "task");
+
+    expect(lists.map(({ markers }) => markers[0]?.presentation)).toEqual([
+      "list-unordered",
+      "list-unordered",
+      "list-unordered",
+      "list-ordered",
+    ]);
+    expect(tasks[0]?.markers[1]?.presentation).toBe("task-unchecked");
+
+    const engine = createLivePreviewEngine();
+    const state = EditorState.create({
+      doc: source,
+      selection: { anchor: source.length },
+      extensions: [engine.extension],
+    });
+    expect(markClasses(state)).toContain(
+      "cm-live-preview-list-marker cm-live-preview-list-unordered-marker",
+    );
+    expect(markClasses(state)).toContain(
+      "cm-live-preview-list-marker cm-live-preview-list-ordered-marker",
+    );
+    expect(markClasses(state)).toContain(
+      "cm-live-preview-task-marker cm-live-preview-task-unchecked",
+    );
+
+    const activeUnordered = state.update({ selection: { anchor: 0 } });
+    expect(activeUnordered.docChanged).toBe(false);
+    expect(activeUnordered.state.doc.toString()).toBe(source);
+    expect(
+      hasMarkerClassAt(
+        activeUnordered.state,
+        lists[0]?.markers[0]?.from ?? -1,
+        lists[0]?.markers[0]?.to ?? -1,
+      ),
+    ).toBe(false);
+
+    const composition = activeUnordered.state.update({
+      changes: { from: 2, insert: "日" },
+      annotations: Transaction.userEvent.of("input.type.compose"),
+    });
+    expect(composition.annotation(Transaction.userEvent)).toBe("input.type.compose");
+    expect(composition.state.doc.toString()).toBe(
+      "- 日item\n+ item\n* item\n1. ordered\n- [ ] open\nplain",
+    );
+
+    engine.dispose();
+  });
+
   it("keeps adjacent inline syntax in preview and reveals every marker only inside syntax", () => {
     const cases = [
       ["link", "[label](target.md)"],
@@ -189,7 +243,9 @@ describe("LivePreviewEngine", () => {
         .filter(({ presentation }) => presentation === undefined || presentation === "hidden")
         .map(({ from, to }) => ({ from, to })),
     );
-    expect(markClasses(state)).toContain("cm-live-preview-list-marker");
+    expect(markClasses(state)).toContain(
+      "cm-live-preview-list-marker cm-live-preview-list-unordered-marker",
+    );
     expect(markClasses(state)).toContain(
       "cm-live-preview-task-marker cm-live-preview-task-unchecked",
     );
@@ -257,6 +313,20 @@ function markClasses(state: EditorState): readonly string[] {
       }
     });
   return classes;
+}
+
+function hasMarkerClassAt(state: EditorState, from: number, to: number): boolean {
+  let found = false;
+  state.field(livePreviewState).decorations.between(from, to, (rangeFrom, rangeTo, value): void => {
+    if (
+      rangeFrom === from &&
+      rangeTo === to &&
+      decorationClass(value)?.includes("cm-live-preview-list-unordered-marker") === true
+    ) {
+      found = true;
+    }
+  });
+  return found;
 }
 
 function hasHiddenPresentation(value: Decoration): boolean {

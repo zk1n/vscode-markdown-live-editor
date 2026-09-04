@@ -9,7 +9,8 @@ export type PresentationSyntaxKind =
   | "link"
   | "task";
 
-export type MarkerPresentation = "hidden" | "list" | "task-checked" | "task-unchecked";
+export type MarkerPresentation =
+  "hidden" | "list-ordered" | "list-unordered" | "task-checked" | "task-unchecked";
 
 export interface MarkerRange {
   readonly from: number;
@@ -167,12 +168,13 @@ function findTask(line: string, offset: number): PresentationSyntaxRange | undef
 }
 
 function findList(line: string, offset: number): PresentationSyntaxRange | undefined {
-  const match = /^( {0,3})(?:[-+*]|\d{1,9}[.)])([ \t]+)(?=\S)/.exec(line);
+  const match = /^( {0,3})([-+*]|\d{1,9}[.)])([ \t]+)(?=\S)/.exec(line);
   if (match === null) {
     return undefined;
   }
   const indentation = match[1];
-  if (indentation === undefined) {
+  const marker = match[2];
+  if (indentation === undefined || marker === undefined) {
     return undefined;
   }
   const contentFrom = match[0].length;
@@ -186,7 +188,7 @@ function findList(line: string, offset: number): PresentationSyntaxRange | undef
       {
         from: offset + indentation.length,
         to: offset + contentFrom,
-        presentation: "list",
+        presentation: /^[+*-]$/.test(marker) ? "list-unordered" : "list-ordered",
       },
     ],
   };

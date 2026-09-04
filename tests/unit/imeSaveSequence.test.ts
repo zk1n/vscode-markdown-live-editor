@@ -104,4 +104,25 @@ describe("webview IME Save sequence state", () => {
     expect(barriers.barrierInFlightSequence).toBeUndefined();
     expect(barriers.hasDeterministicProgress(false, false)).toBe(false);
   });
+
+  it("Case G: keeps a list-prefix composition local until its final authoritative edit", () => {
+    const edits = new PendingEditQueue("- ");
+    const composition = new CompositionBuffer();
+
+    composition.begin(1, "- ");
+    composition.update("- k");
+    composition.update("- ka");
+    composition.update("- か");
+
+    // No preedit target can leave the webview before compositionend.
+    expect(edits.takeNext()).toBeUndefined();
+
+    const commit = composition.finish("- か");
+    expect(commit).toMatchObject({ baseDocumentVersion: 1, baseText: "- ", finalText: "- か" });
+    edits.queue(commit?.finalText ?? "");
+    expect(edits.authority).toBe("- ");
+    expect(edits.takeNext()).toBe("- か");
+    edits.acknowledge("- か");
+    expect(edits.authority).toBe("- か");
+  });
 });

@@ -7,6 +7,8 @@ import {
   type DocumentSnapshot,
   type WebviewEndpoint,
 } from "../../src/core/sync/documentSyncCoordinator.js";
+import { BoundedDiagnosticLog } from "../../src/core/diagnostics/diagnosticLog.js";
+import { textFingerprint } from "../../src/core/diagnostics/textFingerprint.js";
 import type {
   ClientEditMessage,
   HostToWebviewMessage,
@@ -331,6 +333,23 @@ describe("DocumentSyncCoordinator", () => {
       documentVersion: 2,
       text: "external",
     });
+  });
+
+  it("records fingerprint-only evidence when a claimed replacement misses authority", async () => {
+    const port = new FakeDocumentPort("- ");
+    const diagnostics = new BoundedDiagnosticLog();
+    const coordinator = new DocumentSyncCoordinator(port, diagnostics);
+    const endpoint = new RecordingEndpoint();
+    await coordinator.openSession(DOCUMENT_URI, "session-a", endpoint);
+
+    await coordinator.receive(fullReplacementEdit(1, 1, "-x", "- 日本"), endpoint);
+
+    const trace = diagnostics.copyText();
+    expect(trace).toContain("coordinator.edit.change-mismatch");
+    expect(trace).toContain(`authorityTextFingerprint=${JSON.stringify(textFingerprint("- "))}`);
+    expect(trace).toContain(`expectedTextFingerprint=${JSON.stringify(textFingerprint("-x"))}`);
+    expect(trace).toContain(`actualTextFingerprint=${JSON.stringify(textFingerprint("- "))}`);
+    expect(endpoint.messages.at(-1)).toMatchObject({ kind: "resync", reason: "change-mismatch" });
   });
 
   it("uses Save and Undo as FIFO barriers after visible edits", async () => {

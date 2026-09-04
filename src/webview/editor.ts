@@ -354,6 +354,8 @@ class MarkdownWebviewController {
       composing: this.view.composing,
       compositionStarted: this.view.compositionStarted,
       expectedTextFingerprint: textFingerprint(this.pendingEdits.authority),
+      inFlightTargetFingerprint: textFingerprint(this.pendingEdits.inFlightTarget ?? ""),
+      pendingTargetFingerprint: textFingerprint(this.pendingEdits.pendingTarget ?? ""),
       textFingerprint: textFingerprint(text),
     });
     this.vscode.postMessage(message);

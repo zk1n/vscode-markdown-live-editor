@@ -78,6 +78,23 @@ const livePreviewTheme = EditorView.baseTheme({
     color: "var(--vscode-descriptionForeground, var(--vscode-editor-foreground))",
     fontWeight: "600",
   },
+  ".cm-live-preview-list-unordered-marker": {
+    color: "transparent",
+    display: "inline-block",
+    position: "relative",
+    width: "1em",
+    verticalAlign: "baseline",
+    whiteSpace: "nowrap",
+  },
+  ".cm-live-preview-list-unordered-marker::before": {
+    color: "var(--vscode-descriptionForeground, var(--vscode-editor-foreground))",
+    content: '"•"',
+    fontSize: "inherit",
+    left: "0",
+    lineHeight: "inherit",
+    position: "absolute",
+    top: "0",
+  },
   ".cm-live-preview-task-marker": {
     color: "transparent",
     display: "inline-block",
@@ -153,10 +170,14 @@ function buildDecorations(state: EditorState): DecorationSet {
   return Decoration.set(decorations, true);
 }
 
-function markerClass(presentation: "list" | "task-checked" | "task-unchecked"): string {
+function markerClass(
+  presentation: "list-ordered" | "list-unordered" | "task-checked" | "task-unchecked",
+): string {
   switch (presentation) {
-    case "list":
-      return "cm-live-preview-list-marker";
+    case "list-ordered":
+      return "cm-live-preview-list-marker cm-live-preview-list-ordered-marker";
+    case "list-unordered":
+      return "cm-live-preview-list-marker cm-live-preview-list-unordered-marker";
     case "task-checked":
       return "cm-live-preview-task-marker cm-live-preview-task-checked";
     case "task-unchecked":

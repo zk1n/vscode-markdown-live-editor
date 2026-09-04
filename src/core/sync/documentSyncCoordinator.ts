@@ -7,6 +7,7 @@ import {
   type WebviewToHostMessage,
 } from "../../protocol/messages.js";
 import { disabledDiagnosticLog, type DiagnosticLog } from "../diagnostics/diagnosticLog.js";
+import { textFingerprint } from "../diagnostics/textFingerprint.js";
 import { applyWireChanges } from "./documentText.js";
 
 export interface DocumentSnapshot {
@@ -239,10 +240,21 @@ export class DocumentSyncCoordinator {
     message: ClientEditMessage,
     snapshot: DocumentSnapshot,
   ): Promise<void> {
+    const firstChange = message.changes[0];
     this.diagnostics.record("coordinator.edit", {
+      authorityTextFingerprint: textFingerprint(snapshot.text),
+      changeCount: message.changes.length,
+      changeRange:
+        firstChange === undefined
+          ? "none"
+          : `${String(firstChange.range.start.line)}:${String(firstChange.range.start.character)}-${String(firstChange.range.end.line)}:${String(firstChange.range.end.character)}`,
       sequence: message.sequence,
       documentVersion: message.documentVersion,
-      textLength: message.changes[0]?.text.length,
+      expectedTextFingerprint:
+        firstChange === undefined ? "none" : textFingerprint(firstChange.expectedText),
+      replacementTextFingerprint:
+        firstChange === undefined ? "none" : textFingerprint(firstChange.text),
+      textLength: firstChange?.text.length,
     });
     if (message.documentVersion !== snapshot.documentVersion) {
       this.resync(
@@ -256,6 +268,17 @@ export class DocumentSyncCoordinator {
 
     const appliedChanges = applyWireChanges(snapshot.text, message.changes);
     if (!appliedChanges.ok) {
+      this.diagnostics.record("coordinator.edit.change-mismatch", {
+        actualTextFingerprint: appliedChanges.mismatch?.actualTextFingerprint ?? "unavailable",
+        authorityTextFingerprint: textFingerprint(snapshot.text),
+        documentVersion: snapshot.documentVersion,
+        expectedTextFingerprint: appliedChanges.mismatch?.expectedTextFingerprint ?? "unavailable",
+        range:
+          appliedChanges.mismatch === undefined
+            ? "unavailable"
+            : `${String(appliedChanges.mismatch.startOffset)}:${String(appliedChanges.mismatch.endOffset)}`,
+        sequence: message.sequence,
+      });
       this.resync(session, snapshot, "change-mismatch", appliedChanges.note);
       return;
     }

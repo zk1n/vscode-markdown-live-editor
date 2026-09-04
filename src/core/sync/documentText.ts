@@ -1,4 +1,5 @@
 import type { WireChange, WirePosition } from "../../protocol/messages.js";
+import { textFingerprint } from "../diagnostics/textFingerprint.js";
 
 export type WireChangeApplicationResult =
   | { readonly ok: true; readonly text: string }
@@ -6,6 +7,12 @@ export type WireChangeApplicationResult =
       readonly ok: false;
       readonly code: "invalid-position" | "overlapping-range" | "expected-text-mismatch";
       readonly note: string;
+      readonly mismatch?: {
+        readonly actualTextFingerprint: string;
+        readonly endOffset: number;
+        readonly expectedTextFingerprint: string;
+        readonly startOffset: number;
+      };
     };
 
 interface ResolvedChange {
@@ -70,11 +77,18 @@ export function applyWireChanges(
         note: "A change range starts after it ends.",
       };
     }
-    if (source.slice(startOffset, endOffset) !== change.expectedText) {
+    const actualText = source.slice(startOffset, endOffset);
+    if (actualText !== change.expectedText) {
       return {
         ok: false,
         code: "expected-text-mismatch",
         note: "A change did not match the authoritative text it claimed to replace.",
+        mismatch: {
+          actualTextFingerprint: textFingerprint(actualText),
+          endOffset,
+          expectedTextFingerprint: textFingerprint(change.expectedText),
+          startOffset,
+        },
       };
     }
     resolved.push({ change, startOffset, endOffset });
