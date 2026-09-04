@@ -1,4 +1,7 @@
+// @vitest-environment happy-dom
+
 import { EditorState, Transaction } from "@codemirror/state";
+import { EditorView, type Decoration } from "@codemirror/view";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -124,7 +127,7 @@ describe("LivePreviewEngine", () => {
     engine.dispose();
   });
 
-  it("reveals a hidden closing marker before a next-line Backspace and preserves source", () => {
+  it("keeps adjacent inline syntax in preview and reveals every marker only inside syntax", () => {
     const cases = [
       ["link", "[label](target.md)"],
       ["strong", "**bold**"],
@@ -135,34 +138,88 @@ describe("LivePreviewEngine", () => {
 
     for (const [name, source] of cases) {
       const engine = createLivePreviewEngine();
-      const state = EditorState.create({
-        doc: `${source}\n`,
+      const nextLineState = EditorState.create({
+        doc: `${source}\nplain`,
         selection: { anchor: source.length + 1 },
         extensions: [engine.extension],
       });
+      const [nextLineSyntax] = findPresentationSyntax(nextLineState.doc.toString());
+      expect(nextLineSyntax, name).toBeDefined();
+      if (nextLineSyntax === undefined) {
+        throw new Error(`Expected ${name} syntax.`);
+      }
 
-      expect(decorationCount(state), name).toBe(1);
-      const newlineOnlyDeletion = state.update({
-        changes: { from: source.length, to: source.length + 1 },
+      expect(
+        isSyntaxActive(nextLineSyntax, [{ from: source.length + 1, to: source.length + 1 }]),
+        name,
+      ).toBe(false);
+      expect(hiddenReplacementRanges(nextLineState), name).toEqual(
+        nextLineSyntax.markers.map(({ from, to }) => ({ from, to })),
+      );
+
+      const activeSelection = nextLineState.update({
+        selection: { anchor: nextLineSyntax.contentFrom },
       });
-      expect(newlineOnlyDeletion.state.doc.toString(), name).toBe(source);
+      expect(activeSelection.docChanged, name).toBe(false);
+      expect(activeSelection.state.doc.toString(), name).toBe(`${source}\nplain`);
+      expect(hiddenReplacementRanges(activeSelection.state), name).toEqual([]);
 
       engine.dispose();
     }
   });
 
-  it("reveals a hidden opening marker before a previous-line Delete and preserves source", () => {
+  it("keeps a preceding-line caret from revealing the next line and keeps visible markers", () => {
     const engine = createLivePreviewEngine();
+    const source = "plain\n[label](target.md)\n- item\n- [ ] task\n# heading\n> quote";
     const state = EditorState.create({
-      doc: "plain\n[label](target.md)",
-      selection: { anchor: 5 },
+      doc: source,
+      selection: { anchor: "plain".length },
       extensions: [engine.extension],
     });
+    const syntax = findPresentationSyntax(source);
+    const link = syntax.find(({ kind }) => kind === "link");
+    if (link === undefined) {
+      throw new Error("Expected link syntax.");
+    }
 
-    expect(decorationCount(state)).toBe(1);
-    const newlineOnlyDeletion = state.update({ changes: { from: 5, to: 6 } });
-    expect(newlineOnlyDeletion.state.doc.toString()).toBe("plain[label](target.md)");
+    expect(isSyntaxActive(link, [{ from: "plain".length, to: "plain".length }])).toBe(false);
+    expect(hiddenReplacementRanges(state)).toEqual(
+      syntax
+        .flatMap(({ markers }) => markers)
+        .filter(({ presentation }) => presentation === undefined || presentation === "hidden")
+        .map(({ from, to }) => ({ from, to })),
+    );
+    expect(markClasses(state)).toContain("cm-live-preview-list-marker");
+    expect(markClasses(state)).toContain(
+      "cm-live-preview-task-marker cm-live-preview-task-unchecked",
+    );
+    expect(markClasses(state)).toContain("cm-live-preview-heading cm-live-preview-heading-1");
+    expect(markClasses(state)).toContain("cm-live-preview-blockquote");
 
+    engine.dispose();
+  });
+
+  it("uses replacement DOM for inactive link markers and restores raw source only inside the link", () => {
+    const engine = createLivePreviewEngine();
+    const source = "[label](target.md)\nplain";
+    const view = new EditorView({
+      parent: document.body,
+      state: EditorState.create({
+        doc: source,
+        selection: { anchor: "[label](target.md)\n".length },
+        extensions: [engine.extension],
+      }),
+    });
+
+    expect(
+      [...view.contentDOM.querySelectorAll(".cm-line")].map((line) => line.textContent),
+    ).toEqual(["label", "plain"]);
+    view.dispatch({ selection: { anchor: 3 } });
+    expect(
+      [...view.contentDOM.querySelectorAll(".cm-line")].map((line) => line.textContent),
+    ).toEqual(["[label](target.md)", "plain"]);
+
+    view.destroy();
     engine.dispose();
   });
 });
@@ -173,4 +230,45 @@ function decorationCount(state: EditorState): number {
     count += 1;
   });
   return count;
+}
+
+function hiddenReplacementRanges(
+  state: EditorState,
+): readonly { readonly from: number; readonly to: number }[] {
+  const ranges: { from: number; to: number }[] = [];
+  state
+    .field(livePreviewState)
+    .decorations.between(0, state.doc.length, (from, to, value): void => {
+      if (hasHiddenPresentation(value)) {
+        ranges.push({ from, to });
+      }
+    });
+  return ranges;
+}
+
+function markClasses(state: EditorState): readonly string[] {
+  const classes: string[] = [];
+  state
+    .field(livePreviewState)
+    .decorations.between(0, state.doc.length, (_from, _to, value): void => {
+      const className = decorationClass(value);
+      if (className !== undefined) {
+        classes.push(className);
+      }
+    });
+  return classes;
+}
+
+function hasHiddenPresentation(value: Decoration): boolean {
+  const spec = value.spec as unknown;
+  return isRecord(spec) && spec["markerPresentation"] === "hidden";
+}
+
+function decorationClass(value: Decoration): string | undefined {
+  const spec = value.spec as unknown;
+  return isRecord(spec) && typeof spec["class"] === "string" ? spec["class"] : undefined;
+}
+
+function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {
+  return typeof value === "object" && value !== null;
 }

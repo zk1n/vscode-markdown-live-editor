@@ -1,11 +1,7 @@
 import { type Extension, StateField, type EditorState } from "@codemirror/state";
 import { Decoration, type DecorationSet, EditorView } from "@codemirror/view";
 
-import {
-  findPresentationSyntax,
-  isSyntaxActive,
-  type MarkerRange,
-} from "./markdownPresentation.js";
+import { findPresentationSyntax, isSyntaxActive } from "./markdownPresentation.js";
 
 export interface LivePreviewEngine {
   readonly extension: Extension;
@@ -42,9 +38,6 @@ export const livePreviewState = StateField.define<LivePreviewState>({
 });
 
 const livePreviewTheme = EditorView.baseTheme({
-  ".cm-live-preview-marker": {
-    display: "none",
-  },
   ".cm-live-preview-heading": {
     fontWeight: "700",
   },
@@ -126,11 +119,26 @@ function buildDecorations(state: EditorState): DecorationSet {
   const decorations = [];
 
   for (const syntax of findPresentationSyntax(documentText)) {
-    if (!isSyntaxActive(syntax, selections, documentText)) {
+    if (!isSyntaxActive(syntax, selections)) {
       for (const marker of syntax.markers) {
-        decorations.push(
-          Decoration.mark({ class: markerClass(marker) }).range(marker.from, marker.to),
-        );
+        if (marker.presentation === undefined || marker.presentation === "hidden") {
+          // A replacement removes the marker from the editable DOM rather than
+          // merely hiding its text. This keeps adjacent lines in preview while
+          // leaving the CodeMirror document untouched.
+          decorations.push(
+            Decoration.replace({
+              inclusive: false,
+              markerPresentation: "hidden",
+            }).range(marker.from, marker.to),
+          );
+        } else {
+          decorations.push(
+            Decoration.mark({ class: markerClass(marker.presentation) }).range(
+              marker.from,
+              marker.to,
+            ),
+          );
+        }
       }
     }
     const className =
@@ -145,18 +153,13 @@ function buildDecorations(state: EditorState): DecorationSet {
   return Decoration.set(decorations, true);
 }
 
-function markerClass(marker: MarkerRange): string {
-  switch (marker.presentation) {
+function markerClass(presentation: "list" | "task-checked" | "task-unchecked"): string {
+  switch (presentation) {
     case "list":
       return "cm-live-preview-list-marker";
     case "task-checked":
       return "cm-live-preview-task-marker cm-live-preview-task-checked";
     case "task-unchecked":
       return "cm-live-preview-task-marker cm-live-preview-task-unchecked";
-    case "hidden":
-    case undefined:
-      return "cm-live-preview-marker";
-    default:
-      return "cm-live-preview-marker";
   }
 }

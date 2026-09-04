@@ -80,54 +80,13 @@ export function findPresentationSyntax(text: string): readonly PresentationSynta
 export function isSyntaxActive(
   syntax: PresentationSyntaxRange,
   selections: readonly SelectionRange[],
-  documentText = "",
 ): boolean {
   return selections.some(({ from, to }): boolean => {
     if (from === to) {
-      return (
-        (from >= syntax.from && from <= syntax.to) ||
-        isCaretAdjacentToHiddenMarkerAcrossLineBreak(syntax, from, documentText)
-      );
+      return from >= syntax.from && from <= syntax.to;
     }
     return from <= syntax.to && to >= syntax.from;
   });
-}
-
-/**
- * Reveal a hidden marker when a caret is separated from it only by a newline.
- * This covers a Backspace at the next-line start and a forward Delete at the
- * prior-line end. It does not change the document; it only keeps the source
- * DOM contiguous before the browser processes a native newline deletion.
- */
-function isCaretAdjacentToHiddenMarkerAcrossLineBreak(
-  syntax: PresentationSyntaxRange,
-  caret: number,
-  documentText: string,
-): boolean {
-  return (
-    (caret === syntax.to + 1 &&
-      documentText[syntax.to] === "\n" &&
-      hasHiddenMarkerEndingAt(syntax, syntax.to)) ||
-    (caret === syntax.from - 1 &&
-      documentText[caret] === "\n" &&
-      hasHiddenMarkerStartingAt(syntax, syntax.from))
-  );
-}
-
-function hasHiddenMarkerEndingAt(syntax: PresentationSyntaxRange, position: number): boolean {
-  return syntax.markers.some(
-    (marker): boolean =>
-      marker.to === position &&
-      (marker.presentation === undefined || marker.presentation === "hidden"),
-  );
-}
-
-function hasHiddenMarkerStartingAt(syntax: PresentationSyntaxRange, position: number): boolean {
-  return syntax.markers.some(
-    (marker): boolean =>
-      marker.from === position &&
-      (marker.presentation === undefined || marker.presentation === "hidden"),
-  );
 }
 
 function findHeading(line: string, offset: number): PresentationSyntaxRange | undefined {

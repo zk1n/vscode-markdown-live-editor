@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { TextDecoder, TextEncoder } from "node:util";
+import * as prettier from "prettier";
 import * as vscode from "vscode";
 
 import {
@@ -7,6 +8,7 @@ import {
   type DocumentPortResult,
   type WebviewEndpoint,
 } from "../../src/core/sync/documentSyncCoordinator.js";
+import { textFingerprint } from "../../src/core/diagnostics/textFingerprint.js";
 import { PROTOCOL_VERSION, type HostToWebviewMessage } from "../../src/protocol/messages.js";
 import { VscodeDocumentPort } from "../../src/extension/sync/VscodeDocumentPort.js";
 
@@ -19,6 +21,7 @@ const FIRST_EDIT_LF_FILE_NAME = "extension-host-first-edit-lf.md";
 const COMPOSITION_HISTORY_FILE_NAME = "extension-host-composition-history.md";
 const COMPOSITION_GROUPING_FILE_NAME = "extension-host-composition-grouping.md";
 const SAVE_PROBE_FILE_NAME = "extension-host-save-probe.md";
+const MIXED_LIST_SAVE_PROBE_FILE_NAME = "extension-host-mixed-list-save-probe.md";
 const OWN_CHANGE_FILE_NAME = "extension-host-own-change.md";
 
 export async function run(): Promise<void> {
@@ -77,6 +80,7 @@ export async function run(): Promise<void> {
   await verifyCompositionHistoryPath(workspaceFolder.uri);
   await verifyWorkspaceEditUndoGrouping(workspaceFolder.uri);
   await verifySaveSemantics(workspaceFolder.uri);
+  await verifyMixedListSaveParticipantSemantics(workspaceFolder.uri);
   await verifyOwnChangeClassification(workspaceFolder.uri);
 }
 
@@ -381,6 +385,296 @@ async function verifySaveSemantics(workspaceUri: vscode.Uri): Promise<void> {
   } finally {
     await removeSmokeFile(documentUri);
   }
+}
+
+async function verifyMixedListSaveParticipantSemantics(workspaceUri: vscode.Uri): Promise<void> {
+  const documentUri = vscode.Uri.joinPath(workspaceUri, MIXED_LIST_SAVE_PROBE_FILE_NAME);
+  const source = "probe\n\n- unordered\n1. ordered\n";
+  const editedSource = "probex\n\n- unordered\n1. ordered\n";
+  const prettierSource = "probex\n\n- unordered\n\n1. ordered\n";
+  await removeSmokeFile(documentUri);
+
+  const formatter = vscode.languages.registerDocumentFormattingEditProvider(
+    { language: "markdown" },
+    {
+      provideDocumentFormattingEdits: async (document): Promise<vscode.TextEdit[]> => {
+        const formatted = await prettier.format(document.getText(), { parser: "markdown" });
+        return formatted === document.getText()
+          ? []
+          : [vscode.TextEdit.replace(fullDocumentRange(document), formatted)];
+      },
+    },
+  );
+
+  try {
+    await vscode.workspace.fs.writeFile(documentUri, new TextEncoder().encode(source));
+    const document = await vscode.workspace.openTextDocument(documentUri);
+    assertCleanFormatterOffConfiguration(documentUri);
+
+    const formatterOffObservations = observeDocument(documentUri);
+    try {
+      await replaceWholeDocument(document, documentUri, editedSource);
+      formatterOffObservations.record("normal-editor-before-save");
+      assert.equal(
+        await document.save(),
+        true,
+        "Formatter-off normal-editor Save did not complete.",
+      );
+      formatterOffObservations.record("normal-editor-after-save");
+      assert.equal(
+        document.getText(),
+        editedSource,
+        "Formatter-off normal-editor Save inserted a blank line.",
+      );
+      assert.equal(
+        await readDiskText(documentUri),
+        editedSource,
+        "Formatter-off normal-editor disk differs.",
+      );
+
+      await replaceWholeDocument(document, documentUri, source);
+      assert.equal(
+        await document.save(),
+        true,
+        "Formatter-off Live Editor fixture reset did not save.",
+      );
+      const port = new VscodeDocumentPort();
+      const coordinator = new DocumentSyncCoordinator(port);
+      const endpoint = new RecordingEndpoint();
+      const opened = await coordinator.openSession(
+        documentUri.toString(),
+        "mixed-list-formatter-off",
+        endpoint,
+      );
+      assert.ok(opened.ok, "Formatter-off Live Editor session did not open.");
+      await coordinator.receive(
+        fullReplacementMessage(
+          documentUri.toString(),
+          "mixed-list-formatter-off",
+          1,
+          opened.snapshot.documentVersion,
+          opened.snapshot.text,
+          editedSource,
+        ),
+        endpoint,
+      );
+      formatterOffObservations.record("live-editor-host-acknowledged");
+      await coordinator.receive(
+        barrierMessage(documentUri.toString(), "mixed-list-formatter-off", "save", 2),
+        endpoint,
+      );
+      formatterOffObservations.record("live-editor-after-immediate-save");
+      assert.equal(
+        endpoint.messages.some((message) => message.kind === "resync"),
+        false,
+        "Formatter-off Live Editor immediate Save entered recovery.",
+      );
+      assert.equal(
+        document.getText(),
+        editedSource,
+        "Formatter-off Live Editor Save inserted a blank line.",
+      );
+      assert.equal(
+        await readDiskText(documentUri),
+        editedSource,
+        "Formatter-off Live Editor disk differs.",
+      );
+      assertNoMixedListBlank(formatterOffObservations.entries, "Formatter-off Save");
+    } finally {
+      formatterOffObservations.dispose();
+    }
+
+    await vscode.workspace
+      .getConfiguration("editor", documentUri)
+      .update("formatOnSave", true, vscode.ConfigurationTarget.Global);
+    assert.equal(
+      vscode.workspace.getConfiguration("editor", documentUri).get<boolean>("formatOnSave"),
+      true,
+      "The isolated test profile did not enable formatOnSave.",
+    );
+
+    const formatterOnObservations = observeDocument(documentUri);
+    try {
+      await replaceWholeDocument(document, documentUri, editedSource);
+      formatterOnObservations.record("normal-editor-before-save");
+      assert.equal(await document.save(), true, "Prettier normal-editor Save did not complete.");
+      formatterOnObservations.record("normal-editor-after-save");
+      assert.equal(
+        document.getText(),
+        prettierSource,
+        "Prettier normal-editor Save did not add its blank line.",
+      );
+
+      await replaceWholeDocument(document, documentUri, source);
+      assert.equal(await document.save(), true, "Prettier Live Editor fixture reset did not save.");
+      const port = new VscodeDocumentPort();
+      const coordinator = new DocumentSyncCoordinator(port);
+      const endpoint = new RecordingEndpoint();
+      const opened = await coordinator.openSession(
+        documentUri.toString(),
+        "mixed-list-prettier",
+        endpoint,
+      );
+      assert.ok(opened.ok, "Prettier Live Editor session did not open.");
+      await coordinator.receive(
+        fullReplacementMessage(
+          documentUri.toString(),
+          "mixed-list-prettier",
+          1,
+          opened.snapshot.documentVersion,
+          opened.snapshot.text,
+          editedSource,
+        ),
+        endpoint,
+      );
+      formatterOnObservations.record("live-editor-host-acknowledged");
+      await coordinator.receive(
+        barrierMessage(documentUri.toString(), "mixed-list-prettier", "save", 2),
+        endpoint,
+      );
+      formatterOnObservations.record("live-editor-after-immediate-save");
+      assert.equal(
+        document.getText(),
+        prettierSource,
+        "Prettier Live Editor Save did not add its blank line.",
+      );
+      assert.equal(
+        await readDiskText(documentUri),
+        prettierSource,
+        "Prettier Live Editor disk differs.",
+      );
+
+      await replaceWholeDocument(document, documentUri, editedSource);
+      await vscode.window.showTextDocument(document, { preview: false });
+      await vscode.commands.executeCommand("editor.action.formatDocument");
+      formatterOnObservations.record("normal-editor-after-manual-format");
+      assert.equal(
+        document.getText(),
+        prettierSource,
+        "Manual Format Document did not add Prettier's blank line.",
+      );
+      assertFirstMixedListBlankAfterSaveParticipant(formatterOnObservations.entries, editedSource);
+    } finally {
+      formatterOnObservations.dispose();
+    }
+  } finally {
+    await vscode.workspace
+      .getConfiguration("editor", documentUri)
+      .update("formatOnSave", undefined, vscode.ConfigurationTarget.Global);
+    formatter.dispose();
+    await removeSmokeFile(documentUri);
+  }
+}
+
+interface SaveObservation {
+  readonly phase: string;
+  readonly timestamp: number;
+  readonly documentVersion: number;
+  readonly dirty: boolean;
+  readonly textLength: number;
+  readonly lineCount: number;
+  readonly sourceHash: string;
+  readonly hasMixedListBlank: boolean;
+  readonly text: string;
+}
+
+function observeDocument(documentUri: vscode.Uri): {
+  readonly entries: readonly SaveObservation[];
+  record(phase: string): void;
+  dispose(): void;
+} {
+  const entries: SaveObservation[] = [];
+  const record = (phase: string, document: vscode.TextDocument): void => {
+    const text = document.getText();
+    entries.push({
+      phase,
+      timestamp: Date.now(),
+      documentVersion: document.version,
+      dirty: document.isDirty,
+      textLength: text.length,
+      lineCount: document.lineCount,
+      sourceHash: textFingerprint(text),
+      hasMixedListBlank: text.includes("- unordered\n\n1. ordered"),
+      text,
+    });
+  };
+  const subscription = vscode.workspace.onDidChangeTextDocument((event): void => {
+    if (event.document.uri.toString() === documentUri.toString()) {
+      record("onDidChangeTextDocument", event.document);
+    }
+  });
+  const document = vscode.workspace.textDocuments.find(
+    (candidate) => candidate.uri.toString() === documentUri.toString(),
+  );
+  if (document === undefined) {
+    throw new Error("The mixed-list Save probe document is not open.");
+  }
+  record("fixture-opened", document);
+  return {
+    entries,
+    record: (phase): void => {
+      record(phase, document);
+    },
+    dispose: (): void => {
+      subscription.dispose();
+    },
+  };
+}
+
+function assertCleanFormatterOffConfiguration(documentUri: vscode.Uri): void {
+  const editor = vscode.workspace.getConfiguration("editor", documentUri);
+  const files = vscode.workspace.getConfiguration("files", documentUri);
+  const formatOnSave = editor.inspect<boolean>("formatOnSave");
+  const defaultFormatter = editor.inspect<string>("defaultFormatter");
+  const codeActions = editor.inspect<Readonly<Record<string, unknown>>>("codeActionsOnSave");
+  const autoSave = files.inspect<string>("autoSave");
+  assert.equal(
+    editor.get<boolean>("formatOnSave"),
+    false,
+    `Unexpected formatOnSave: ${JSON.stringify(formatOnSave)}`,
+  );
+  const effectiveDefaultFormatter = editor.get<unknown>("defaultFormatter");
+  assert.ok(
+    effectiveDefaultFormatter === undefined || effectiveDefaultFormatter === null,
+    `Unexpected defaultFormatter: ${JSON.stringify(defaultFormatter)}`,
+  );
+  const effectiveCodeActions = editor.get<Readonly<Record<string, unknown>>>("codeActionsOnSave");
+  assert.ok(
+    effectiveCodeActions === undefined ||
+      Object.values(effectiveCodeActions).every((value) => value !== true && value !== "always"),
+    `Unexpected save code action: ${JSON.stringify(codeActions)}`,
+  );
+  assert.equal(
+    files.get<string>("autoSave"),
+    "off",
+    `Unexpected autoSave: ${JSON.stringify(autoSave)}`,
+  );
+}
+
+function assertNoMixedListBlank(entries: readonly SaveObservation[], label: string): void {
+  assert.equal(
+    entries.some(({ hasMixedListBlank }) => hasMixedListBlank),
+    false,
+    `${label} inserted a blank line: ${JSON.stringify(entries)}`,
+  );
+}
+
+function assertFirstMixedListBlankAfterSaveParticipant(
+  entries: readonly SaveObservation[],
+  editedSource: string,
+): void {
+  const firstBlank = entries.find(({ hasMixedListBlank }) => hasMixedListBlank);
+  assert.ok(
+    firstBlank,
+    `No participant inserted the expected blank line: ${JSON.stringify(entries)}`,
+  );
+  const prior = entries.slice(0, entries.indexOf(firstBlank)).at(-1);
+  assert.ok(prior, "The formatter observation has no pre-change state.");
+  assert.equal(
+    prior.text,
+    editedSource,
+    `The source changed before Save participant formatting: ${JSON.stringify(entries)}`,
+  );
 }
 
 async function verifyCompositionHistoryPath(workspaceUri: vscode.Uri): Promise<void> {
