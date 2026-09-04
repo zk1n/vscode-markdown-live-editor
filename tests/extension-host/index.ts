@@ -89,33 +89,119 @@ async function verifyOwnChangeClassification(workspaceUri: vscode.Uri): Promise<
   await removeSmokeFile(documentUri);
 
   try {
-    await vscode.workspace.fs.writeFile(documentUri, new TextEncoder().encode("before"));
+    // Use a CRLF fixture to prove that the classifier compares protocol LF
+    // with the native event's CRLF replacement at the adapter boundary.
+    await vscode.workspace.fs.writeFile(documentUri, new TextEncoder().encode("before\r\n"));
     const document = await vscode.workspace.openTextDocument(documentUri);
-    const port = new VscodeDocumentPort();
-    const classifications: ("own" | "external")[] = [];
+    const classificationDiagnostics: Readonly<
+      Record<string, boolean | number | string | undefined>
+    >[] = [];
+    const port = new VscodeDocumentPort({
+      record: (kind, details): void => {
+        if (kind === "port.document-change.classified") {
+          classificationDiagnostics.push(details);
+        }
+      },
+    });
+    const observations: {
+      readonly classification: "own" | "external";
+      readonly contentChangeCount: number;
+      readonly documentText: string;
+      readonly documentVersion: number;
+      readonly replacementText: string | undefined;
+      readonly replacePromiseSettled: boolean;
+    }[] = [];
+    let replacePromiseSettled = false;
     const subscription = vscode.workspace.onDidChangeTextDocument((event): void => {
       if (event.document.uri.toString() === documentUri.toString()) {
-        classifications.push(port.classifyDocumentChange(event));
+        observations.push({
+          classification: port.classifyDocumentChange(event),
+          contentChangeCount: event.contentChanges.length,
+          documentText: event.document.getText(),
+          documentVersion: event.document.version,
+          replacementText: event.contentChanges[0]?.text,
+          // The event is delivered before replaceDocument's promise settles;
+          // this is the timing window in which the pending target is valid.
+          replacePromiseSettled,
+        });
       }
     });
 
     try {
-      assertPortApplied(
-        await port.replaceDocument(documentUri.toString(), document.version, "owned"),
-        "Port-owned WorkspaceEdit was rejected.",
-      );
-      await replaceWholeDocument(document, documentUri, "external");
+      const expectedVersion = document.version;
+      const replacement = port.replaceDocument(documentUri.toString(), expectedVersion, "owned\n");
+      assertPortApplied(await replacement, "Port-owned WorkspaceEdit was rejected.");
+      replacePromiseSettled = true;
+      await replaceWholeDocument(document, documentUri, "external\n");
     } finally {
       subscription.dispose();
     }
 
     assert.equal(
-      classifications.filter((classification) => classification === "own").length,
+      observations.filter(({ classification }) => classification === "own").length,
       1,
       "Only the exact port replacement may be classified as own.",
     );
+    assert.deepEqual(
+      observations[0],
+      {
+        classification: "own",
+        contentChangeCount: 1,
+        documentText: "owned\r\n",
+        documentVersion: 2,
+        replacementText: "owned\r\n",
+        replacePromiseSettled: false,
+      },
+      "The port-owned event did not match the exact version, target, replacement, and timing contract.",
+    );
+    assert.deepEqual(
+      classificationDiagnostics.map(
+        ({
+          classification,
+          contentChangeCount,
+          pendingExpectedVersion,
+          replacementMatches,
+          targetMatches,
+          versionMatches,
+        }) => ({
+          classification,
+          contentChangeCount,
+          pendingExpectedVersion,
+          replacementMatches,
+          targetMatches,
+          versionMatches,
+        }),
+      ),
+      [
+        {
+          classification: "own",
+          contentChangeCount: 1,
+          pendingExpectedVersion: 1,
+          replacementMatches: true,
+          targetMatches: true,
+          versionMatches: true,
+        },
+        {
+          classification: "external",
+          contentChangeCount: 0,
+          pendingExpectedVersion: 1,
+          replacementMatches: false,
+          targetMatches: true,
+          versionMatches: true,
+        },
+        {
+          classification: "external",
+          contentChangeCount: 1,
+          pendingExpectedVersion: -1,
+          replacementMatches: false,
+          targetMatches: false,
+          versionMatches: false,
+        },
+      ],
+      "Classification diagnostics did not expose the expected pending/version/target/replacement checks.",
+    );
     assert.equal(
-      classifications.at(-1),
+      observations.at(-1)?.classification,
       "external",
       "A later external WorkspaceEdit was incorrectly suppressed as own.",
     );
@@ -202,7 +288,17 @@ async function verifySeparateCompositionCommitsFollowHostGrouping(
   try {
     await vscode.workspace.fs.writeFile(documentUri, new TextEncoder().encode("X"));
     const document = await vscode.workspace.openTextDocument(documentUri);
-    const coordinator = new DocumentSyncCoordinator(new VscodeDocumentPort());
+    const historyClassificationDiagnostics: Readonly<
+      Record<string, boolean | number | string | undefined>
+    >[] = [];
+    const port = new VscodeDocumentPort({
+      record: (kind, details): void => {
+        if (kind === "port.document-change.classified") {
+          historyClassificationDiagnostics.push(details);
+        }
+      },
+    });
+    const coordinator = new DocumentSyncCoordinator(port);
     const endpoint = new RecordingEndpoint();
     const opened = await coordinator.openSession(
       documentUri.toString(),
@@ -210,58 +306,131 @@ async function verifySeparateCompositionCommitsFollowHostGrouping(
       endpoint,
     );
     assert.ok(opened.ok, "Composition grouping session did not open.");
+    // Mirror the extension integration listener so this probe can observe
+    // whether a history event is classified external and queued as a second
+    // snapshot on the same coordinator/session.
+    const classificationTrace: {
+      readonly classification: "own" | "external";
+      readonly contentChangeCount: number;
+      readonly documentVersion: number;
+      readonly text: string;
+      readonly replacementText: string | undefined;
+    }[] = [];
+    const documentChangeSubscription = vscode.workspace.onDidChangeTextDocument((event): void => {
+      if (event.document.uri.toString() === documentUri.toString()) {
+        const classification = port.classifyDocumentChange(event);
+        classificationTrace.push({
+          classification,
+          contentChangeCount: event.contentChanges.length,
+          documentVersion: event.document.version,
+          replacementText: event.contentChanges[0]?.text,
+          text: event.document.getText(),
+        });
+        if (classification === "external") {
+          void coordinator.publishExternalChange(documentUri.toString());
+        }
+      }
+    });
 
-    await coordinator.receive(
-      fullReplacementMessage(
-        documentUri.toString(),
-        "composition-grouping",
-        1,
-        opened.snapshot.documentVersion,
-        opened.snapshot.text,
-        "Xあいう",
-      ),
-      endpoint,
-    );
-    const firstCommit = endpoint.messages.find(isEditAcknowledgement);
-    assert.ok(firstCommit, "The first composition-equivalent commit was not acknowledged.");
+    try {
+      await coordinator.receive(
+        fullReplacementMessage(
+          documentUri.toString(),
+          "composition-grouping",
+          1,
+          opened.snapshot.documentVersion,
+          opened.snapshot.text,
+          "Xあいう",
+        ),
+        endpoint,
+      );
+      const firstCommit = endpoint.messages.find(isEditAcknowledgement);
+      assert.ok(firstCommit, "The first composition-equivalent commit was not acknowledged.");
 
-    await coordinator.receive(
-      fullReplacementMessage(
-        documentUri.toString(),
-        "composition-grouping",
-        2,
-        firstCommit.documentVersion,
-        firstCommit.text,
+      await coordinator.receive(
+        fullReplacementMessage(
+          documentUri.toString(),
+          "composition-grouping",
+          2,
+          firstCommit.documentVersion,
+          firstCommit.text,
+          "Xあいうかきく",
+        ),
+        endpoint,
+      );
+      assert.equal(
+        document.getText(),
         "Xあいうかきく",
-      ),
-      endpoint,
-    );
-    assert.equal(
-      document.getText(),
-      "Xあいうかきく",
-      "The second composition-equivalent edit failed.",
-    );
+        "The second composition-equivalent edit failed.",
+      );
+      assert.deepEqual(
+        classificationTrace
+          .filter(({ classification }) => classification === "own")
+          .map(({ text }) => text),
+        ["Xあいう", "Xあいうかきく"],
+        "The two port-owned WorkspaceEdits were not both classified own.",
+      );
 
-    await vscode.commands.executeCommand("vscode.openWith", documentUri, VIEW_TYPE);
-    assertCustomEditorOpened(documentUri);
-    await coordinator.receive(
-      barrierMessage(documentUri.toString(), "composition-grouping", "undo", 3),
-      endpoint,
-    );
-    assert.equal(
-      document.getText(),
-      "Xあいう",
-      "Separate composition-equivalent WorkspaceEdits did not remain separate Undo units.",
-    );
-    await coordinator.receive(
-      barrierMessage(documentUri.toString(), "composition-grouping", "redo", 4),
-      endpoint,
-    );
-    assert.equal(
-      document.getText(),
-      "Xあいうかきく",
-      "Redo did not restore both composition commits.",
-    );
+      await vscode.commands.executeCommand("vscode.openWith", documentUri, VIEW_TYPE);
+      assertCustomEditorOpened(documentUri);
+      const beforeUndoMessages = endpoint.messages.length;
+      await coordinator.receive(
+        barrierMessage(documentUri.toString(), "composition-grouping", "undo", 3),
+        endpoint,
+      );
+      // The history command itself emits a TextDocument change while
+      // historyInProgress is set. The current classifier intentionally keeps
+      // that event external, so the extension listener queues a second
+      // external snapshot after the barrier's own acknowledgement/broadcast.
+      await coordinator.flush(documentUri.toString());
+      const undoTrace = classificationTrace.at(-1);
+      assert.deepEqual(
+        undoTrace,
+        {
+          classification: "external",
+          contentChangeCount: 1,
+          documentVersion: document.version,
+          replacementText: "Xあいう",
+          text: "Xあいう",
+        },
+        "Undo was not observed as a single external history change while history was in progress.",
+      );
+      assert.match(
+        String(historyClassificationDiagnostics.at(-1)?.["historyInvocationId"]),
+        /^history-/,
+        "Undo classification did not observe the active history invocation.",
+      );
+      const undoMessages = endpoint.messages.slice(beforeUndoMessages);
+      assert.equal(
+        undoMessages.some(
+          (message) => message.kind === "document-update" && message.reason === "external",
+        ),
+        true,
+        "The external history event was not queued as an external snapshot.",
+      );
+      assert.equal(
+        document.getText(),
+        "Xあいう",
+        "Separate composition-equivalent WorkspaceEdits did not remain separate Undo units.",
+      );
+      await coordinator.receive(
+        barrierMessage(documentUri.toString(), "composition-grouping", "redo", 4),
+        endpoint,
+      );
+      await coordinator.flush(documentUri.toString());
+      assert.equal(
+        document.getText(),
+        "Xあいうかきく",
+        "Redo did not restore both composition commits.",
+      );
+      assert.match(
+        String(historyClassificationDiagnostics.at(-1)?.["historyInvocationId"]),
+        /^history-/,
+        "Redo classification did not observe the active history invocation.",
+      );
+    } finally {
+      documentChangeSubscription.dispose();
+    }
   } finally {
     await removeSmokeFile(documentUri);
   }

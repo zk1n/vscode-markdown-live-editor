@@ -321,7 +321,7 @@ export class DocumentSyncCoordinator {
     }
 
     this.acknowledge(session, message, portResult.snapshot);
-    this.broadcastSnapshot(message.documentUri, "edit", portResult.snapshot);
+    this.broadcastSnapshot(message.documentUri, "edit", portResult.snapshot, message.sessionId);
   }
 
   private async processBarrier(
@@ -381,7 +381,12 @@ export class DocumentSyncCoordinator {
     // The coordinator read authoritative state after every preceding queued
     // operation before entering this method, so this command is a FIFO barrier.
     this.acknowledge(session, message, portResult.snapshot);
-    this.broadcastSnapshot(message.documentUri, message.kind, portResult.snapshot);
+    this.broadcastSnapshot(
+      message.documentUri,
+      message.kind,
+      portResult.snapshot,
+      message.sessionId,
+    );
   }
 
   private async resyncAfterPortFailure(
@@ -411,6 +416,7 @@ export class DocumentSyncCoordinator {
     this.diagnostics.record("coordinator.ack", {
       operation: message.kind,
       sequence: message.sequence,
+      originSessionId: message.sessionId,
       documentVersion: snapshot.documentVersion,
       textLength: snapshot.text.length,
     });
@@ -448,6 +454,7 @@ export class DocumentSyncCoordinator {
     documentUri: string,
     reason: BroadcastReason,
     snapshot: DocumentSnapshot,
+    excludedSessionId?: string,
   ): void {
     const sessions = this.sessionsByDocument.get(documentUri);
     if (sessions === undefined) {
@@ -459,9 +466,21 @@ export class DocumentSyncCoordinator {
       reason,
       ...snapshot,
     };
-    for (const session of sessions.values()) {
+    let peerCount = 0;
+    for (const [sessionId, session] of sessions) {
+      if (sessionId === excludedSessionId) {
+        continue;
+      }
       this.post(session.endpoint, message);
+      peerCount += 1;
     }
+    this.diagnostics.record("coordinator.broadcast", {
+      reason,
+      originSessionId: excludedSessionId ?? "external",
+      excludedSessionId: excludedSessionId ?? "none",
+      peerCount,
+      logicalOrder: excludedSessionId === undefined ? "external" : "after-ack",
+    });
   }
 
   private broadcastProtocolError(documentUri: string, note: string): void {

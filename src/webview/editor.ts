@@ -49,6 +49,16 @@ interface WebviewBootstrap {
   readonly text: string;
 }
 
+/**
+ * A host document-update can race ahead of its matching edit ACK. Keep only
+ * metadata here: the exact text remains owned by PendingEditQueue and must
+ * never be copied into diagnostics.
+ */
+interface DeferredInFlightSnapshot {
+  readonly documentVersion: number;
+  readonly reason: Extract<HostToWebviewMessage, { kind: "document-update" }>["reason"];
+}
+
 declare function acquireVsCodeApi(): VsCodeApi;
 
 const remoteUpdate = Annotation.define<boolean>();
@@ -71,10 +81,12 @@ class MarkdownWebviewController {
   private documentVersion: number;
   private nextSequence: number;
   private inFlightSequence: number | undefined;
+  private hostMessageOrdinal = 0;
   private readonly barriers = new BarrierInputGate();
   private readonly composition = new CompositionBuffer();
   private compositionGeneration = 0;
   private compositionEndObserved = false;
+  private deferredInFlightSnapshot: DeferredInFlightSnapshot | undefined;
   private nextShortcutAttempt = 1;
   private recoveryActive = false;
   private disposed = false;
@@ -158,7 +170,11 @@ class MarkdownWebviewController {
       return;
     }
 
-    this.diagnostics.record("host.message.received", messageSummary(value));
+    this.hostMessageOrdinal += 1;
+    this.diagnostics.record("host.message.received", {
+      ...messageSummary(value),
+      messageOrdinal: this.hostMessageOrdinal,
+    });
     const decoded = decodeHostToWebviewMessage(value);
     if (!decoded.ok) {
       this.enterRecovery(`Invalid host message: ${decoded.error}`);
@@ -407,6 +423,7 @@ class MarkdownWebviewController {
         this.handleDocumentUpdate(message);
         return;
       case "resync":
+        this.resolveDeferredInFlightSnapshot("resync", message.documentVersion);
         this.documentVersion = message.documentVersion;
         this.nextSequence = message.nextSequence;
         this.inFlightSequence = undefined;
@@ -435,10 +452,17 @@ class MarkdownWebviewController {
     message: Extract<HostToWebviewMessage, { kind: "operation-ack" }>,
   ): void {
     this.diagnostics.record("sync.operation.ack", {
+      currentDocumentVersion: this.documentVersion,
+      deferredInFlightSnapshot: this.deferredInFlightSnapshot !== undefined,
+      inFlightTargetFingerprint: textFingerprint(this.pendingEdits.inFlightTarget ?? ""),
+      matchesInFlightSequence:
+        message.operation === "edit" && message.sequence === this.inFlightSequence,
+      matchesInFlightTarget: message.text === this.pendingEdits.inFlightTarget,
+      messageOrdinal: this.hostMessageOrdinal,
       operation: message.operation,
       sequence: message.sequence,
       documentVersion: message.documentVersion,
-      textFingerprint: textFingerprint(message.text),
+      incomingFingerprint: textFingerprint(message.text),
     });
     if (this.recoveryActive) {
       return;
@@ -458,9 +482,26 @@ class MarkdownWebviewController {
       return;
     }
     if (message.operation === "edit" && message.sequence === this.inFlightSequence) {
+      if (message.text !== this.pendingEdits.inFlightTarget) {
+        this.enterRecovery(
+          "The edit acknowledgement did not match the exact in-flight target snapshot.",
+        );
+        return;
+      }
+      const acknowledgementOrder =
+        this.deferredInFlightSnapshot === undefined ? "ack-before-update" : "update-before-ack";
+      const authoritativeDocumentVersion = this.resolveDeferredInFlightSnapshot(
+        "ack",
+        message.documentVersion,
+      );
       this.inFlightSequence = undefined;
       this.pendingEdits.acknowledge(message.text);
-      this.documentVersion = message.documentVersion;
+      this.documentVersion = authoritativeDocumentVersion;
+      this.diagnostics.record("sync.operation.ack.applied", {
+        acknowledgementOrder,
+        documentVersion: authoritativeDocumentVersion,
+        sequence: message.sequence,
+      });
       this.sendPendingEdit();
       if (this.composition.isActive) {
         this.finalizeCompositionIfSafe();
@@ -482,12 +523,20 @@ class MarkdownWebviewController {
     message: Extract<HostToWebviewMessage, { kind: "document-update" }>,
   ): void {
     this.diagnostics.record("sync.document.update", {
-      reason: message.reason,
-      documentVersion: message.documentVersion,
-      textFingerprint: textFingerprint(message.text),
-      inFlightSequence: this.inFlightSequence,
-      pendingLocalChanges: this.pendingEdits.hasPending,
+      authorityFingerprint: textFingerprint(this.pendingEdits.authority),
       compositionActive: this.composition.isActive,
+      currentDocumentVersion: this.documentVersion,
+      documentVersion: message.documentVersion,
+      inFlightTargetFingerprint: textFingerprint(this.pendingEdits.inFlightTarget ?? ""),
+      incomingFingerprint: textFingerprint(message.text),
+      inFlightSequence: this.inFlightSequence,
+      matchesAuthority: message.text === this.pendingEdits.authority,
+      matchesInFlightTarget: message.text === this.pendingEdits.inFlightTarget,
+      matchesPendingTarget: message.text === this.pendingEdits.pendingTarget,
+      messageOrdinal: this.hostMessageOrdinal,
+      pendingTargetFingerprint: textFingerprint(this.pendingEdits.pendingTarget ?? ""),
+      pendingLocalChanges: this.pendingEdits.hasPending,
+      reason: message.reason,
       ...this.focusTraceDetails(),
     });
     if (this.recoveryActive) {
@@ -507,8 +556,33 @@ class MarkdownWebviewController {
       });
       return;
     }
+    // ACK/update ordering matrix:
+    // - exact in-flight target before its ACK: defer without changing authority;
+    // - ACK before its matching update: ACK advances authority and the later update is a no-op;
+    // - every other newer snapshot while local state is pending: visible recovery.
+    // The host-provided reason alone is never evidence that a snapshot is ours.
+    if (this.inFlightSequence !== undefined && message.text === this.pendingEdits.inFlightTarget) {
+      const deferred = this.deferredInFlightSnapshot;
+      if (deferred === undefined || message.documentVersion >= deferred.documentVersion) {
+        this.deferredInFlightSnapshot = {
+          documentVersion: message.documentVersion,
+          reason: message.reason,
+        };
+      }
+      this.diagnostics.record("sync.document.update.deferred-in-flight-target", {
+        documentVersion: message.documentVersion,
+        inFlightSequence: this.inFlightSequence,
+        reason: message.reason,
+        targetFingerprint: textFingerprint(message.text),
+      });
+      return;
+    }
     if (message.text === this.pendingEdits.authority) {
       this.documentVersion = message.documentVersion;
+      this.diagnostics.record("sync.document.update.authority-equal", {
+        documentVersion: message.documentVersion,
+        reason: message.reason,
+      });
       return;
     }
     if (
@@ -548,8 +622,16 @@ class MarkdownWebviewController {
   }
 
   private enterRecovery(note: string): void {
-    this.diagnostics.record("sync.recovery", { note });
+    this.diagnostics.record("sync.recovery", {
+      compositionActive: this.composition.isActive,
+      currentDocumentVersion: this.documentVersion,
+      inFlightSequence: this.inFlightSequence,
+      messageOrdinal: this.hostMessageOrdinal,
+      note,
+      pendingLocalChanges: this.pendingEdits.hasPending,
+    });
     this.recoveryActive = true;
+    this.deferredInFlightSnapshot = undefined;
     this.barriers.reset();
     this.composition.abandon();
     this.compositionEndObserved = false;
@@ -615,6 +697,29 @@ class MarkdownWebviewController {
   private showStatus(note: string): void {
     this.statusElement.textContent = note;
     this.statusElement.hidden = false;
+  }
+
+  private resolveDeferredInFlightSnapshot(
+    resolution: "ack" | "resync",
+    resolvedDocumentVersion: number,
+  ): number {
+    const deferred = this.deferredInFlightSnapshot;
+    this.deferredInFlightSnapshot = undefined;
+    if (deferred === undefined) {
+      return resolvedDocumentVersion;
+    }
+    const authoritativeDocumentVersion =
+      resolution === "ack"
+        ? Math.max(resolvedDocumentVersion, deferred.documentVersion)
+        : resolvedDocumentVersion;
+    this.diagnostics.record("sync.document.update.deferred-resolved", {
+      authoritativeDocumentVersion,
+      deferredDocumentVersion: deferred.documentVersion,
+      reason: deferred.reason,
+      resolvedDocumentVersion,
+      resolution,
+    });
+    return authoritativeDocumentVersion;
   }
 
   private traceCodeMirrorUpdate(update: ViewUpdate): void {
