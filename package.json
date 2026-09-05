@@ -91,8 +91,8 @@
   "dependencies": {
     "@codemirror/commands": "6.11.0",
     "@codemirror/lang-markdown": "6.5.2",
-    "@codemirror/search": "6.7.1",
-    "@codemirror/state": "6.7.1",
+    "@codemirror/search": "6.7.2",
+    "@codemirror/state": "6.7.2",
     "@codemirror/view": "6.43.10"
   },
   "devDependencies": {
