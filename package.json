@@ -6,6 +6,10 @@
   "private": true,
   "license": "MIT",
   "publisher": "local-dev",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/zk1n/vscode-markdown-live-editor.git"
+  },
   "engines": {
     "vscode": "^1.120.0",
     "node": ">=24 <25"
@@ -15,6 +19,13 @@
   ],
   "type": "module",
   "main": "./dist/extension.cjs",
+  "files": [
+    "dist/extension.cjs",
+    "dist/webview.js",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
   "activationEvents": [
     "onCommand:vscodeMarkdownLiveEditor.showProjectInfo",
     "onCustomEditor:vscodeMarkdownLiveEditor.editor",
@@ -86,7 +97,8 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:extension-host": "npm run build && node ./scripts/run-extension-host-tests.mjs",
-    "check": "npm run typecheck && npm run lint && npm run test && npm run build && npm run format:check"
+    "check": "npm run typecheck && npm run lint && npm run test && npm run build && npm run format:check",
+    "package:vsix": "npm run build && node ./scripts/package-vsix.mjs"
   },
   "dependencies": {
     "@codemirror/commands": "6.11.0",
@@ -100,6 +112,7 @@
     "@types/node": "24.13.3",
     "@types/vscode": "1.120.0",
     "@vscode/test-electron": "3.1.0",
+    "@vscode/vsce": "3.9.2",
     "esbuild": "0.28.2",
     "eslint": "9.39.5",
     "globals": "17.11.0",

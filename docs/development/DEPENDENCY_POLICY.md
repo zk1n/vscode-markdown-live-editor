@@ -63,6 +63,16 @@ Reasons:
 - Markdown language support
 - no frontend framework required
 
+### `@vscode/vsce` 3.9.2
+
+VSIX packaging の development-only CLI として追加する。version は lockfile を含め exact に固定する。
+
+- license: MIT
+- maintenance: VS Code extension packaging の公式 CLI として VS Code documentation が案内する
+- scope / cost: package と VSIX manifest 構築のための transitive dependencies が増える。extension runtime bundle には含めない
+- security: CI は `vsce package --no-dependencies` だけを使い、publish command、publisher credential、Marketplace token、remote write を使わない。生成 VSIX の ZIP entry を project-owned script で allowlist 検証する
+- replaceability: package boundary は npm script と project-owned validation script に限定し、extension runtime は `vsce` API に依存しない
+
 ### `codemirror-live-markdown`
 
 Candidate only.
