@@ -33,6 +33,7 @@ import {
 import {
   decodeHostPresentationMessage,
   type EditorCommandMessage,
+  type EditorNavigationMessage,
   type HostPresentationMessage,
   type RestoreHistoryFocusMessage,
   type WebviewPresentationMessage,
@@ -204,6 +205,18 @@ class MarkdownWebviewController {
     if (usesBarrierKeymap(bootstrap.diagnosticMode)) {
       extensions.push(
         Prec.highest(
+          EditorView.domEventHandlers({
+            keydown: (event): boolean => {
+              if (event.key === "Tab") {
+                this.recordTabKey(event);
+              }
+              return false;
+            },
+          }),
+        ),
+      );
+      extensions.push(
+        Prec.highest(
           keymap.of([
             ...createBarrierKeymap((action): void => {
               this.requestBarrier(action);
@@ -299,6 +312,9 @@ class MarkdownWebviewController {
       return;
     }
     switch (message.kind) {
+      case "editor-navigation":
+        this.navigateToPosition(message);
+        return;
       case "editor-configuration":
         if (message.revision <= this.editorConfigurationRevision) {
           return;
@@ -397,6 +413,114 @@ class MarkdownWebviewController {
       !this.composition.isActive &&
       !this.view.composing
     );
+  }
+
+  private navigateToPosition(message: EditorNavigationMessage): void {
+    const blockedReason = this.presentationNavigationBlockedReason(message);
+    if (blockedReason !== undefined) {
+      this.diagnostics.record("status.navigation.rejected", {
+        documentVersion: message.documentVersion,
+        reason: blockedReason,
+      });
+      return;
+    }
+    const document = this.view.state.doc;
+    const targetLine = Math.min(Math.max(message.line, 1), document.lines);
+    const line = document.line(targetLine);
+    const targetOffset = line.from + Math.min(Math.max(message.column - 1, 0), line.length);
+    // Selection/focus/scroll are a presentation transaction only: no document
+    // changes, synchronization message, or persistent Undo entry are created.
+    this.view.dispatch({
+      selection: { anchor: targetOffset },
+      effects: EditorView.scrollIntoView(targetOffset, { y: "center" }),
+    });
+    this.view.focus();
+    this.reportEditorState();
+    this.diagnostics.record("status.navigation.applied", {
+      documentVersion: message.documentVersion,
+      line: targetLine,
+      column: targetOffset - line.from + 1,
+    });
+  }
+
+  private presentationNavigationBlockedReason(
+    message: EditorNavigationMessage,
+  ): string | undefined {
+    if (message.documentVersion !== this.documentVersion) {
+      return "stale-version";
+    }
+    if (!this.controllerReady) {
+      return "controller-not-ready";
+    }
+    if (this.recoveryActive) {
+      return "recovery-active";
+    }
+    if (this.composition.isActive || this.view.composing) {
+      return "composition-active";
+    }
+    if (this.inFlightSequence !== undefined || this.pendingEdits.hasPending) {
+      return "local-work-pending";
+    }
+    if (this.barriers.isFrozen) {
+      return "barrier-active";
+    }
+    if (this.view.state.doc.toString() !== this.pendingEdits.authority) {
+      return "authority-mismatch";
+    }
+    return undefined;
+  }
+
+  /** Diagnostic-only: records the Tab gate before CodeMirror's keymap decides. */
+  private recordTabKey(event: KeyboardEvent): void {
+    if (!recordsDiagnosticTrace(this.bootstrap.diagnosticMode)) {
+      return;
+    }
+    const gate = this.tabGateState();
+    this.diagnostics.record("tab.key", {
+      key: event.key,
+      shift: event.shiftKey,
+      handled: gate.editable,
+      controllerReady: gate.controllerReady,
+      disposed: gate.disposed,
+      recoveryActive: gate.recoveryActive,
+      "barriers.isFrozen": gate.barriersFrozen,
+      "composition.isActive": gate.compositionActive,
+      "view.composing": gate.viewComposing,
+      insertSpaces: this.insertSpaces,
+      tabSize: this.tabSize,
+    });
+  }
+
+  private tabGateState(): Readonly<{
+    controllerReady: boolean;
+    disposed: boolean;
+    recoveryActive: boolean;
+    barriersFrozen: boolean;
+    compositionActive: boolean;
+    viewComposing: boolean;
+    editable: boolean;
+  }> {
+    const controllerReady = this.controllerReady;
+    const disposed = this.disposed;
+    const recoveryActive = this.recoveryActive;
+    const barriersFrozen = this.barriers.isFrozen;
+    const compositionActive = this.composition.isActive;
+    const viewComposing = this.view.composing;
+    return {
+      controllerReady,
+      disposed,
+      recoveryActive,
+      barriersFrozen,
+      compositionActive,
+      viewComposing,
+      editable:
+        controllerReady &&
+        !disposed &&
+        !recoveryActive &&
+        !barriersFrozen &&
+        !compositionActive &&
+        !viewComposing,
+    };
   }
 
   private reportEditorState(): void {
@@ -1431,6 +1555,7 @@ function isHostPresentationCandidate(value: unknown): boolean {
   }
   const kind = value["kind"];
   return (
+    kind === "editor-navigation" ||
     kind === "editor-configuration" ||
     kind === "editor-command" ||
     kind === "restore-history-focus" ||

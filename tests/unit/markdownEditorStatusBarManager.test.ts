@@ -9,6 +9,7 @@ import {
   type StatusBarItemLike,
   type StatusCommandRegistry,
   type StatusDocumentPresentationReader,
+  type StatusNavigation,
 } from "../../src/extension/status/MarkdownEditorStatusBarManager.js";
 import { MarkdownEditorSessionRegistry } from "../../src/extension/editor/MarkdownEditorSessionRegistry.js";
 
@@ -30,6 +31,7 @@ describe("MarkdownEditorStatusBarManager", () => {
     expect(items.item("encoding")).toMatchObject({ text: "UTF-8" });
     expect(items.item("eol")).toMatchObject({ text: "CRLF" });
     expect(items.item("language")).toMatchObject({ text: "Markdown" });
+    expect(items.item("lineColumn").command).toBe("vscodeMarkdownLiveEditor.status.navigate");
     expect(items.item("eol").command).toBe("vscodeMarkdownLiveEditor.status.changeEol");
     expect(items.item("indentation").command).toBe(
       "vscodeMarkdownLiveEditor.status.changeIndentation",
@@ -163,6 +165,44 @@ describe("MarkdownEditorStatusBarManager", () => {
     manager.dispose();
   });
 
+  it("sends navigation only after the awaited input remains identity and version current", async () => {
+    const registry = readyRegistry("session-1", "controller-1", editorState());
+    const commands = new RecordingCommands();
+    let resolveChoice: ((value: StatusNavigation | undefined) => void) | undefined;
+    const requests: StatusNavigation[] = [];
+    const manager = new MarkdownEditorStatusBarManager(
+      registry,
+      new RecordingPresentation(),
+      {
+        chooseNavigation: async () =>
+          await new Promise<StatusNavigation | undefined>((resolve): void => {
+            resolveChoice = resolve;
+          }),
+        requestNavigation: (_context, target): void => {
+          requests.push(target);
+        },
+      },
+      new RecordingStatusBarItems(),
+      commands,
+    );
+
+    const action = commands.run("vscodeMarkdownLiveEditor.status.navigate");
+    resolveChoice?.({ line: 9, column: 4 });
+    await action;
+    expect(requests).toEqual([{ line: 9, column: 4 }]);
+
+    const staleAction = commands.run("vscodeMarkdownLiveEditor.status.navigate");
+    registry.reportEditorState(
+      "session-1",
+      "controller-1",
+      editorState({ reportSequence: 2, documentVersion: 8 }),
+    );
+    resolveChoice?.({ line: 1, column: 1 });
+    await staleAction;
+    expect(requests).toEqual([{ line: 9, column: 4 }]);
+    manager.dispose();
+  });
+
   it("hides stale Webview state until it matches the authoritative TextDocument version", () => {
     const registry = readyRegistry("session-1", "controller-1", editorState());
     const items = new RecordingStatusBarItems();
@@ -250,6 +290,8 @@ function editorState(
 
 function completeActions(): StatusActionCallbacks {
   return {
+    chooseNavigation: () => Promise.resolve({ line: 1, column: 1 }),
+    requestNavigation: (): void => undefined,
     chooseEol: () => Promise.resolve("lf"),
     requestEolChange: (): void => undefined,
     chooseIndentation: () => Promise.resolve({ insertSpaces: true, tabSize: 2 }),

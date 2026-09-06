@@ -24,6 +24,8 @@ const expectedEntries = new Set([
   "extension/LICENSE.txt",
   "extension/dist/extension.cjs",
   "extension/dist/webview.js",
+  "extension/l10n/bundle.l10n.json",
+  "extension/l10n/bundle.l10n.ja.json",
 ]);
 
 function readArchiveEntries(archivePath) {
@@ -90,6 +92,8 @@ const stagedFiles = [
   [packageReadme, "README.md"],
   ["dist/extension.cjs", "dist/extension.cjs"],
   ["dist/webview.js", "dist/webview.js"],
+  ["l10n/bundle.l10n.json", "l10n/bundle.l10n.json"],
+  ["l10n/bundle.l10n.ja.json", "l10n/bundle.l10n.ja.json"],
 ];
 
 for (const [source] of stagedFiles) {

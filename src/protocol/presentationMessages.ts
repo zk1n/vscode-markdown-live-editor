@@ -32,6 +32,16 @@ export interface EditorConfigurationMessage extends EditorIdentity {
   readonly tabSize: number;
 }
 
+/** A presentation-only cursor move requested by extension-owned status UI. */
+export interface EditorNavigationMessage extends EditorIdentity {
+  readonly kind: "editor-navigation";
+  readonly documentVersion: number;
+  /** One-based requested source line. The Webview clamps it to its current document. */
+  readonly line: number;
+  /** One-based requested source column. The Webview clamps it to the target line. */
+  readonly column: number;
+}
+
 /** A host UI request that must enter the Webview's existing FIFO boundary. */
 export interface EditorCommandMessage extends EditorIdentity {
   readonly kind: "editor-command";
@@ -60,6 +70,7 @@ export type WebviewPresentationMessage = EditorStateMessage;
 
 export type HostPresentationMessage =
   | EditorConfigurationMessage
+  | EditorNavigationMessage
   | EditorCommandMessage
   | RestoreHistoryFocusMessage
   | StyleSnapshotMessage;
@@ -124,6 +135,24 @@ export function decodeHostPresentationMessage(
   const identity = decodeIdentity(value);
   if (!identity.ok) return identity;
   switch (value["kind"]) {
+    case "editor-navigation": {
+      const documentVersion = readNonNegativeInteger(value["documentVersion"], "documentVersion");
+      const line = readPositiveInteger(value["line"], "line");
+      const column = readPositiveInteger(value["column"], "column");
+      if (!documentVersion.ok) return documentVersion;
+      if (!line.ok) return line;
+      if (!column.ok) return column;
+      return {
+        ok: true,
+        value: {
+          kind: "editor-navigation",
+          ...identity.value,
+          documentVersion: documentVersion.value,
+          line: line.value,
+          column: column.value,
+        },
+      };
+    }
     case "editor-configuration": {
       const revision = readNonNegativeInteger(value["revision"], "revision");
       const tabSize = readPositiveInteger(value["tabSize"], "tabSize");

@@ -181,6 +181,42 @@ describe("LivePreviewEngine", () => {
     engine.dispose();
   });
 
+  it("keeps the Preview-aligned heading rhythm and list gutter as presentation-only CSS", () => {
+    const source =
+      "# one\n## two\n#### four\n##### five\n###### six\n- item\n1. ordered\n- [ ] task";
+    const engine = createLivePreviewEngine();
+    const view = new EditorView({
+      parent: document.body,
+      state: EditorState.create({
+        doc: source,
+        selection: { anchor: source.length },
+        extensions: [engine.extension],
+      }),
+    });
+
+    const h1 = view.contentDOM.querySelector<HTMLElement>(".cm-live-preview-heading-1");
+    const h4 = view.contentDOM.querySelector<HTMLElement>(".cm-live-preview-heading-4");
+    const h5 = view.contentDOM.querySelector<HTMLElement>(".cm-live-preview-heading-5");
+    const h6 = view.contentDOM.querySelector<HTMLElement>(".cm-live-preview-heading-6");
+    const unordered = view.contentDOM.querySelector<HTMLElement>(
+      ".cm-live-preview-list-unordered-marker",
+    );
+    const ordered = view.contentDOM.querySelector<HTMLElement>(
+      ".cm-live-preview-list-ordered-marker",
+    );
+    expect(h1?.closest(".cm-line")?.className).toContain("cm-live-preview-heading-line-1");
+    expect(h4).not.toBeNull();
+    expect(h5).not.toBeNull();
+    expect(h6).not.toBeNull();
+    expect(unordered).not.toBeNull();
+    expect(ordered).not.toBeNull();
+    // Theme/style changes must not alter source or create a transaction.
+    expect(view.state.doc.toString()).toBe(source);
+
+    view.destroy();
+    engine.dispose();
+  });
+
   it("keeps adjacent inline syntax in preview and reveals every marker only inside syntax", () => {
     const cases = [
       ["link", "[label](target.md)"],

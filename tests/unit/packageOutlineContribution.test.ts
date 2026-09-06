@@ -24,8 +24,8 @@ describe("Markdown Outline package contribution", () => {
     expect(manifest.activationEvents).toContain("onView:vscodeMarkdownLiveEditor.markdownOutline");
     expect(manifest.contributes?.views?.["explorer"]).toContainEqual({
       id: "vscodeMarkdownLiveEditor.markdownOutline",
-      name: "Markdown Outline",
-      contextualTitle: "Outline",
+      name: "%view.markdownOutline.name%",
+      contextualTitle: "%view.markdownOutline.contextualTitle%",
     });
   });
 });

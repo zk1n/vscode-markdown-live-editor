@@ -17,6 +17,7 @@ import {
 } from "./editor/MarkdownEditorSessionRegistry.js";
 import { allocatePresentationRevision } from "./editor/presentationRevision.js";
 import { shouldWarnForMarkdownTrailingWhitespace } from "./markdownTrailingWhitespace.js";
+import { vscodeLocalizer } from "./localization.js";
 import {
   MARKDOWN_OUTLINE_VIEW_ID,
   NAVIGATE_TO_OUTLINE_HEADING_COMMAND,
@@ -30,6 +31,7 @@ import {
   type StatusActionContext,
   type StatusBarEol,
   type StatusIndentation,
+  type StatusNavigation,
 } from "./status/MarkdownEditorStatusBarManager.js";
 
 const MARKDOWN_EDITOR_VIEW_TYPE = "vscodeMarkdownLiveEditor.editor";
@@ -62,6 +64,10 @@ export function activate(context: vscode.ExtensionContext): void {
     editorSessions,
     new VscodeStatusDocumentPresentationReader(MARKDOWN_EDITOR_VIEW_TYPE),
     {
+      chooseNavigation,
+      requestNavigation: (action, target): void => {
+        postEditorNavigation(editorSessions, action, target);
+      },
       chooseEol: chooseEndOfLine,
       requestEolChange: (action, target): void => {
         postEditorCommand(editorSessions, action, "set-eol", target);
@@ -164,10 +170,25 @@ async function chooseEndOfLine(
       { label: "CRLF", value: "crlf" as const },
     ],
     {
-      placeHolder: `Select line ending (current: ${current === "crlf" ? "CRLF" : "LF"})`,
+      placeHolder: vscodeLocalizer.t(
+        "Select line ending (current: {0})",
+        current === "crlf" ? "CRLF" : "LF",
+      ),
     },
   );
   return choice?.value;
+}
+
+async function chooseNavigation(): Promise<StatusNavigation | undefined> {
+  const value = await vscode.window.showInputBox({
+    prompt: vscodeLocalizer.t("Go to line and column"),
+    placeHolder: vscodeLocalizer.t("Line, Column"),
+    validateInput: (candidate): string | undefined =>
+      parseNavigation(candidate) === undefined
+        ? vscodeLocalizer.t("Enter positive line and column numbers separated by a comma.")
+        : undefined,
+  });
+  return value === undefined ? undefined : parseNavigation(value);
 }
 
 async function chooseIndentation(
@@ -175,11 +196,11 @@ async function chooseIndentation(
 ): Promise<StatusIndentation | undefined> {
   const choice = await vscode.window.showQuickPick(
     [
-      { label: "Indent Using Spaces", value: "spaces" as const },
-      { label: "Indent Using Tabs", value: "tabs" as const },
-      { label: "Change Tab Size…", value: "size" as const },
+      { label: vscodeLocalizer.t("Indent Using Spaces"), value: "spaces" as const },
+      { label: vscodeLocalizer.t("Indent Using Tabs"), value: "tabs" as const },
+      { label: vscodeLocalizer.t("Change Tab Size…"), value: "size" as const },
     ],
-    { placeHolder: "Change Markdown Live Editor indentation" },
+    { placeHolder: vscodeLocalizer.t("Change Markdown Live Editor indentation") },
   );
   if (choice?.value === "spaces" || choice?.value === "tabs") {
     return {
@@ -190,22 +211,22 @@ async function chooseIndentation(
   if (choice?.value !== "size") {
     return undefined;
   }
-  const value = await vscode.window.showInputBox({
-    prompt: "Tab size (1–32)",
-    value: String(context.editorState.tabSize),
-    validateInput: (candidate): string | undefined => {
-      const tabSize = Number(candidate);
-      return Number.isSafeInteger(tabSize) && tabSize >= 1 && tabSize <= 32
-        ? undefined
-        : "Enter an integer from 1 through 32.";
+  const tabSize = await vscode.window.showQuickPick(
+    Array.from({ length: 8 }, (_unused, index) => index + 1).map((value) => ({
+      label: String(value),
+      value,
+    })),
+    {
+      placeHolder: vscodeLocalizer.t("Select tab size"),
+      title: vscodeLocalizer.t("Tab Size"),
     },
-  });
-  if (value === undefined) {
+  );
+  if (tabSize === undefined) {
     return undefined;
   }
   return {
     insertSpaces: context.editorState.insertSpaces,
-    tabSize: Number(value),
+    tabSize: tabSize.value,
   };
 }
 
@@ -279,6 +300,39 @@ function postEditorConfiguration(
       ...target,
     }),
   );
+}
+
+function postEditorNavigation(
+  sessions: MarkdownEditorSessionRegistry,
+  context: StatusActionContext,
+  target: StatusNavigation,
+): void {
+  const active = currentActionSession(sessions, context);
+  const post = active?.handle.postPresentationMessage;
+  if (active === undefined || post === undefined) {
+    return;
+  }
+  void Promise.resolve(
+    post({
+      kind: "editor-navigation",
+      protocolVersion: PROTOCOL_VERSION,
+      ...context.identity,
+      documentVersion: context.documentVersion,
+      ...target,
+    }),
+  );
+}
+
+function parseNavigation(value: string): StatusNavigation | undefined {
+  const match = /^\s*(\d+)\s*,\s*(\d+)\s*$/u.exec(value);
+  if (match === null) {
+    return undefined;
+  }
+  const line = Number(match[1]);
+  const column = Number(match[2]);
+  return Number.isSafeInteger(line) && line > 0 && Number.isSafeInteger(column) && column > 0
+    ? { line, column }
+    : undefined;
 }
 
 function currentActionSession(
