@@ -13,7 +13,7 @@ describe("MarkdownEditorSessionRegistry", () => {
 
     expect(registry.activeSession?.sessionId).toBe("session-1");
 
-    registry.markActive("session-2");
+    registry.markViewState("session-2", true);
     expect(registry.activeSession?.sessionId).toBe("session-2");
   });
 
@@ -25,7 +25,7 @@ describe("MarkdownEditorSessionRegistry", () => {
 
     registry.register(first, true);
     registry.register(second, false);
-    registry.markActive("session-2");
+    registry.markViewState("session-2", true);
     const thirdDisposable = registry.register(third, true);
 
     expect(registry.activeSession?.sessionId).toBe("session-3");
@@ -49,7 +49,7 @@ describe("MarkdownEditorSessionRegistry", () => {
     registry.register(createSession("session-4"), true);
 
     registry.register(createSession("session-5"), true);
-    registry.markActive("session-4");
+    registry.markViewState("session-4", true);
     expect(registry.activeSession?.sessionId).toBe("session-4");
   });
 
@@ -63,7 +63,7 @@ describe("MarkdownEditorSessionRegistry", () => {
     registry.register(first, true);
     expect(listener).toHaveBeenCalledTimes(1);
 
-    registry.markActive("session-2");
+    registry.markViewState("session-2", true);
     expect(listener).toHaveBeenCalledTimes(1);
 
     const secondDisposable = registry.register(second, false);
@@ -73,7 +73,7 @@ describe("MarkdownEditorSessionRegistry", () => {
     expect(listener).toHaveBeenCalledTimes(3);
 
     disposable.dispose();
-    registry.markActive("session-1");
+    registry.markViewState("session-1", true);
     expect(listener).toHaveBeenCalledTimes(3);
   });
 
@@ -85,8 +85,65 @@ describe("MarkdownEditorSessionRegistry", () => {
     expect(() => registry.register(first, false)).toThrow("already registered");
     expect(registry.activeSession?.sessionId).toBe("session-1");
 
-    registry.markActive("does-not-exist");
+    registry.markViewState("does-not-exist", true);
     expect(registry.activeSession?.sessionId).toBe("session-1");
+  });
+
+  it("keeps status authority only while a Live Editor panel is active", () => {
+    const registry = new MarkdownEditorSessionRegistry();
+    registry.register(createSession("session-1"), true);
+
+    registry.replaceController("session-1", "controller-1");
+    expect(registry.activeStatusSession).toBeUndefined();
+
+    expect(registry.reportEditorState("session-1", "controller-1", editorState(1))).toBe(true);
+    expect(registry.activeStatusSession).toMatchObject({
+      handle: { documentUri: "file:///note.md", sessionId: "session-1" },
+      controllerId: "controller-1",
+      editorState: { reportSequence: 1 },
+    });
+
+    registry.markViewState("session-1", false);
+    expect(registry.activeStatusSession).toBeUndefined();
+    expect(registry.activeSession?.sessionId).toBe("session-1");
+  });
+
+  it("clears state when a controller is replaced and rejects stale reports", () => {
+    const registry = new MarkdownEditorSessionRegistry();
+    registry.register(createSession("session-1"), true);
+    registry.replaceController("session-1", "controller-1");
+    expect(registry.reportEditorState("session-1", "controller-1", editorState(4))).toBe(true);
+    expect(registry.reportEditorState("session-1", "controller-1", editorState(4))).toBe(false);
+    expect(registry.reportEditorState("session-1", "controller-1", editorState(3))).toBe(false);
+
+    registry.replaceController("session-1", "controller-2");
+    expect(registry.activeStatusSession).toBeUndefined();
+    expect(registry.reportEditorState("session-1", "controller-1", editorState(5))).toBe(false);
+    expect(registry.reportEditorState("session-1", "controller-2", editorState(1))).toBe(true);
+    expect(registry.activeStatusSession?.editorState.reportSequence).toBe(1);
+  });
+
+  it("keeps same-URI split panels independent and never closes into inactive status authority", () => {
+    const registry = new MarkdownEditorSessionRegistry();
+    const first = registry.register(createSession("session-1"), true);
+    registry.replaceController("session-1", "controller-1");
+    registry.reportEditorState("session-1", "controller-1", editorState(1));
+
+    const second = registry.register(createSession("session-2"), false);
+    registry.replaceController("session-2", "controller-2");
+    registry.reportEditorState("session-2", "controller-2", editorState(9));
+    expect(registry.activeStatusSession?.handle.sessionId).toBe("session-1");
+
+    registry.markViewState("session-2", true);
+    expect(registry.activeStatusSession?.handle.sessionId).toBe("session-2");
+    expect(registry.activeStatusSession?.editorState.reportSequence).toBe(9);
+
+    registry.markViewState("session-2", false);
+    expect(registry.activeStatusSession).toBeUndefined();
+    second.dispose();
+    expect(registry.activeSession?.sessionId).toBe("session-1");
+    expect(registry.activeStatusSession).toBeUndefined();
+    first.dispose();
   });
 });
 
@@ -101,5 +158,35 @@ function createSession(sessionId: string): {
     sessionId,
     reveal: () => undefined,
     postMessage: () => true,
+  };
+}
+
+function editorState(reportSequence: number): {
+  readonly reportSequence: number;
+  readonly documentVersion: number;
+  readonly selectionAnchor: number;
+  readonly selectionHead: number;
+  readonly line: number;
+  readonly column: number;
+  readonly focused: boolean;
+  readonly composing: boolean;
+  readonly recoveryActive: boolean;
+  readonly barrierActive: boolean;
+  readonly insertSpaces: boolean;
+  readonly tabSize: number;
+} {
+  return {
+    reportSequence,
+    documentVersion: 7,
+    selectionAnchor: 3,
+    selectionHead: 3,
+    line: 1,
+    column: 2,
+    focused: true,
+    composing: false,
+    recoveryActive: false,
+    barrierActive: false,
+    insertSpaces: true,
+    tabSize: 2,
   };
 }

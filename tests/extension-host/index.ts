@@ -20,6 +20,8 @@ import { VscodeDocumentPort } from "../../src/extension/sync/VscodeDocumentPort.
 
 const COMMAND_ID = "vscodeMarkdownLiveEditor.showProjectInfo";
 const OUTLINE_COMMAND_ID = "vscodeMarkdownLiveEditor.navigateToOutlineHeading";
+const UNDO_COMMAND_ID = "vscodeMarkdownLiveEditor.undo";
+const REDO_COMMAND_ID = "vscodeMarkdownLiveEditor.redo";
 const VIEW_TYPE = "vscodeMarkdownLiveEditor.editor";
 const EXTENSION_ID = "local-dev.vscode-markdown-live-editor";
 const SMOKE_FILE_NAME = "extension-host-smoke.md";
@@ -30,6 +32,7 @@ const COMPOSITION_GROUPING_FILE_NAME = "extension-host-composition-grouping.md";
 const SAVE_PROBE_FILE_NAME = "extension-host-save-probe.md";
 const MIXED_LIST_SAVE_PROBE_FILE_NAME = "extension-host-mixed-list-save-probe.md";
 const OWN_CHANGE_FILE_NAME = "extension-host-own-change.md";
+const EOL_OPERATION_FILE_NAME = "extension-host-set-eol.md";
 const PRODUCTION_LISTENER_FILE_NAME = "extension-host-production-listener.md";
 const AUTOSAVE_TRIM_FILE_NAME = "extension-host-autosave-trim.md";
 const SEQUENCE_LIFECYCLE_FILE_NAME = "extension-host-sequence-lifecycle.md";
@@ -49,6 +52,8 @@ export async function run(): Promise<void> {
     commands.includes(OUTLINE_COMMAND_ID),
     `Command '${OUTLINE_COMMAND_ID}' was not registered.`,
   );
+  assert.ok(commands.includes(UNDO_COMMAND_ID), `Command '${UNDO_COMMAND_ID}' was not registered.`);
+  assert.ok(commands.includes(REDO_COMMAND_ID), `Command '${REDO_COMMAND_ID}' was not registered.`);
   assert.equal(
     await vscode.commands.executeCommand<boolean>(OUTLINE_COMMAND_ID, { invalid: true }),
     false,
@@ -104,6 +109,7 @@ export async function run(): Promise<void> {
   await verifySaveSemantics(workspaceFolder.uri);
   await verifyMixedListSaveParticipantSemantics(workspaceFolder.uri);
   await verifyOwnChangeClassification(workspaceFolder.uri);
+  await verifySetEndOfLineOperation(workspaceFolder.uri);
   await verifyProductionDocumentChangeListener(workspaceFolder.uri);
   await verifyAutosaveTrailingWhitespaceProtection(workspaceFolder.uri);
 }
@@ -585,6 +591,95 @@ async function verifyOwnChangeClassification(workspaceUri: vscode.Uri): Promise<
       "A later external WorkspaceEdit was incorrectly suppressed as own.",
     );
   } finally {
+    await removeSmokeFile(documentUri);
+  }
+}
+
+/** Verifies the public WorkspaceEdit EOL path without a hidden TextEditor. */
+async function verifySetEndOfLineOperation(workspaceUri: vscode.Uri): Promise<void> {
+  const documentUri = vscode.Uri.joinPath(workspaceUri, EOL_OPERATION_FILE_NAME);
+  await removeSmokeFile(documentUri);
+
+  try {
+    const nativeCrlfText = "before\r\nafter\r\n";
+    const canonicalText = "before\nafter\n";
+    await vscode.workspace.fs.writeFile(documentUri, new TextEncoder().encode(nativeCrlfText));
+    const document = await vscode.workspace.openTextDocument(documentUri);
+    assert.equal(document.eol, vscode.EndOfLine.CRLF, "The EOL fixture did not open as CRLF.");
+    await vscode.commands.executeCommand("vscode.openWith", documentUri, VIEW_TYPE);
+    assertCustomEditorOpened(documentUri);
+
+    const port = new VscodeDocumentPort();
+    const observations: { readonly classification: "own" | "external" }[] = [];
+    const subscription = vscode.workspace.onDidChangeTextDocument((event): void => {
+      if (event.document.uri.toString() === documentUri.toString()) {
+        observations.push({ classification: port.classifyDocumentChange(event) });
+      }
+    });
+    let result: DocumentPortResult;
+    try {
+      result = await port.setEndOfLine(
+        documentUri.toString(),
+        document.version,
+        "lf",
+        "extension-host-set-eol",
+      );
+    } finally {
+      subscription.dispose();
+    }
+
+    assertPortApplied(result, "The public WorkspaceEdit EOL operation was rejected.");
+    assert.equal(document.eol, vscode.EndOfLine.LF, "The requested LF EOL was not applied.");
+    assert.equal(
+      document.getText(),
+      canonicalText,
+      "The EOL operation changed canonical document text.",
+    );
+    assert.equal(result.snapshot.text, canonicalText, "The port did not return canonical LF text.");
+    assert.ok(
+      observations.length > 0,
+      "The EOL operation did not emit a TextDocument change event.",
+    );
+    assert.ok(
+      observations.every(({ classification }) => classification === "own"),
+      "The exact port-owned EOL event was not classified as own.",
+    );
+
+    assert.equal(await document.save(), true, "The EOL operation did not save.");
+    assert.equal(
+      new TextDecoder().decode(await vscode.workspace.fs.readFile(documentUri)),
+      canonicalText,
+      "Disk did not retain requested LF EOL.",
+    );
+
+    const undo = await port.undoDocument(documentUri.toString(), "extension-host-set-eol-undo");
+    assertPortApplied(undo, "Undo after the EOL operation was rejected.");
+    assert.equal(document.eol, vscode.EndOfLine.CRLF, "Undo did not restore CRLF.");
+    assert.equal(document.getText(), nativeCrlfText, "Undo did not restore native CRLF text.");
+    assert.equal(undo.snapshot.text, canonicalText, "Undo changed canonical protocol text.");
+
+    const redo = await port.redoDocument(documentUri.toString(), "extension-host-set-eol-redo");
+    assertPortApplied(redo, "Redo after the EOL operation was rejected.");
+    assert.equal(document.eol, vscode.EndOfLine.LF, "Redo did not restore LF.");
+    assert.equal(document.getText(), canonicalText, "Redo changed canonical document text.");
+    assert.equal(redo.snapshot.text, canonicalText, "Redo changed canonical protocol text.");
+
+    const crlf = await port.setEndOfLine(
+      documentUri.toString(),
+      document.version,
+      "crlf",
+      "extension-host-set-eol-crlf",
+    );
+    assertPortApplied(crlf, "The LF to CRLF operation was rejected.");
+    assert.equal(document.eol, vscode.EndOfLine.CRLF, "The requested CRLF EOL was not applied.");
+    assert.equal(await document.save(), true, "The CRLF EOL operation did not save.");
+    assert.equal(
+      new TextDecoder().decode(await vscode.workspace.fs.readFile(documentUri)),
+      nativeCrlfText,
+      "Disk did not retain requested CRLF EOL.",
+    );
+  } finally {
+    await closeCustomEditor(documentUri);
     await removeSmokeFile(documentUri);
   }
 }

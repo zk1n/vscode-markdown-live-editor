@@ -28,6 +28,8 @@
   ],
   "activationEvents": [
     "onCommand:vscodeMarkdownLiveEditor.showProjectInfo",
+    "onCommand:vscodeMarkdownLiveEditor.undo",
+    "onCommand:vscodeMarkdownLiveEditor.redo",
     "onCustomEditor:vscodeMarkdownLiveEditor.editor",
     "onView:vscodeMarkdownLiveEditor.markdownOutline"
   ],
@@ -51,6 +53,13 @@
             "preview"
           ],
           "markdownDescription": "Development-only ATOK layer-isolation mode. `raw-cm6` is local CodeMirror only; `markdown` adds the Markdown language; `sync` adds project document sync; `preview` adds live preview and the custom Save/Undo/Redo keymap. Diagnostic modes never constitute a release configuration."
+        },
+        "vscodeMarkdownLiveEditor.customCss": {
+          "type": "string",
+          "default": "",
+          "scope": "window",
+          "restricted": true,
+          "markdownDescription": "Optional User Settings literal CSS applied after the built-in Live Editor style. `@import`, `url()`, external resources, and CSS larger than 64 KiB are rejected. A trusted owning workspace may additionally provide `.vscode/markdown-live-editor.css`."
         }
       }
     },
@@ -62,8 +71,49 @@
       {
         "command": "vscodeMarkdownLiveEditor.copyDiagnostics",
         "title": "Markdown Live Editor: Copy Diagnostic Metadata"
+      },
+      {
+        "command": "vscodeMarkdownLiveEditor.undo",
+        "title": "Markdown Live Editor: Undo"
+      },
+      {
+        "command": "vscodeMarkdownLiveEditor.redo",
+        "title": "Markdown Live Editor: Redo"
       }
     ],
+    "keybindings": [
+      {
+        "command": "vscodeMarkdownLiveEditor.undo",
+        "key": "ctrl+z",
+        "mac": "cmd+z",
+        "when": "activeCustomEditorId == vscodeMarkdownLiveEditor.editor"
+      },
+      {
+        "command": "vscodeMarkdownLiveEditor.redo",
+        "key": "ctrl+y",
+        "when": "activeCustomEditorId == vscodeMarkdownLiveEditor.editor"
+      },
+      {
+        "command": "vscodeMarkdownLiveEditor.redo",
+        "key": "ctrl+shift+z",
+        "mac": "cmd+shift+z",
+        "when": "activeCustomEditorId == vscodeMarkdownLiveEditor.editor"
+      }
+    ],
+    "menus": {
+      "menubar/edit": [
+        {
+          "command": "vscodeMarkdownLiveEditor.undo",
+          "when": "activeCustomEditorId == vscodeMarkdownLiveEditor.editor",
+          "group": "1_do@1"
+        },
+        {
+          "command": "vscodeMarkdownLiveEditor.redo",
+          "when": "activeCustomEditorId == vscodeMarkdownLiveEditor.editor",
+          "group": "1_do@2"
+        }
+      ]
+    },
     "customEditors": [
       {
         "viewType": "vscodeMarkdownLiveEditor.editor",

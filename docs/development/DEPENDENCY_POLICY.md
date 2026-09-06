@@ -23,6 +23,23 @@ Dependencies are not free. Evaluate:
 - major upgrades require explicit review.
 - security updates may be expedited but still require tests.
 
+## GitHub Dependabot Intake / Development authority
+
+GitHub Dependabotは`dependency update inbox / notification / public projection`として維持する。GitLab / Developmentが
+実装、検証、merge historyのauthoritative sourceであり、GitHub Dependabot PRをmergeまたはcherry-pickしない。
+
+1. PRのdependency、差分種別、release notes、CI、breaking change、現行engine / peer / editor boundaryとの互換性を調べる。
+2. 非互換、CI FAIL、意図しないminimum runtime引上げは`REJECTED`とし、Development MRを作らない。
+3. 採用品は最新Development `develop`から原則PRごとの独立maintenance branchを作り、同等変更を新規に生成する。
+4. `npm ci`、`npm run check`、`npm run build`、`npm run package:vsix`、`git diff --check`を必須とする。
+   Editor runtime dependencyは関連Extension Host / Human regressionを追加し、toolchain-only更新に不要なHuman matrixを課さない。
+5. GREEN後だけ通常GitLab integrationで`develop`へ統合し、正常なpublic projectionを生成する。GitHub `develop`で同等以上の
+   versionを確認してからDependabot PRを理由付きcloseする。Rejectはprojectionを待たずcloseできる。
+6. GitLab MR APIを利用できない場合もbranch / commit / push、MR title / body / targetをhandoffし、権限を迂回しない。
+
+1 PR = 1 MRをdefaultとし、不可分なdependencyだけgroupingできる。現在のintake dispositionは
+[`DEPENDABOT_INTAKE.md`](DEPENDABOT_INTAKE.md)に記録する。`.github/dependabot.yml`は削除しない。
+
 ## Initial choices
 
 ### Node.js 24 LTS

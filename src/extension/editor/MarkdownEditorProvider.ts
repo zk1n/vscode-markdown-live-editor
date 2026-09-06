@@ -12,9 +12,24 @@ import type {
   DocumentSyncCoordinator,
   WebviewEndpoint,
 } from "../../core/sync/documentSyncCoordinator.js";
-import { decodeEditorReadyMessage } from "../../protocol/messages.js";
+import {
+  decodeEditorReadyMessage,
+  decodeWebviewToHostMessage,
+  type OperationAcknowledgement,
+} from "../../protocol/messages.js";
 import { PROTOCOL_VERSION } from "../../protocol/messages.js";
+import {
+  decodeEditorStateMessage,
+  type HostPresentationMessage,
+} from "../../protocol/presentationMessages.js";
+import {
+  CustomCssSession,
+  type CustomCssHost,
+  type CustomCssSnapshot,
+} from "../styles/customCss.js";
+import { VscodeCustomCssHost } from "../styles/vscodeCustomCssHost.js";
 import type { MarkdownEditorSessionRegistry } from "./MarkdownEditorSessionRegistry.js";
+import { allocatePresentationRevision } from "./presentationRevision.js";
 
 interface MarkdownEditorBootstrap {
   readonly diagnosticMode: DiagnosticMode;
@@ -30,6 +45,8 @@ export interface MarkdownEditorProviderOptions {
   readonly diagnostics?: DiagnosticLog;
   readonly onCustomEditorOpened?: (document: vscode.TextDocument) => void;
   readonly sessionRegistry?: MarkdownEditorSessionRegistry;
+  readonly customCssHost?: CustomCssHost;
+  readonly viewType?: string;
   readonly webviewScriptPath: vscode.Uri;
 }
 
@@ -59,9 +76,16 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
     const documentUri = document.uri.toString();
     const sessionId = randomUUID();
     const diagnostics = this.options.diagnostics ?? disabledDiagnosticLog;
+    const acknowledgements = new Map<number, OperationAcknowledgement>();
     diagnostics.record("provider.session.created", { documentUri, sessionId });
     const endpoint: WebviewEndpoint = {
       postMessage: (message): void => {
+        if (
+          message.kind === "operation-ack" &&
+          (message.operation === "undo" || message.operation === "redo")
+        ) {
+          acknowledgements.set(message.sequence, message);
+        }
         void webview.postMessage(message).then(
           (delivered): void => {
             diagnostics.record("provider.webview.post", {
@@ -83,6 +107,7 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
 
     if (usesDocumentSync(this.options.diagnosticMode)) {
       return this.openSyncedSession(
+        document,
         webview,
         documentUri,
         sessionId,
@@ -90,6 +115,7 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
         diagnostics,
         webviewPanel,
         cancellationToken,
+        acknowledgements,
       );
     }
 
@@ -103,6 +129,7 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
   }
 
   private async openSyncedSession(
+    document: vscode.TextDocument,
     webview: vscode.Webview,
     documentUri: string,
     sessionId: string,
@@ -110,12 +137,92 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
     diagnostics: DiagnosticLog,
     webviewPanel: vscode.WebviewPanel,
     cancellationToken: vscode.CancellationToken,
+    acknowledgements: Map<number, OperationAcknowledgement>,
   ): Promise<void> {
     const lifecycle = { disposed: false };
     let receiveDisposable: vscode.Disposable = vscode.Disposable.from();
     let trackingDisposable: vscode.Disposable = vscode.Disposable.from();
     let trackingReady = false;
     let controllerActivationOrdinal = 0;
+    let currentControllerId: string | undefined;
+    let styleRevision = 1;
+    let latestStyle: CustomCssSnapshot | undefined;
+    let customCssSession: CustomCssSession | undefined;
+    const customCssHost = this.options.customCssHost ?? new VscodeCustomCssHost();
+    const postPresentation = (message: HostPresentationMessage): void => {
+      void webview.postMessage(message);
+    };
+    const sendConfiguration = (): void => {
+      if (currentControllerId === undefined || lifecycle.disposed) {
+        return;
+      }
+      const configuration = resolveEditorConfiguration(document);
+      postPresentation({
+        kind: "editor-configuration",
+        protocolVersion: PROTOCOL_VERSION,
+        documentUri,
+        sessionId,
+        controllerId: currentControllerId,
+        revision: allocatePresentationRevision(),
+        ...configuration,
+      });
+    };
+    const sendLatestStyle = (): void => {
+      if (currentControllerId === undefined || latestStyle === undefined || lifecycle.disposed) {
+        return;
+      }
+      postPresentation({
+        kind: "style-snapshot",
+        protocolVersion: PROTOCOL_VERSION,
+        documentUri,
+        sessionId,
+        controllerId: currentControllerId,
+        revision: styleRevision,
+        css: latestStyle.css,
+      });
+      styleRevision += 1;
+    };
+    const recreateCustomCssSession = (): void => {
+      customCssSession?.dispose();
+      customCssSession = new CustomCssSession(customCssHost, {
+        documentUri: document.uri,
+        getUserCss: (): unknown =>
+          vscode.workspace
+            .getConfiguration("vscodeMarkdownLiveEditor", document.uri)
+            .inspect<unknown>("customCss")?.globalValue,
+        onDidUpdate: (snapshot): void => {
+          if (lifecycle.disposed) {
+            return;
+          }
+          latestStyle = snapshot;
+          diagnostics.record("provider.style.updated", {
+            sessionId,
+            workspaceStatus: snapshot.workspace.status,
+            userStatus: snapshot.user.status,
+            customCssLength: snapshot.css.length,
+          });
+          sendLatestStyle();
+        },
+      });
+      void customCssSession.start();
+    };
+    const configurationDisposable = vscode.workspace.onDidChangeConfiguration((event): void => {
+      if (
+        event.affectsConfiguration("editor.insertSpaces", document.uri) ||
+        event.affectsConfiguration("editor.tabSize", document.uri)
+      ) {
+        sendConfiguration();
+      }
+      if (event.affectsConfiguration("vscodeMarkdownLiveEditor.customCss", document.uri)) {
+        void customCssSession?.reload();
+      }
+    });
+    const workspaceFoldersDisposable = vscode.workspace.onDidChangeWorkspaceFolders((): void => {
+      recreateCustomCssSession();
+    });
+    const trustDisposable = vscode.workspace.onDidGrantWorkspaceTrust((): void => {
+      recreateCustomCssSession();
+    });
     const disposeSession = (): void => {
       if (lifecycle.disposed) {
         return;
@@ -124,7 +231,14 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
       diagnostics.record("provider.session.disposed", { documentUri, sessionId });
       receiveDisposable.dispose();
       trackingDisposable.dispose();
+      configurationDisposable.dispose();
+      workspaceFoldersDisposable.dispose();
+      trustDisposable.dispose();
+      customCssSession?.dispose();
+      acknowledgements.clear();
       this.coordinator.closeSession(documentUri, sessionId);
+      panelDispose.dispose();
+      cancellationDispose.dispose();
     };
     const panelDispose = webviewPanel.onDidDispose(disposeSession);
     const cancellationDispose = cancellationToken.onCancellationRequested(disposeSession);
@@ -139,8 +253,7 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
     }
     if (!opened.ok) {
       webview.html = createFailureHtml(webview, opened.error);
-      panelDispose.dispose();
-      cancellationDispose.dispose();
+      disposeSession();
       return;
     }
 
@@ -182,6 +295,8 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
               trackingReady = true;
               trackingDisposable = this.registerSession(documentUri, sessionId, webviewPanel);
             }
+            currentControllerId = controllerId;
+            this.options.sessionRegistry?.replaceController(sessionId, controllerId);
             endpoint.postMessage({
               kind: "controller-ready",
               protocolVersion: PROTOCOL_VERSION,
@@ -192,6 +307,12 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
               nextSequence: activated.nextSequence,
               text: activated.snapshot.text,
             });
+            sendConfiguration();
+            if (customCssSession === undefined) {
+              recreateCustomCssSession();
+            } else {
+              sendLatestStyle();
+            }
             diagnostics.record("provider.controller.activated", {
               documentUri,
               sessionId,
@@ -202,7 +323,73 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
           });
         return;
       }
-      void this.coordinator.receive(value, endpoint);
+      if (isEditorStateCandidate(value)) {
+        const report = decodeEditorStateMessage(value);
+        if (
+          report.ok &&
+          report.value.documentUri === documentUri &&
+          report.value.sessionId === sessionId &&
+          report.value.controllerId === currentControllerId &&
+          !lifecycle.disposed
+        ) {
+          this.options.sessionRegistry?.reportEditorState(
+            sessionId,
+            report.value.controllerId,
+            report.value,
+          );
+        }
+        return;
+      }
+      const operation = decodeWebviewToHostMessage(value);
+      const historySequence =
+        operation.ok && (operation.value.kind === "undo" || operation.value.kind === "redo")
+          ? operation.value.sequence
+          : undefined;
+      const historyRequest =
+        operation.ok &&
+        (operation.value.kind === "undo" || operation.value.kind === "redo") &&
+        operation.value.shortcutAttemptId?.startsWith("host-command:") === true
+          ? {
+              requestId: operation.value.shortcutAttemptId.slice("host-command:".length),
+              operation: operation.value.kind,
+              sequence: operation.value.sequence,
+              controllerId: operation.value.controllerId,
+            }
+          : undefined;
+      void this.coordinator.receive(value, endpoint).then((): void => {
+        if (historySequence === undefined) {
+          return;
+        }
+        const acknowledgement = acknowledgements.get(historySequence);
+        acknowledgements.delete(historySequence);
+        if (historyRequest === undefined) {
+          return;
+        }
+        const active = this.options.sessionRegistry?.activeStatusSession;
+        if (acknowledgement === undefined || active === undefined) {
+          return;
+        }
+        if (
+          acknowledgement.operation !== historyRequest.operation ||
+          lifecycle.disposed ||
+          !webviewPanel.active ||
+          currentControllerId !== historyRequest.controllerId ||
+          active.handle.sessionId !== sessionId ||
+          active.controllerId !== historyRequest.controllerId
+        ) {
+          return;
+        }
+        postPresentation({
+          kind: "restore-history-focus",
+          protocolVersion: PROTOCOL_VERSION,
+          documentUri,
+          sessionId,
+          controllerId: historyRequest.controllerId,
+          requestId: historyRequest.requestId,
+          documentVersion: acknowledgement.documentVersion,
+          operation: historyRequest.operation,
+        });
+      });
     });
     webview.html = createWebviewHtml(
       webview,
@@ -295,13 +482,12 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
           webviewPanel.reveal(undefined, false);
         },
         postMessage: (message) => webviewPanel.webview.postMessage(message),
+        postPresentationMessage: (message) => webviewPanel.webview.postMessage(message),
       },
       webviewPanel.active,
     );
     const viewStateRegistration = webviewPanel.onDidChangeViewState((event): void => {
-      if (event.webviewPanel.active) {
-        registry.markActive(sessionId);
-      }
+      registry.markViewState(sessionId, event.webviewPanel.active);
     });
     return vscode.Disposable.from(registration, viewStateRegistration);
   }
@@ -311,6 +497,34 @@ function isEditorReadyCandidate(value: unknown): boolean {
   return (
     typeof value === "object" && value !== null && Reflect.get(value, "kind") === "editor-ready"
   );
+}
+
+function isEditorStateCandidate(value: unknown): boolean {
+  return (
+    typeof value === "object" && value !== null && Reflect.get(value, "kind") === "editor-state"
+  );
+}
+
+function resolveEditorConfiguration(document: vscode.TextDocument): {
+  readonly insertSpaces: boolean;
+  readonly tabSize: number;
+} {
+  const configuration = vscode.workspace.getConfiguration("editor", {
+    uri: document.uri,
+    languageId: document.languageId,
+  });
+  const configuredInsertSpaces = configuration.get<unknown>("insertSpaces");
+  const configuredTabSize = configuration.get<unknown>("tabSize");
+  return {
+    insertSpaces: typeof configuredInsertSpaces === "boolean" ? configuredInsertSpaces : true,
+    tabSize:
+      typeof configuredTabSize === "number" &&
+      Number.isSafeInteger(configuredTabSize) &&
+      configuredTabSize > 0 &&
+      configuredTabSize <= 32
+        ? configuredTabSize
+        : 4,
+  };
 }
 
 function createWebviewHtml(

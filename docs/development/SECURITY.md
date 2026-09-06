@@ -20,6 +20,15 @@ Scripts must be extension-bundled and nonce-authorized.
 
 Do not use a broad `https:` script source.
 
+## Custom CSS
+
+Custom CSSはUser Settingsのliteralと、trusted workspaceでactive documentを所有するfolderの固定
+`.vscode/markdown-live-editor.css`だけを読む。任意path、workspace外探索、`@import`、`url()`、resource scheme、
+CSS escape、NUL、malformed UTF-8 / structure、64 KiB/source超過を拒否する。Webviewへは検証済みsnapshotだけを渡し、
+dedicated `<style>`をtextとして原子的に置換する。invalid / missing / read errorはbase Styleへfallbackし、編集authorityを止めない。
+
+Native Markdown OutlineはWebview外のVS Code Tree Viewであり、Custom CSS対象にしない。
+
 ## Local files
 
 When resolving images/attachments:

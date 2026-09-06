@@ -12,8 +12,9 @@ import {
   type NavigateToHeadingMessage,
   type WebviewToHostMessage,
 } from "../../src/protocol/messages.js";
+import type { WebviewPresentationMessage } from "../../src/protocol/presentationMessages.js";
 
-type PostedMessage = WebviewToHostMessage | EditorReadyMessage;
+type PostedMessage = WebviewToHostMessage | EditorReadyMessage | WebviewPresentationMessage;
 
 const messages: PostedMessage[] = [];
 
@@ -225,7 +226,7 @@ function dispatchBarrierShortcut(content: HTMLElement, key: "s" | "y" | "z"): Ke
 }
 
 function acknowledge(
-  operation: "edit" | "redo" | "undo",
+  operation: "edit" | "redo" | "set-eol" | "undo",
   sequence: number,
   documentVersion: number,
   text: string,
@@ -242,6 +243,22 @@ function acknowledge(
       },
     }),
   );
+}
+
+function latestControllerIdentity(): {
+  readonly documentUri: string;
+  readonly sessionId: string;
+  readonly controllerId: string;
+} {
+  const ready = [...messages].reverse().find((message) => message.kind === "editor-ready");
+  if (ready === undefined) {
+    throw new Error("The Webview controller did not announce editor-ready.");
+  }
+  return {
+    documentUri: ready.documentUri,
+    sessionId: ready.sessionId,
+    controllerId: ready.controllerId,
+  };
 }
 
 function editMessages(): Extract<WebviewToHostMessage, { readonly kind: "edit" }>[] {
@@ -283,6 +300,247 @@ afterEach((): void => {
   messages.length = 0;
   vi.unstubAllGlobals();
   vi.resetModules();
+});
+
+describe("MarkdownWebviewController M10 presentation controls", () => {
+  it("applies host-resolved tab configuration and reports controller-bound cursor state", async () => {
+    const { content, view } = await createController("a\tb", "off");
+    const identity = latestControllerIdentity();
+    const editsBefore = editMessages().length;
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        data: {
+          kind: "editor-configuration",
+          protocolVersion: PROTOCOL_VERSION,
+          ...identity,
+          revision: 1,
+          insertSpaces: true,
+          tabSize: 8,
+        },
+      }),
+    );
+    view.dispatch({ selection: { anchor: 2 } });
+
+    const report = [...messages].reverse().find((message) => message.kind === "editor-state");
+    expect(report).toMatchObject({
+      kind: "editor-state",
+      controllerId: identity.controllerId,
+      line: 1,
+      column: 9,
+      insertSpaces: true,
+      tabSize: 8,
+    });
+    expect(editMessages()).toHaveLength(editsBefore);
+
+    const tab = new KeyboardEvent("keydown", {
+      bubbles: true,
+      cancelable: true,
+      code: "Tab",
+      key: "Tab",
+    });
+    content.dispatchEvent(tab);
+    expect(tab.defaultPrevented).toBe(true);
+    expect(view.state.doc.toString()).toBe("a\t        b");
+    expect(editMessages().at(-1)).toMatchObject({
+      changes: [expect.objectContaining({ text: "a\t        b" })],
+    });
+    acknowledge("edit", 1, 2, "a\t        b");
+    expect(dispatchBarrierShortcut(content, "z").defaultPrevented).toBe(true);
+    acknowledge("undo", 2, 3, "a\tb");
+    expect(view.state.doc.toString()).toBe("a\tb");
+    expect(dispatchBarrierShortcut(content, "y").defaultPrevented).toBe(true);
+    acknowledge("redo", 3, 4, "a\t        b");
+    expect(view.state.doc.toString()).toBe("a\t        b");
+  });
+
+  it("atomically replaces validated CSS without a CodeMirror transaction or source message", async () => {
+    const { content, view } = await createController("# Heading", "off");
+    const identity = latestControllerIdentity();
+    view.dispatch({ selection: { anchor: 2 } });
+    view.focus();
+    const beforeSelection = view.state.selection.main;
+    const beforeEdits = editMessages().length;
+
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        data: {
+          kind: "style-snapshot",
+          protocolVersion: PROTOCOL_VERSION,
+          ...identity,
+          revision: 1,
+          css: ".cm-content { letter-spacing: 1px; }",
+        },
+      }),
+    );
+    const first = document.getElementById("markdown-live-editor-custom-style");
+    expect(first?.textContent).toContain("letter-spacing");
+
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        data: {
+          kind: "style-snapshot",
+          protocolVersion: PROTOCOL_VERSION,
+          ...identity,
+          revision: 2,
+          css: ".cm-content { letter-spacing: 2px; }",
+        },
+      }),
+    );
+    const second = document.getElementById("markdown-live-editor-custom-style");
+    expect(second).not.toBe(first);
+    expect(second?.textContent).toContain("2px");
+    expect(view.state.doc.toString()).toBe("# Heading");
+    expect(view.state.selection.main).toEqual(beforeSelection);
+    expect(view.hasFocus).toBe(true);
+    expect(document.activeElement).toBe(content);
+    expect(editMessages()).toHaveLength(beforeEdits);
+  });
+
+  it("routes an EOL status command through the existing FIFO without changing canonical text", async () => {
+    const { view } = await createController("a\nb", "off");
+    const identity = latestControllerIdentity();
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        data: {
+          kind: "editor-command",
+          protocolVersion: PROTOCOL_VERSION,
+          ...identity,
+          requestId: "eol-1",
+          documentVersion: 1,
+          command: "set-eol",
+          eol: "crlf",
+        },
+      }),
+    );
+
+    expect(messages.at(-1)).toMatchObject({
+      kind: "set-eol",
+      sequence: 1,
+      documentVersion: 1,
+      eol: "crlf",
+    });
+    acknowledge("set-eol", 1, 2, "a\nb");
+    expect(view.state.doc.toString()).toBe("a\nb");
+    expect(editMessages()).toHaveLength(0);
+  });
+
+  it("restores focus and the mapped caret only after host-authorized Undo completion", async () => {
+    const { content, view } = await createController("abc", "off");
+    const identity = latestControllerIdentity();
+    view.dispatch({ changes: { from: 3, insert: "d" }, selection: { anchor: 4 } });
+    acknowledge("edit", 1, 2, "abcd");
+    content.blur();
+    expect(view.hasFocus).toBe(false);
+
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        data: {
+          kind: "editor-command",
+          protocolVersion: PROTOCOL_VERSION,
+          ...identity,
+          requestId: "history-1",
+          documentVersion: 2,
+          command: "undo",
+        },
+      }),
+    );
+    expect(messages.at(-1)).toMatchObject({ kind: "undo", sequence: 2 });
+    acknowledge("undo", 2, 3, "abc");
+    expect(view.hasFocus).toBe(false);
+    expect(view.state.selection.main.head).toBe(3);
+
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        data: {
+          kind: "restore-history-focus",
+          protocolVersion: PROTOCOL_VERSION,
+          ...identity,
+          controllerId: "stale-controller",
+          requestId: "history-1",
+          documentVersion: 3,
+          operation: "undo",
+        },
+      }),
+    );
+    expect(view.hasFocus).toBe(false);
+
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        data: {
+          kind: "restore-history-focus",
+          protocolVersion: PROTOCOL_VERSION,
+          ...identity,
+          requestId: "history-1",
+          documentVersion: 3,
+          operation: "undo",
+        },
+      }),
+    );
+    expect(view.hasFocus).toBe(true);
+    expect(view.state.selection.main).toMatchObject({ anchor: 3, head: 3 });
+  });
+
+  it("restores a blurred Redo selection only after its matching acknowledgement", async () => {
+    const { content, view } = await createController("abc", "off");
+    const identity = latestControllerIdentity();
+    view.dispatch({ selection: { anchor: 3 } });
+    content.blur();
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        data: {
+          kind: "editor-command",
+          protocolVersion: PROTOCOL_VERSION,
+          ...identity,
+          requestId: "history-redo",
+          documentVersion: 1,
+          command: "redo",
+        },
+      }),
+    );
+    acknowledge("redo", 1, 2, "abcd");
+    expect(view.hasFocus).toBe(false);
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        data: {
+          kind: "restore-history-focus",
+          protocolVersion: PROTOCOL_VERSION,
+          ...identity,
+          requestId: "history-redo",
+          documentVersion: 2,
+          operation: "redo",
+        },
+      }),
+    );
+    expect(view.hasFocus).toBe(true);
+    expect(view.state.selection.main).toMatchObject({ anchor: 4, head: 4 });
+  });
+
+  it("rejects stale controller commands without queueing an operation", async () => {
+    await createController("abc", "off");
+    const identity = latestControllerIdentity();
+    const operationCount = messages.filter(
+      (message) => message.kind === "undo" || message.kind === "redo" || message.kind === "set-eol",
+    ).length;
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        data: {
+          kind: "editor-command",
+          protocolVersion: PROTOCOL_VERSION,
+          ...identity,
+          controllerId: "stale-controller",
+          requestId: "stale-1",
+          documentVersion: 1,
+          command: "undo",
+        },
+      }),
+    );
+    expect(
+      messages.filter(
+        (message) =>
+          message.kind === "undo" || message.kind === "redo" || message.kind === "set-eol",
+      ),
+    ).toHaveLength(operationCount);
+  });
 });
 
 describe("MarkdownWebviewController Live Preview source integrity", () => {
@@ -739,6 +997,42 @@ describe("MarkdownWebviewController Live Preview source integrity", () => {
       expect(view.state.doc.toString()).toBe(source);
       expect(editMessages()).toHaveLength(0);
     }
+  });
+
+  it("applies the preview style foundation as source-neutral line and inline presentation", async () => {
+    const source = [
+      "# Heading",
+      "paragraph",
+      "",
+      "- unordered",
+      "1. ordered",
+      "- [x] checked task",
+      "> quote",
+      "**strong** _emphasis_ ~~strike~~ `code` [link](target.md)",
+      "```ts",
+      "const value = 1;",
+      "```",
+      "---",
+    ].join("\n");
+    const { content, view } = await createController(source, "preview");
+
+    expect(view.state.doc.toString()).toBe(source);
+    expect(editMessages()).toEqual([]);
+    expect(content.querySelector(".cm-live-preview-heading-1")).not.toBeNull();
+    expect(content.querySelector(".cm-live-preview-strong")).not.toBeNull();
+    expect(content.querySelector(".cm-live-preview-emphasis")).not.toBeNull();
+    expect(content.querySelector(".cm-live-preview-strikethrough")).not.toBeNull();
+    expect(content.querySelector(".cm-live-preview-inline-code")).not.toBeNull();
+    expect(content.querySelector(".cm-live-preview-link")).not.toBeNull();
+    expect(content.querySelector(".cm-live-preview-list-unordered-marker")).not.toBeNull();
+    expect(content.querySelector(".cm-live-preview-list-ordered-marker")).not.toBeNull();
+    expect(content.querySelector(".cm-live-preview-task-checked")).not.toBeNull();
+    expect(content.querySelector(".cm-live-preview-blockquote")).not.toBeNull();
+    expect(content.querySelector(".cm-live-preview-fenced-code-start")).not.toBeNull();
+    expect(content.querySelector(".cm-live-preview-fenced-code-end")).not.toBeNull();
+    expect(content.querySelector(".cm-live-preview-horizontal-rule")).not.toBeNull();
+    expect(content.querySelector(".cm-line.cm-live-preview-heading-line-1")).not.toBeNull();
+    expect(content.querySelector(".cm-line.cm-live-preview-blockquote-line")).not.toBeNull();
   });
 
   it("does not intercept line-boundary deletion without Live Preview or during recovery", async () => {

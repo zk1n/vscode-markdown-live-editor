@@ -13,6 +13,9 @@ Pure logic and state machines:
 - path validation later
 - Live Previewの保守的な構文認識、fenced / inline code除外、selection時のsource reveal
 - Live Preview decorationがsource textを変更しないこと
+- Tab / Shift+Tabのcaret、selection、multi-line、Spaces / Tabs、tab sizeとcomposition / recovery / barrier gate
+- Status Barのactive session / controller / document version、same-URI split、close / replacement時のstale rejection
+- Custom CSSのfixed owning-folder、trust、UTF-8 / size / resource token validation、watcher epoch / dispose
 - attachment naming later
 
 ### Integration
@@ -25,6 +28,8 @@ Component boundaries:
 - reject/resync
 - Save barrier
 - Undo/Redo command ordering
+- host-command Undo / Redo ACK後のfocus restoration identity
+- EOL operationのFIFOとcanonical-LF不変
 
 ### VS Code extension integration
 
@@ -35,6 +40,7 @@ Use VS Code test tooling for:
 - external document changes
 - Undo/Redo integration
 - Save where automation is feasible
+- LF↔CRLF、Undo / Redo、Save後disk EOLとcanonical protocol text
 
 ### Manual
 
@@ -45,6 +51,7 @@ Required where automation cannot faithfully cover OS input behavior:
 - visual caret behavior
 - memory observation
 - extended real-use session
+- light / dark / high contrast、Custom CSS load / reload / fallback
 
 CodeMirror DOM propagation tests and controller/protocol sequence tests prove
 the project-owned route and ordering only. They do not make synthetic events

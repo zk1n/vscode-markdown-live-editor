@@ -34,6 +34,13 @@ export interface ClientEditMessage extends ClientOperationBase {
   readonly changes: readonly WireChange[];
 }
 
+/** Changes only the persisted TextDocument line-ending convention. */
+export interface ClientSetEndOfLineMessage extends ClientOperationBase {
+  readonly kind: "set-eol";
+  readonly documentVersion: number;
+  readonly eol: "lf" | "crlf";
+}
+
 export interface ClientBarrierMessage extends ClientOperationBase {
   readonly kind: "save" | "undo" | "redo";
   readonly shortcutAttemptId?: string;
@@ -49,7 +56,7 @@ export interface ClientDiagnosticMessage {
 }
 
 export type WebviewToHostMessage =
-  ClientEditMessage | ClientBarrierMessage | ClientDiagnosticMessage;
+  ClientEditMessage | ClientSetEndOfLineMessage | ClientBarrierMessage | ClientDiagnosticMessage;
 
 export interface DocumentSnapshotMessage {
   readonly documentUri: string;
@@ -76,13 +83,14 @@ export interface HostMessageCorrelation {
 
 export interface OperationAcknowledgement extends DocumentSnapshotMessage {
   readonly kind: "operation-ack";
-  readonly operation: ClientEditMessage["kind"] | ClientBarrierMessage["kind"];
+  readonly operation:
+    ClientEditMessage["kind"] | ClientSetEndOfLineMessage["kind"] | ClientBarrierMessage["kind"];
   readonly sequence: number;
 }
 
 export interface DocumentUpdateMessage extends DocumentSnapshotMessage {
   readonly kind: "document-update";
-  readonly reason: "opened" | "edit" | "save" | "undo" | "redo" | "external";
+  readonly reason: "opened" | "edit" | "set-eol" | "save" | "undo" | "redo" | "external";
 }
 
 export interface ResyncMessage extends DocumentSnapshotMessage {
@@ -362,6 +370,27 @@ export function decodeWebviewToHostMessage(
     };
   }
 
+  if (kind === "set-eol") {
+    const documentVersion = readNonNegativeInteger(value["documentVersion"], "documentVersion");
+    if (!documentVersion.ok) {
+      return documentVersion;
+    }
+    const eol = value["eol"];
+    if (eol !== "lf" && eol !== "crlf") {
+      return { ok: false, error: "eol must be lf or crlf." };
+    }
+    return {
+      ok: true,
+      value: {
+        kind,
+        protocolVersion: PROTOCOL_VERSION,
+        ...base.value,
+        documentVersion: documentVersion.value,
+        eol,
+      },
+    };
+  }
+
   if (kind === "save" || kind === "undo" || kind === "redo") {
     const shortcutAttemptId = value["shortcutAttemptId"];
     if (
@@ -379,7 +408,7 @@ export function decodeWebviewToHostMessage(
     };
   }
 
-  return { ok: false, error: "kind must be edit, save, undo, or redo." };
+  return { ok: false, error: "kind must be edit, set-eol, save, undo, or redo." };
 }
 
 export function decodeEditorReadyMessage(value: unknown): ProtocolDecodeResult<EditorReadyMessage> {
@@ -611,6 +640,7 @@ export function decodeHostToWebviewMessage(
     const operation = value["operation"];
     if (
       operation !== "edit" &&
+      operation !== "set-eol" &&
       operation !== "save" &&
       operation !== "undo" &&
       operation !== "redo"
@@ -628,6 +658,7 @@ export function decodeHostToWebviewMessage(
     if (
       reason !== "opened" &&
       reason !== "edit" &&
+      reason !== "set-eol" &&
       reason !== "save" &&
       reason !== "undo" &&
       reason !== "redo" &&

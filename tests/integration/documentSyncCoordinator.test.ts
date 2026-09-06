@@ -11,6 +11,7 @@ import { BoundedDiagnosticLog } from "../../src/core/diagnostics/diagnosticLog.j
 import { textFingerprint } from "../../src/core/diagnostics/textFingerprint.js";
 import type {
   ClientEditMessage,
+  ClientSetEndOfLineMessage,
   HostToWebviewMessage,
   WireChange,
 } from "../../src/protocol/messages.js";
@@ -26,6 +27,7 @@ class FakeDocumentPort implements DocumentPort {
   public readonly calls: string[] = [];
   public replacementTextOverride: string | undefined;
   public rejectSave = false;
+  public eol: "lf" | "crlf" = "lf";
 
   public constructor(initialText: string) {
     this.history = [initialText];
@@ -65,6 +67,26 @@ class FakeDocumentPort implements DocumentPort {
         snapshot: this.snapshot(documentUri),
         note: "The dirty document was not saved.",
       });
+    }
+    return Promise.resolve({ kind: "applied", snapshot: this.snapshot(documentUri) });
+  }
+
+  public setEndOfLine(
+    documentUri: string,
+    expectedVersion: number,
+    eol: "lf" | "crlf",
+  ): Promise<DocumentPortResult> {
+    this.calls.push(`set-eol:${eol}`);
+    if (expectedVersion !== this.version) {
+      return Promise.resolve({
+        kind: "rejected",
+        snapshot: this.snapshot(documentUri),
+        note: "Version changed.",
+      });
+    }
+    if (this.eol !== eol) {
+      this.eol = eol;
+      this.version += 1;
     }
     return Promise.resolve({ kind: "applied", snapshot: this.snapshot(documentUri) });
   }
@@ -177,6 +199,23 @@ function fullReplacementEdit(
   };
 }
 
+function setEndOfLine(
+  sequence: number,
+  documentVersion: number,
+  eol: "lf" | "crlf",
+): ClientSetEndOfLineMessage {
+  return {
+    kind: "set-eol",
+    protocolVersion: PROTOCOL_VERSION,
+    documentUri: DOCUMENT_URI,
+    sessionId: "session-a",
+    controllerId: "controller-a",
+    sequence,
+    documentVersion,
+    eol,
+  };
+}
+
 function positionAt(
   text: string,
   offset: number,
@@ -256,6 +295,62 @@ describe("DocumentSyncCoordinator", () => {
     expect(port.calls).toEqual(["replace:A", "replace:A日", "replace:A日😀"]);
     expect(endpoint.messages.filter((message) => message.kind === "operation-ack")).toHaveLength(3);
     expect(endpoint.messages.some((message) => message.kind === "resync")).toBe(false);
+  });
+
+  it("serializes EOL changes with edits, preserves canonical text, and broadcasts set-eol", async () => {
+    const port = new FakeDocumentPort("before\nafter\n");
+    const coordinator = new DocumentSyncCoordinator(port);
+    const endpointA = new RecordingEndpoint();
+    const endpointB = new RecordingEndpoint();
+    await coordinator.openSession(DOCUMENT_URI, "session-a", endpointA);
+    await coordinator.openSession(DOCUMENT_URI, "session-b", endpointB);
+
+    await Promise.all([
+      coordinator.receive(
+        fullReplacementEdit(1, 1, "before\nafter\n", "before\nchanged\n"),
+        endpointA,
+      ),
+      coordinator.receive(setEndOfLine(2, 2, "crlf"), endpointA),
+    ]);
+
+    expect(port.calls).toEqual(["replace:before\nchanged\n", "set-eol:crlf"]);
+    expect(port.eol).toBe("crlf");
+    expect(endpointA.messages).toContainEqual(
+      expect.objectContaining({
+        kind: "operation-ack",
+        operation: "set-eol",
+        sequence: 2,
+        text: "before\nchanged\n",
+      }),
+    );
+    expect(endpointB.messages).toContainEqual(
+      expect.objectContaining({
+        kind: "document-update",
+        reason: "set-eol",
+        documentVersion: 3,
+        text: "before\nchanged\n",
+      }),
+    );
+    expect(endpointA.messages.some((message) => message.kind === "resync")).toBe(false);
+  });
+
+  it("rejects stale EOL requests without changing the EOL", async () => {
+    const port = new FakeDocumentPort("before");
+    const coordinator = new DocumentSyncCoordinator(port);
+    const endpoint = new RecordingEndpoint();
+    await coordinator.openSession(DOCUMENT_URI, "session-a", endpoint);
+    port.applyExternalChange("external");
+
+    await coordinator.receive(setEndOfLine(1, 1, "crlf"), endpoint);
+
+    expect(port.calls).toEqual([]);
+    expect(port.eol).toBe("lf");
+    expect(endpoint.messages.at(-1)).toMatchObject({
+      kind: "resync",
+      reason: "stale-version",
+      nextSequence: 2,
+      text: "external",
+    });
   });
 
   it("acknowledges the origin and sends each edit snapshot only to peer sessions", async () => {
