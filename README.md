@@ -30,12 +30,11 @@ Markdownを開き、`Reopen Editor With...`からMarkdown Live Editorを選択�
 [テスト方針](docs/development/TEST_STRATEGY.md)を参照してください。
 参加方法は[CONTRIBUTING.md](CONTRIBUTING.md)、security報告は[SECURITY.md](SECURITY.md)に記載します。
 
-## 公開履歴
+## CIとpackage
 
-このrepositoryは、選択した公開資産のsnapshotを積み重ねています。
-開発履歴全体や元のcommit metadataは収録していません。
-commitの日付は再現性のための固定値で、開発日時やrelease日時を表しません。
-修正提案はissueまたはpatchで受け付け、管理元で反映した成果を再生成します。
+CIは依存関係をlockfileからinstallし、型・lint・test・build・formatを検証します。
+手動実行またはversion tagで検証済みVSIXをartifactとして保存できます。
+Marketplaceへの自動公開は行いません。[CIとpackageの手順](docs/development/CI_CD.md)を参照してください。
 
 ## License
 
