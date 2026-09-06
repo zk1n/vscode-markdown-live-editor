@@ -1,7 +1,7 @@
 {
   "name": "vscode-markdown-live-editor",
-  "displayName": "Markdown Live Editor",
-  "description": "An Obsidian-like Live Preview Markdown editor for VS Code with ordinary Markdown as the source of truth.",
+  "displayName": "%displayName%",
+  "description": "%description%",
   "version": "0.0.0",
   "private": true,
   "license": "MIT",
@@ -24,8 +24,10 @@
     "dist/webview.js",
     "README.md",
     "CHANGELOG.md",
-    "LICENSE"
+    "LICENSE",
+    "l10n/**"
   ],
+  "l10n": "./l10n",
   "activationEvents": [
     "onCommand:vscodeMarkdownLiveEditor.showProjectInfo",
     "onCommand:vscodeMarkdownLiveEditor.undo",
@@ -40,7 +42,7 @@
       }
     },
     "configuration": {
-      "title": "Markdown Live Editor",
+      "title": "%configuration.title%",
       "properties": {
         "vscodeMarkdownLiveEditor.developmentDiagnosticMode": {
           "type": "string",
@@ -52,33 +54,33 @@
             "sync",
             "preview"
           ],
-          "markdownDescription": "Development-only ATOK layer-isolation mode. `raw-cm6` is local CodeMirror only; `markdown` adds the Markdown language; `sync` adds project document sync; `preview` adds live preview and the custom Save/Undo/Redo keymap. Diagnostic modes never constitute a release configuration."
+          "markdownDescription": "%configuration.developmentDiagnosticMode.markdownDescription%"
         },
         "vscodeMarkdownLiveEditor.customCss": {
           "type": "string",
           "default": "",
           "scope": "window",
           "restricted": true,
-          "markdownDescription": "Optional User Settings literal CSS applied after the built-in Live Editor style. `@import`, `url()`, external resources, and CSS larger than 64 KiB are rejected. A trusted owning workspace may additionally provide `.vscode/markdown-live-editor.css`."
+          "markdownDescription": "%configuration.customCss.markdownDescription%"
         }
       }
     },
     "commands": [
       {
         "command": "vscodeMarkdownLiveEditor.showProjectInfo",
-        "title": "Markdown Live Editor: Show Project Info"
+        "title": "%command.showProjectInfo%"
       },
       {
         "command": "vscodeMarkdownLiveEditor.copyDiagnostics",
-        "title": "Markdown Live Editor: Copy Diagnostic Metadata"
+        "title": "%command.copyDiagnostics%"
       },
       {
         "command": "vscodeMarkdownLiveEditor.undo",
-        "title": "Markdown Live Editor: Undo"
+        "title": "%command.undo%"
       },
       {
         "command": "vscodeMarkdownLiveEditor.redo",
-        "title": "Markdown Live Editor: Redo"
+        "title": "%command.redo%"
       }
     ],
     "keybindings": [
@@ -117,7 +119,7 @@
     "customEditors": [
       {
         "viewType": "vscodeMarkdownLiveEditor.editor",
-        "displayName": "Markdown Live Editor",
+        "displayName": "%customEditor.displayName%",
         "selector": [
           {
             "filenamePattern": "*.md"
@@ -130,8 +132,8 @@
       "explorer": [
         {
           "id": "vscodeMarkdownLiveEditor.markdownOutline",
-          "name": "Markdown Outline",
-          "contextualTitle": "Outline"
+          "name": "%view.markdownOutline.name%",
+          "contextualTitle": "%view.markdownOutline.contextualTitle%"
         }
       ]
     }

@@ -303,6 +303,69 @@ afterEach((): void => {
 });
 
 describe("MarkdownWebviewController M10 presentation controls", () => {
+  it("clamps a status navigation request without a document transaction or edit message", async () => {
+    const { view } = await createController("one\ntwo", "sync");
+    const identity = latestControllerIdentity();
+    const editsBefore = editMessages().length;
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        data: {
+          kind: "editor-navigation",
+          protocolVersion: PROTOCOL_VERSION,
+          ...identity,
+          documentVersion: 1,
+          line: 99,
+          column: 99,
+        },
+      }),
+    );
+
+    expect(view.state.selection.main).toMatchObject({ anchor: 7, head: 7 });
+    expect(view.state.doc.toString()).toBe("one\ntwo");
+    expect(editMessages()).toHaveLength(editsBefore);
+
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        data: {
+          kind: "editor-navigation",
+          protocolVersion: PROTOCOL_VERSION,
+          ...identity,
+          documentVersion: 0,
+          line: 1,
+          column: 1,
+        },
+      }),
+    );
+    expect(view.state.selection.main).toMatchObject({ anchor: 7, head: 7 });
+  });
+
+  it("records diagnostic Tab gate metadata before handling without source text", async () => {
+    const { content } = await createController("x", "sync");
+    const tab = new KeyboardEvent("keydown", {
+      bubbles: true,
+      cancelable: true,
+      key: "Tab",
+      code: "Tab",
+      shiftKey: true,
+    });
+    content.dispatchEvent(tab);
+    const trace = diagnosticMessages().find((message) => message.event === "tab.key");
+    expect(trace?.details).toMatchObject({
+      key: "Tab",
+      shift: true,
+      handled: true,
+      controllerReady: true,
+      disposed: false,
+      recoveryActive: false,
+      "barriers.isFrozen": false,
+      "composition.isActive": false,
+      "view.composing": false,
+      insertSpaces: true,
+      tabSize: 4,
+    });
+    expect(JSON.stringify(trace?.details)).not.toContain("x");
+  });
+
   it("applies host-resolved tab configuration and reports controller-bound cursor state", async () => {
     const { content, view } = await createController("a\tb", "off");
     const identity = latestControllerIdentity();

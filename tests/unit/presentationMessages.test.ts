@@ -59,6 +59,15 @@ describe("presentation message decoding", () => {
   it("decodes configuration, style, and history focus controls", () => {
     expect(
       decodeHostPresentationMessage({
+        kind: "editor-navigation",
+        ...identity,
+        documentVersion: 7,
+        line: 3,
+        column: 5,
+      }),
+    ).toMatchObject({ ok: true, value: { kind: "editor-navigation", line: 3, column: 5 } });
+    expect(
+      decodeHostPresentationMessage({
         kind: "editor-configuration",
         ...identity,
         revision: 3,
@@ -83,6 +92,18 @@ describe("presentation message decoding", () => {
         operation: "redo",
       }),
     ).toMatchObject({ ok: true, value: { kind: "restore-history-focus" } });
+  });
+
+  it("rejects non-positive presentation navigation coordinates", () => {
+    expect(
+      decodeHostPresentationMessage({
+        kind: "editor-navigation",
+        ...identity,
+        documentVersion: 1,
+        line: 0,
+        column: 1,
+      }).ok,
+    ).toBe(false);
   });
 
   it("requires an EOL only for set-eol commands", () => {

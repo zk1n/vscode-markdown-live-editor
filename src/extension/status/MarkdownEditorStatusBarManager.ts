@@ -1,5 +1,7 @@
 import * as vscode from "vscode";
 
+import { vscodeLocalizer, type Localizer } from "../localization.js";
+
 import type {
   ActiveStatusSession,
   MarkdownEditorSessionRegistry,
@@ -38,6 +40,8 @@ export interface StatusDocumentPresentationReader {
 }
 
 export interface StatusActionCallbacks {
+  chooseNavigation?(context: StatusActionContext): Promise<StatusNavigation | undefined>;
+  requestNavigation?(context: StatusActionContext, target: StatusNavigation): Promise<void> | void;
   chooseEol?(
     context: StatusActionContext,
     current: StatusBarEol,
@@ -53,6 +57,11 @@ export interface StatusActionCallbacks {
 export interface StatusIndentation {
   readonly insertSpaces: boolean;
   readonly tabSize: number;
+}
+
+export interface StatusNavigation {
+  readonly line: number;
+  readonly column: number;
 }
 
 export interface StatusBarItemLike extends vscode.Disposable {
@@ -73,6 +82,7 @@ export interface StatusCommandRegistry {
 
 const COMMAND_EOL = "vscodeMarkdownLiveEditor.status.changeEol";
 const COMMAND_INDENTATION = "vscodeMarkdownLiveEditor.status.changeIndentation";
+const COMMAND_LINE_COLUMN = "vscodeMarkdownLiveEditor.status.navigate";
 
 /**
  * Owns the five Custom Editor status items. It contains no document mutation:
@@ -92,6 +102,7 @@ export class MarkdownEditorStatusBarManager implements vscode.Disposable {
     private readonly actions: StatusActionCallbacks,
     items: StatusBarItemFactory = new VscodeStatusBarItemFactory(),
     commands: StatusCommandRegistry = new VscodeStatusCommandRegistry(),
+    private readonly localizer: Localizer = vscodeLocalizer,
   ) {
     this.lineColumn = items.create("vscodeMarkdownLiveEditor.status.lineColumn", 105);
     this.indentation = items.create("vscodeMarkdownLiveEditor.status.indentation", 104);
@@ -104,6 +115,7 @@ export class MarkdownEditorStatusBarManager implements vscode.Disposable {
       }),
       commands.register(COMMAND_EOL, async (): Promise<void> => this.changeEol()),
       commands.register(COMMAND_INDENTATION, async (): Promise<void> => this.changeIndentation()),
+      commands.register(COMMAND_LINE_COLUMN, async (): Promise<void> => this.navigate()),
     ];
     this.refresh();
   }
@@ -136,12 +148,17 @@ export class MarkdownEditorStatusBarManager implements vscode.Disposable {
       return;
     }
 
-    this.lineColumn.text = formatLineColumn(state);
-    this.lineColumn.tooltip = "Markdown Live Editor cursor position";
-    this.lineColumn.command = undefined;
+    this.lineColumn.text = formatLineColumn(state, this.localizer);
+    this.lineColumn.tooltip = this.localizer.t("Markdown Live Editor cursor position");
+    this.lineColumn.command =
+      this.canRequestActions(state) &&
+      this.actions.chooseNavigation !== undefined &&
+      this.actions.requestNavigation !== undefined
+        ? COMMAND_LINE_COLUMN
+        : undefined;
 
-    this.indentation.text = formatIndentation(state);
-    this.indentation.tooltip = "Change Markdown Live Editor indentation settings";
+    this.indentation.text = formatIndentation(state, this.localizer);
+    this.indentation.tooltip = this.localizer.t("Change Markdown Live Editor indentation settings");
     this.indentation.command =
       this.canRequestActions(state) &&
       this.actions.chooseIndentation !== undefined &&
@@ -150,13 +167,15 @@ export class MarkdownEditorStatusBarManager implements vscode.Disposable {
         : undefined;
 
     this.encoding.text = formatEncoding(documentPresentation.encoding);
-    this.encoding.tooltip =
-      "Effective files.encoding setting. Encoding is not inferred from document bytes and cannot be changed here.";
+    this.encoding.tooltip = this.localizer.t(
+      "Effective files.encoding setting. Encoding is not inferred from document bytes and cannot be changed here.",
+    );
     this.encoding.command = undefined;
 
     this.eol.text = documentPresentation.eol === "crlf" ? "CRLF" : "LF";
-    this.eol.tooltip =
-      "Change line ending through the Markdown Live Editor document-action boundary";
+    this.eol.tooltip = this.localizer.t(
+      "Change line ending through the Markdown Live Editor document-action boundary",
+    );
     this.eol.command =
       this.canRequestActions(state) &&
       this.actions.chooseEol !== undefined &&
@@ -165,7 +184,7 @@ export class MarkdownEditorStatusBarManager implements vscode.Disposable {
         : undefined;
 
     this.language.text = "Markdown";
-    this.language.tooltip = "Markdown Live Editor";
+    this.language.tooltip = this.localizer.t("Markdown Live Editor");
     this.language.command = undefined;
     this.showAll();
   }
@@ -209,6 +228,22 @@ export class MarkdownEditorStatusBarManager implements vscode.Disposable {
     await this.actions.requestEolChange(context, target);
   }
 
+  private async navigate(): Promise<void> {
+    const context = this.currentActionContext();
+    if (
+      context === undefined ||
+      this.actions.chooseNavigation === undefined ||
+      this.actions.requestNavigation === undefined
+    ) {
+      return;
+    }
+    const target = await this.actions.chooseNavigation(context);
+    if (target === undefined || !isValidNavigation(target) || !this.isCurrent(context)) {
+      return;
+    }
+    await this.actions.requestNavigation(context, target);
+  }
+
   private async changeIndentation(): Promise<void> {
     const context = this.currentActionContext();
     if (
@@ -238,7 +273,7 @@ export class MarkdownEditorStatusBarManager implements vscode.Disposable {
   }
 
   private canRequestActions(state: MarkdownEditorStateReport): boolean {
-    return !state.recoveryActive;
+    return !state.recoveryActive && !state.composing && !state.barrierActive;
   }
 
   private showAll(): void {
@@ -311,16 +346,16 @@ function toIdentity(active: ActiveStatusSession): ActiveStatusSessionIdentity {
   };
 }
 
-function formatLineColumn(state: MarkdownEditorStateReport): string {
+function formatLineColumn(state: MarkdownEditorStateReport, localizer: Localizer): string {
   const selected = Math.abs(state.selectionHead - state.selectionAnchor);
-  const suffix = selected === 0 ? "" : ` (${String(selected)} selected)`;
-  return `Ln ${String(state.line)}, Col ${String(state.column)}${suffix}`;
+  const suffix = selected === 0 ? "" : localizer.t(" ({0} selected)", selected);
+  return localizer.t("Ln {0}, Col {1}{2}", state.line, state.column, suffix);
 }
 
-function formatIndentation(state: MarkdownEditorStateReport): string {
+function formatIndentation(state: MarkdownEditorStateReport, localizer: Localizer): string {
   return state.insertSpaces
-    ? `Spaces: ${String(state.tabSize)}`
-    : `Tab Size: ${String(state.tabSize)}`;
+    ? localizer.t("Spaces: {0}", state.tabSize)
+    : localizer.t("Tab Size: {0}", state.tabSize);
 }
 
 function formatEncoding(encoding: string): string {
@@ -343,5 +378,14 @@ function isValidIndentation(value: StatusIndentation): boolean {
     typeof value.insertSpaces === "boolean" &&
     Number.isSafeInteger(value.tabSize) &&
     value.tabSize > 0
+  );
+}
+
+function isValidNavigation(value: StatusNavigation): boolean {
+  return (
+    Number.isSafeInteger(value.line) &&
+    value.line > 0 &&
+    Number.isSafeInteger(value.column) &&
+    value.column > 0
   );
 }

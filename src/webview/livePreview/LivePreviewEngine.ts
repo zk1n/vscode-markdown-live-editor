@@ -46,27 +46,33 @@ const livePreviewTheme = EditorView.baseTheme({
     fontSize: "var(--vscode-editor-font-size, 14px)",
   },
   ".cm-scroller": {
-    lineHeight: "1.6",
+    lineHeight: "22px",
     overflow: "auto",
-    padding: "1rem 1.5rem",
+    // Matches the bundled Markdown Preview's default reading gutter without
+    // taking a runtime dependency on its stylesheet or DOM structure.
+    padding: "0 26px",
   },
   ".cm-content": {
     boxSizing: "border-box",
     minHeight: "100%",
-    padding: "0.25rem 0 2rem",
+    padding: "0 0 2rem",
   },
   ".cm-line": {
-    lineHeight: "1.6",
-    minHeight: "1.6em",
+    lineHeight: "22px",
+    minHeight: "22px",
   },
   ".cm-line.cm-live-preview-heading-line": {
     lineHeight: "1.25",
-    paddingBottom: "0.25em",
-    paddingTop: "0.6em",
+    marginBottom: "16px",
+    marginTop: "24px",
+  },
+  ".cm-line.cm-live-preview-heading-line-1": {
+    marginTop: "0",
   },
   ".cm-line.cm-live-preview-heading-line-1, .cm-line.cm-live-preview-heading-line-2": {
     borderBottom:
       "1px solid var(--vscode-textSeparator-foreground, var(--vscode-editorWidget-border, transparent))",
+    paddingBottom: "0.3em",
   },
   ".cm-live-preview-heading": {
     fontWeight: "600",
@@ -82,13 +88,13 @@ const livePreviewTheme = EditorView.baseTheme({
     fontSize: "1.25em",
   },
   ".cm-live-preview-heading-4": {
-    fontSize: "1.1em",
-  },
-  ".cm-live-preview-heading-5": {
     fontSize: "1em",
   },
+  ".cm-live-preview-heading-5": {
+    fontSize: "0.875em",
+  },
   ".cm-live-preview-heading-6": {
-    fontSize: "0.9em",
+    fontSize: "0.85em",
   },
   ".cm-live-preview-strong": {
     fontWeight: "600",
@@ -129,13 +135,17 @@ const livePreviewTheme = EditorView.baseTheme({
     fontWeight: "500",
   },
   ".cm-live-preview-list-ordered-marker": {
-    minWidth: "1em",
+    boxSizing: "border-box",
+    display: "inline-block",
+    paddingRight: "0.5em",
+    textAlign: "right",
+    width: "2.5em",
   },
   ".cm-live-preview-list-unordered-marker": {
     color: "transparent",
     display: "inline-block",
     position: "relative",
-    width: "1em",
+    width: "2.5em",
     verticalAlign: "baseline",
     whiteSpace: "nowrap",
   },
@@ -143,7 +153,7 @@ const livePreviewTheme = EditorView.baseTheme({
     color: "var(--vscode-descriptionForeground, var(--vscode-editor-foreground))",
     content: '"•"',
     fontSize: "inherit",
-    left: "0",
+    left: "1em",
     lineHeight: "inherit",
     position: "absolute",
     top: "0",

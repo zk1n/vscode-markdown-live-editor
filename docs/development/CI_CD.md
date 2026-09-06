@@ -25,6 +25,6 @@ npm run package:vsix
 
 artifact の出力先は `artifacts/vscode-markdown-live-editor-<package-version>.vsix` である。
 
-`package.json` は明示的な `files` allowlist を使う。package script は最小 staging directory を作成し、Development では `docs/public/README.md` を優先し、単独の公開 checkout では repository README を package README として使う。その後 `vsce package` が生成した ZIP central directory を検証する。許可するのは extension manifest、package metadata、curated README、changelog、license、2 本の runtime bundle のみである。欠落または未許可 entry は失敗とし、内部設定、worklog、source、test、local configuration、開発文書が VSIX に入ることを防ぐ。
+`package.json` は明示的な `files` allowlist を使う。package script は最小 staging directory を作成し、Development では `docs/public/README.md` を優先し、単独の公開 checkout では repository README を package README として使う。その後 `vsce package` が生成した ZIP central directory を検証する。許可するのは extension manifest、package metadata、curated README、changelog、license、2 本の runtime bundle、英語・日本語の extension localization bundle のみである。欠落または未許可 entry は失敗とし、内部設定、worklog、source、test、local configuration、開発文書が VSIX に入ることを防ぐ。
 
 この artifact は installable VSIX だけであり、Marketplace publisher の設定や publish 権限を与えない。

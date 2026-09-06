@@ -1,0 +1,21 @@
+{
+  "Markdown Live Editor cursor position": "Markdown Live Editor のカーソル位置",
+  "Ln {0}, Col {1}{2}": "行 {0}、列 {1}{2}",
+  " ({0} selected)": "（{0} 文字を選択）",
+  "Spaces: {0}": "スペース: {0}",
+  "Tab Size: {0}": "タブ サイズ: {0}",
+  "Change Markdown Live Editor indentation settings": "Markdown Live Editor のインデント設定を変更",
+  "Effective files.encoding setting. Encoding is not inferred from document bytes and cannot be changed here.": "有効な files.encoding 設定です。エンコーディングはドキュメントのバイト列から推測せず、ここでは変更できません。",
+  "Change line ending through the Markdown Live Editor document-action boundary": "Markdown Live Editor のドキュメント操作境界を通して改行コードを変更",
+  "Markdown Live Editor": "Markdown Live Editor",
+  "Select line ending (current: {0})": "改行コードを選択（現在: {0}）",
+  "Go to line and column": "行と列へ移動",
+  "Line, Column": "行, 列",
+  "Enter positive line and column numbers separated by a comma.": "正の行番号と列番号をコンマで区切って入力してください。",
+  "Indent Using Spaces": "スペースでインデント",
+  "Indent Using Tabs": "タブでインデント",
+  "Change Tab Size…": "タブ サイズを変更…",
+  "Change Markdown Live Editor indentation": "Markdown Live Editor のインデントを変更",
+  "Select tab size": "タブ サイズを選択",
+  "Tab Size": "タブ サイズ"
+}

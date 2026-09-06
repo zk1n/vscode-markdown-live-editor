@@ -1,0 +1,21 @@
+{
+  "Markdown Live Editor cursor position": "Markdown Live Editor cursor position",
+  "Ln {0}, Col {1}{2}": "Ln {0}, Col {1}{2}",
+  " ({0} selected)": " ({0} selected)",
+  "Spaces: {0}": "Spaces: {0}",
+  "Tab Size: {0}": "Tab Size: {0}",
+  "Change Markdown Live Editor indentation settings": "Change Markdown Live Editor indentation settings",
+  "Effective files.encoding setting. Encoding is not inferred from document bytes and cannot be changed here.": "Effective files.encoding setting. Encoding is not inferred from document bytes and cannot be changed here.",
+  "Change line ending through the Markdown Live Editor document-action boundary": "Change line ending through the Markdown Live Editor document-action boundary",
+  "Markdown Live Editor": "Markdown Live Editor",
+  "Select line ending (current: {0})": "Select line ending (current: {0})",
+  "Go to line and column": "Go to line and column",
+  "Line, Column": "Line, Column",
+  "Enter positive line and column numbers separated by a comma.": "Enter positive line and column numbers separated by a comma.",
+  "Indent Using Spaces": "Indent Using Spaces",
+  "Indent Using Tabs": "Indent Using Tabs",
+  "Change Tab Size…": "Change Tab Size…",
+  "Change Markdown Live Editor indentation": "Change Markdown Live Editor indentation",
+  "Select tab size": "Select tab size",
+  "Tab Size": "Tab Size"
+}
