@@ -1,6 +1,8 @@
 import {
   decodeWebviewToHostMessage,
+  type ClientBarrierMessage,
   type ClientEditMessage,
+  type ClientSetEndOfLineMessage,
   type DocumentUpdateMessage,
   type HostMessageCorrelation,
   type HostToWebviewMessage,
@@ -34,6 +36,12 @@ export interface DocumentPort {
     expectedVersion: number,
     text: string,
     causalId?: string,
+  ): Promise<DocumentPortResult>;
+  setEndOfLine(
+    documentUri: string,
+    expectedVersion: number,
+    eol: "lf" | "crlf",
+    attemptId?: string,
   ): Promise<DocumentPortResult>;
   saveDocument(documentUri: string, shortcutAttemptId?: string): Promise<DocumentPortResult>;
   undoDocument(documentUri: string, shortcutAttemptId?: string): Promise<DocumentPortResult>;
@@ -395,6 +403,11 @@ export class DocumentSyncCoordinator {
       return;
     }
 
+    if (message.kind === "set-eol") {
+      await this.processSetEndOfLine(session, message, snapshot, queue, causalId, receiveOrdinal);
+      return;
+    }
+
     await this.processBarrier(session, message, queue, causalId, receiveOrdinal);
   }
 
@@ -503,7 +516,7 @@ export class DocumentSyncCoordinator {
 
   private async processBarrier(
     session: SessionState,
-    message: Exclude<WebviewToHostMessage, ClientEditMessage | { readonly kind: "diagnostic" }>,
+    message: ClientBarrierMessage,
     queue: QueueContext,
     causalId: string,
     receiveOrdinal: number,
@@ -578,6 +591,83 @@ export class DocumentSyncCoordinator {
         operationSequence: message.sequence,
       },
     );
+  }
+
+  private async processSetEndOfLine(
+    session: SessionState,
+    message: ClientSetEndOfLineMessage,
+    snapshot: DocumentSnapshot,
+    queue: QueueContext,
+    causalId: string,
+    receiveOrdinal: number,
+  ): Promise<void> {
+    this.diagnostics.record("coordinator.set-eol", {
+      documentUri: message.documentUri,
+      documentVersion: message.documentVersion,
+      eol: message.eol,
+      sequence: message.sequence,
+      sessionId: message.sessionId,
+      causalId,
+      receiveOrdinal,
+      queueEnqueueOrdinal: queue.enqueueOrdinal,
+      queueStartOrdinal: queue.startOrdinal,
+    });
+    if (message.documentVersion !== snapshot.documentVersion) {
+      this.resync(
+        session,
+        snapshot,
+        "stale-version",
+        `EOL change was based on version ${String(message.documentVersion)}, but authority is version ${String(snapshot.documentVersion)}.`,
+      );
+      return;
+    }
+
+    let portResult: DocumentPortResult;
+    try {
+      portResult = await this.documentPort.setEndOfLine(
+        message.documentUri,
+        snapshot.documentVersion,
+        message.eol,
+        causalId,
+      );
+    } catch (error: unknown) {
+      await this.resyncAfterPortFailure(
+        session,
+        message.documentUri,
+        `set-eol failed: ${errorNote(error)}`,
+      );
+      return;
+    }
+
+    if (!isUsableSnapshot(message.documentUri, portResult.snapshot)) {
+      this.post(session.endpoint, {
+        kind: "protocol-error",
+        note: "Document port returned an invalid set-eol result.",
+      });
+      return;
+    }
+    if (portResult.kind === "rejected") {
+      this.resync(session, portResult.snapshot, "port-rejected", portResult.note);
+      return;
+    }
+    if (portResult.snapshot.text !== snapshot.text) {
+      this.resync(
+        session,
+        portResult.snapshot,
+        "port-inconsistent",
+        "Document port acknowledged an EOL change with different canonical text.",
+      );
+      return;
+    }
+
+    this.acknowledge(session, message, portResult.snapshot, queue, causalId, receiveOrdinal);
+    this.broadcastSnapshot(message.documentUri, "set-eol", portResult.snapshot, message.sessionId, {
+      causalId,
+      queue,
+      receiveOrdinal,
+      originSessionId: message.sessionId,
+      operationSequence: message.sequence,
+    });
   }
 
   private async resyncAfterPortFailure(
@@ -799,9 +889,13 @@ function messageTrace(
   message: Exclude<WebviewToHostMessage, { readonly kind: "diagnostic" }>,
 ): Readonly<Record<string, number | string>> {
   return {
-    documentVersion: message.kind === "edit" ? message.documentVersion : "",
+    documentVersion:
+      message.kind === "edit" || message.kind === "set-eol" ? message.documentVersion : "",
     kind: message.kind,
     sequence: message.sequence,
-    shortcutAttemptId: message.kind === "edit" ? "" : (message.shortcutAttemptId ?? "untraced"),
+    shortcutAttemptId:
+      message.kind === "save" || message.kind === "undo" || message.kind === "redo"
+        ? (message.shortcutAttemptId ?? "untraced")
+        : "",
   };
 }

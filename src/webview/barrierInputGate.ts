@@ -1,8 +1,9 @@
-export type BarrierAction = "save" | "undo" | "redo";
+export type BarrierAction = "save" | "undo" | "redo" | "set-eol";
 
 export interface BarrierRequest {
   readonly action: BarrierAction;
   readonly shortcutAttemptId: string;
+  readonly eol?: "lf" | "crlf";
 }
 
 /**
@@ -39,12 +40,13 @@ export class BarrierInputGate {
     action: BarrierAction,
     activeCompositionGeneration: number | undefined,
     shortcutAttemptId = "untraced",
+    eol?: "lf" | "crlf",
   ): void {
     if (!this.inputFrozen) {
       this.allowedCompositionGeneration = activeCompositionGeneration;
       this.inputFrozen = true;
     }
-    this.queue.push({ action, shortcutAttemptId });
+    this.queue.push({ action, shortcutAttemptId, ...(eol === undefined ? {} : { eol }) });
   }
 
   public acceptsLocalTransaction(activeCompositionGeneration: number | undefined): boolean {

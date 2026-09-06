@@ -1,4 +1,5 @@
 import * as vscode from "vscode";
+import { randomUUID } from "node:crypto";
 
 import {
   decodeDiagnosticMode,
@@ -8,8 +9,13 @@ import { BoundedDiagnosticLog } from "../core/diagnostics/diagnosticLog.js";
 import { textFingerprint } from "../core/diagnostics/textFingerprint.js";
 import { PROJECT_IDENTITY } from "../core/projectIdentity.js";
 import { DocumentSyncCoordinator } from "../core/sync/documentSyncCoordinator.js";
+import { PROTOCOL_VERSION } from "../protocol/messages.js";
 import { MarkdownEditorProvider } from "./editor/MarkdownEditorProvider.js";
-import { MarkdownEditorSessionRegistry } from "./editor/MarkdownEditorSessionRegistry.js";
+import {
+  MarkdownEditorSessionRegistry,
+  type ActiveStatusSession,
+} from "./editor/MarkdownEditorSessionRegistry.js";
+import { allocatePresentationRevision } from "./editor/presentationRevision.js";
 import { shouldWarnForMarkdownTrailingWhitespace } from "./markdownTrailingWhitespace.js";
 import {
   MARKDOWN_OUTLINE_VIEW_ID,
@@ -18,6 +24,13 @@ import {
   MarkdownOutlineTreeProvider,
 } from "./outline/MarkdownOutlineTreeProvider.js";
 import { VscodeDocumentPort } from "./sync/VscodeDocumentPort.js";
+import {
+  MarkdownEditorStatusBarManager,
+  VscodeStatusDocumentPresentationReader,
+  type StatusActionContext,
+  type StatusBarEol,
+  type StatusIndentation,
+} from "./status/MarkdownEditorStatusBarManager.js";
 
 const MARKDOWN_EDITOR_VIEW_TYPE = "vscodeMarkdownLiveEditor.editor";
 const OPEN_MARKDOWN_SETTINGS = "Open Markdown Settings";
@@ -41,8 +54,24 @@ export function activate(context: vscode.ExtensionContext): void {
       warnForMarkdownTrailingWhitespace(document, warnedTrailingWhitespaceDocuments);
     },
     sessionRegistry: editorSessions,
+    viewType: MARKDOWN_EDITOR_VIEW_TYPE,
     webviewScriptPath: vscode.Uri.joinPath(context.extensionUri, "dist", "webview.js"),
   });
+
+  const statusBar = new MarkdownEditorStatusBarManager(
+    editorSessions,
+    new VscodeStatusDocumentPresentationReader(MARKDOWN_EDITOR_VIEW_TYPE),
+    {
+      chooseEol: chooseEndOfLine,
+      requestEolChange: (action, target): void => {
+        postEditorCommand(editorSessions, action, "set-eol", target);
+      },
+      chooseIndentation,
+      requestIndentationChange: (action, target): void => {
+        postEditorConfiguration(editorSessions, action, target);
+      },
+    },
+  );
 
   const disposable = vscode.commands.registerCommand(
     "vscodeMarkdownLiveEditor.showProjectInfo",
@@ -66,6 +95,12 @@ export function activate(context: vscode.ExtensionContext): void {
     async (value: unknown): Promise<boolean> =>
       value instanceof MarkdownOutlineTreeItem ? await outlineProvider.navigateTo(value) : false,
   );
+  const undo = vscode.commands.registerCommand("vscodeMarkdownLiveEditor.undo", (): void => {
+    postActiveHistoryCommand(editorSessions, "undo");
+  });
+  const redo = vscode.commands.registerCommand("vscodeMarkdownLiveEditor.redo", (): void => {
+    postActiveHistoryCommand(editorSessions, "redo");
+  });
 
   const outlineView = vscode.window.createTreeView(MARKDOWN_OUTLINE_VIEW_ID, {
     showCollapseAll: true,
@@ -81,6 +116,16 @@ export function activate(context: vscode.ExtensionContext): void {
 
   const handleDocumentChange = createDocumentChangeHandler(documentPort, coordinator, diagnostics);
   const documentChangeRegistration = vscode.workspace.onDidChangeTextDocument(handleDocumentChange);
+  const statusDocumentChangeRegistration = vscode.workspace.onDidChangeTextDocument((): void => {
+    statusBar.refresh();
+  });
+  const statusConfigurationChangeRegistration = vscode.workspace.onDidChangeConfiguration(
+    (event): void => {
+      if (event.affectsConfiguration("files.encoding")) {
+        statusBar.refresh();
+      }
+    },
+  );
   const outlineDocumentChangeRegistration = vscode.workspace.onDidChangeTextDocument(
     (event): void => {
       outlineProvider.handleDocumentChange(event.document);
@@ -95,12 +140,173 @@ export function activate(context: vscode.ExtensionContext): void {
     disposable,
     copyDiagnostics,
     navigateToOutlineHeading,
+    undo,
+    redo,
+    statusBar,
     customEditorRegistration,
     outlineView,
     outlineProvider,
     documentChangeRegistration,
+    statusDocumentChangeRegistration,
+    statusConfigurationChangeRegistration,
     outlineDocumentChangeRegistration,
     saveBarrierRegistration,
+  );
+}
+
+async function chooseEndOfLine(
+  _context: StatusActionContext,
+  current: StatusBarEol,
+): Promise<StatusBarEol | undefined> {
+  const choice = await vscode.window.showQuickPick(
+    [
+      { label: "LF", value: "lf" as const },
+      { label: "CRLF", value: "crlf" as const },
+    ],
+    {
+      placeHolder: `Select line ending (current: ${current === "crlf" ? "CRLF" : "LF"})`,
+    },
+  );
+  return choice?.value;
+}
+
+async function chooseIndentation(
+  context: StatusActionContext,
+): Promise<StatusIndentation | undefined> {
+  const choice = await vscode.window.showQuickPick(
+    [
+      { label: "Indent Using Spaces", value: "spaces" as const },
+      { label: "Indent Using Tabs", value: "tabs" as const },
+      { label: "Change Tab Size…", value: "size" as const },
+    ],
+    { placeHolder: "Change Markdown Live Editor indentation" },
+  );
+  if (choice?.value === "spaces" || choice?.value === "tabs") {
+    return {
+      insertSpaces: choice.value === "spaces",
+      tabSize: context.editorState.tabSize,
+    };
+  }
+  if (choice?.value !== "size") {
+    return undefined;
+  }
+  const value = await vscode.window.showInputBox({
+    prompt: "Tab size (1–32)",
+    value: String(context.editorState.tabSize),
+    validateInput: (candidate): string | undefined => {
+      const tabSize = Number(candidate);
+      return Number.isSafeInteger(tabSize) && tabSize >= 1 && tabSize <= 32
+        ? undefined
+        : "Enter an integer from 1 through 32.";
+    },
+  });
+  if (value === undefined) {
+    return undefined;
+  }
+  return {
+    insertSpaces: context.editorState.insertSpaces,
+    tabSize: Number(value),
+  };
+}
+
+function postActiveHistoryCommand(
+  sessions: MarkdownEditorSessionRegistry,
+  command: "undo" | "redo",
+): void {
+  const active = sessions.activeStatusSession;
+  if (active === undefined || active.editorState.recoveryActive) {
+    return;
+  }
+  postEditorCommand(
+    sessions,
+    {
+      identity: {
+        documentUri: active.handle.documentUri,
+        sessionId: active.handle.sessionId,
+        controllerId: active.controllerId,
+      },
+      documentVersion: active.editorState.documentVersion,
+      editorState: active.editorState,
+    },
+    command,
+  );
+}
+
+function postEditorCommand(
+  sessions: MarkdownEditorSessionRegistry,
+  context: StatusActionContext,
+  command: "undo" | "redo" | "set-eol",
+  eol?: StatusBarEol,
+): void {
+  const active = currentActionSession(sessions, context);
+  const post = active?.handle.postPresentationMessage;
+  if (active === undefined || post === undefined) {
+    return;
+  }
+  if (command === "set-eol" && eol === undefined) {
+    return;
+  }
+  const requestId = randomUUID();
+  void Promise.resolve(
+    post({
+      kind: "editor-command",
+      protocolVersion: PROTOCOL_VERSION,
+      ...context.identity,
+      requestId,
+      documentVersion: context.documentVersion,
+      command,
+      ...(command === "set-eol" && eol !== undefined ? { eol } : {}),
+    }),
+  );
+}
+
+function postEditorConfiguration(
+  sessions: MarkdownEditorSessionRegistry,
+  context: StatusActionContext,
+  target: StatusIndentation,
+): void {
+  const active = currentActionSession(sessions, context);
+  const post = active?.handle.postPresentationMessage;
+  if (active === undefined || post === undefined) {
+    return;
+  }
+  void Promise.resolve(
+    post({
+      kind: "editor-configuration",
+      protocolVersion: PROTOCOL_VERSION,
+      ...context.identity,
+      revision: allocatePresentationRevision(),
+      ...target,
+    }),
+  );
+}
+
+function currentActionSession(
+  sessions: MarkdownEditorSessionRegistry,
+  context: StatusActionContext,
+): ActiveStatusSession | undefined {
+  const active = sessions.activeStatusSession;
+  if (active === undefined) {
+    return undefined;
+  }
+  if (
+    active.handle.documentUri !== context.identity.documentUri ||
+    active.handle.sessionId !== context.identity.sessionId ||
+    active.controllerId !== context.identity.controllerId ||
+    active.editorState.documentVersion !== context.documentVersion ||
+    !isActiveLiveEditorTab(context.identity.documentUri)
+  ) {
+    return undefined;
+  }
+  return active;
+}
+
+function isActiveLiveEditorTab(documentUri: string): boolean {
+  const input = vscode.window.tabGroups.activeTabGroup.activeTab?.input;
+  return (
+    input instanceof vscode.TabInputCustom &&
+    input.viewType === MARKDOWN_EDITOR_VIEW_TYPE &&
+    input.uri.toString() === documentUri
   );
 }
 

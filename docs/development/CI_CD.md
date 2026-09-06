@@ -8,6 +8,11 @@ Development repository は GitLab とする。GitLab CI は branch push、Merge 
 
 どちらの pipeline も Visual Studio Marketplace への publish、GitHub / GitLab release の作成、tag / branch の push、publish credential の読取りを行わない。publish と release acceptance は Human Gate のままとする。
 
+GitHub Dependabot PRはCI evidenceを提供するinboxであり、Development sourceへ直接mergeしない。採用品はGitLab / Developmentの
+最新`develop`から独立branchで再実装し、同じlocal gateとGitLab pipelineを通す。Development統合後に通常のpublic projectionで
+GitHub `develop`を更新し、同等以上のversionを確認してから元PRをcloseする。詳細は
+[`DEPENDENCY_POLICY.md`](DEPENDENCY_POLICY.md)と[`DEPENDABOT_INTAKE.md`](DEPENDABOT_INTAKE.md)を参照する。
+
 ## 再現可能な VSIX artifact
 
 `@vscode/vsce` は `package-lock.json` に固定された development dependency である。ローカルで release artifact を作る手順は次のとおり。

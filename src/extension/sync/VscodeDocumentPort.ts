@@ -15,7 +15,7 @@ import type {
  */
 export class VscodeDocumentPort implements DocumentPort {
   private readonly savesInProgress = new Set<string>();
-  private readonly replacementsInProgress = new Map<string, PendingReplacement>();
+  private readonly replacementsInProgress = new Map<string, PendingDocumentChange>();
   private readonly historyInProgress = new Map<string, string>();
   private nextHistoryInvocation = 1;
 
@@ -39,11 +39,15 @@ export class VscodeDocumentPort implements DocumentPort {
       pending !== undefined && document.version === pending.expectedVersion + 1;
     const targetMatches = pending?.targetText === toProtocolText(document.getText());
     const replacementMatches =
-      change !== undefined && toProtocolText(change.text) === pending?.targetText;
-    const classification =
-      pending !== undefined && versionMatches && targetMatches && replacementMatches
-        ? "own"
-        : "external";
+      pending?.kind === "replacement" &&
+      change !== undefined &&
+      toProtocolText(change.text) === pending.targetText;
+    const eolMatches = pending?.kind === "set-eol" && document.eol === pending.eol;
+    const replacementOwn =
+      pending?.kind === "replacement" && versionMatches && targetMatches && replacementMatches;
+    const setEndOfLineOwn =
+      pending?.kind === "set-eol" && versionMatches && targetMatches && eolMatches;
+    const classification = replacementOwn || setEndOfLineOwn ? "own" : "external";
     this.diagnostics.record("port.document-change.classified", {
       classification,
       contentChangeCount: event.contentChanges.length,
@@ -51,12 +55,14 @@ export class VscodeDocumentPort implements DocumentPort {
       documentVersion: document.version,
       historyInvocationId: historyInvocationId ?? "",
       pendingCausalId: pending?.causalId ?? "",
+      pendingKind: pending?.kind ?? "",
       pendingMarkerPresent: pending !== undefined,
       applyEditSettled: pending?.applyEditSettled ?? false,
       pendingExpectedVersion: pending?.expectedVersion ?? -1,
       replacementMatches,
       targetMatches,
       versionMatches,
+      eolMatches,
     });
     return classification;
   }
@@ -104,6 +110,7 @@ export class VscodeDocumentPort implements DocumentPort {
     }
 
     const pending: PendingReplacement = {
+      kind: "replacement",
       expectedVersion,
       targetText: text,
       causalId: causalId ?? "untraced",
@@ -131,6 +138,96 @@ export class VscodeDocumentPort implements DocumentPort {
     return applied
       ? { kind: "applied", snapshot }
       : { kind: "rejected", snapshot, note: "VS Code rejected the document edit." };
+  }
+
+  public async setEndOfLine(
+    documentUri: string,
+    expectedVersion: number,
+    eol: "lf" | "crlf",
+    attemptId = "untraced",
+  ): Promise<DocumentPortResult> {
+    const document = this.requireDocument(documentUri);
+    const requestedEol = eol === "crlf" ? vscode.EndOfLine.CRLF : vscode.EndOfLine.LF;
+    const before = this.snapshot(document);
+    this.diagnostics.record("port.set-eol.requested", {
+      attemptId,
+      documentUri,
+      expectedVersion,
+      requestedEol: eol,
+      version: document.version,
+    });
+    if (document.version !== expectedVersion) {
+      return this.rejected(
+        document,
+        "The document version changed before the EOL operation could be applied.",
+      );
+    }
+    if (document.eol === requestedEol) {
+      return { kind: "applied", snapshot: before };
+    }
+
+    const workspaceEdit = new vscode.WorkspaceEdit();
+    workspaceEdit.set(document.uri, [vscode.TextEdit.setEndOfLine(requestedEol)]);
+
+    // WorkspaceEdit has no compare-and-swap API. Keep the same immediately
+    // before-apply guard used by text replacement, then verify both EOL and
+    // canonical text from the authoritative TextDocument.
+    if (document.version !== expectedVersion) {
+      return this.rejected(
+        document,
+        "The document version changed before the EOL operation could be applied.",
+      );
+    }
+
+    const pending: PendingSetEndOfLine = {
+      kind: "set-eol",
+      expectedVersion,
+      targetText: before.text,
+      eol: requestedEol,
+      causalId: attemptId,
+      applyEditSettled: false,
+    };
+    this.replacementsInProgress.set(documentUri, pending);
+    let applied: boolean;
+    let snapshot: DocumentSnapshot;
+    try {
+      applied = await vscode.workspace.applyEdit(workspaceEdit);
+      pending.applyEditSettled = true;
+      snapshot = await this.readDocument(documentUri);
+    } finally {
+      if (this.replacementsInProgress.get(documentUri) === pending) {
+        this.replacementsInProgress.delete(documentUri);
+      }
+    }
+    const eolMatches = document.eol === requestedEol;
+    const canonicalTextMatches = snapshot.text === before.text;
+    this.diagnostics.record("port.set-eol.result", {
+      applied,
+      attemptId,
+      canonicalTextMatches,
+      documentUri,
+      documentVersion: snapshot.documentVersion,
+      eolMatches,
+      requestedEol: eol,
+    });
+    if (!applied) {
+      return { kind: "rejected", snapshot, note: "VS Code rejected the EOL operation." };
+    }
+    if (!eolMatches) {
+      return {
+        kind: "rejected",
+        snapshot,
+        note: "VS Code did not apply the requested document EOL.",
+      };
+    }
+    if (!canonicalTextMatches) {
+      return {
+        kind: "rejected",
+        snapshot,
+        note: "VS Code changed canonical document text while applying EOL.",
+      };
+    }
+    return { kind: "applied", snapshot };
   }
 
   public async saveDocument(
@@ -276,11 +373,23 @@ export class VscodeDocumentPort implements DocumentPort {
 }
 
 interface PendingReplacement {
+  readonly kind: "replacement";
   readonly expectedVersion: number;
   readonly targetText: string;
   readonly causalId: string;
   applyEditSettled: boolean;
 }
+
+interface PendingSetEndOfLine {
+  readonly kind: "set-eol";
+  readonly expectedVersion: number;
+  readonly targetText: string;
+  readonly eol: vscode.EndOfLine;
+  readonly causalId: string;
+  applyEditSettled: boolean;
+}
+
+type PendingDocumentChange = PendingReplacement | PendingSetEndOfLine;
 
 function saveFailureNote(saved: boolean, clean: boolean, diskMatches: boolean): string {
   if (!clean) {

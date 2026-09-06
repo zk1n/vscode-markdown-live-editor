@@ -2,6 +2,7 @@ import { markdown } from "@codemirror/lang-markdown";
 import {
   Annotation,
   Compartment,
+  countColumn,
   EditorState,
   Prec,
   Transaction,
@@ -30,6 +31,13 @@ import {
   type WirePosition,
 } from "../protocol/messages.js";
 import {
+  decodeHostPresentationMessage,
+  type EditorCommandMessage,
+  type HostPresentationMessage,
+  type RestoreHistoryFocusMessage,
+  type WebviewPresentationMessage,
+} from "../protocol/presentationMessages.js";
+import {
   createLivePreviewEngine,
   type LivePreviewEngine,
 } from "./livePreview/LivePreviewEngine.js";
@@ -37,6 +45,7 @@ import { BarrierInputGate, type BarrierAction } from "./barrierInputGate.js";
 import { createBarrierKeymap } from "./barrierKeymap.js";
 import { CompositionBuffer } from "./compositionBuffer.js";
 import { PendingEditQueue } from "./pendingEditQueue.js";
+import { createTabKeymap } from "./tabKeymap.js";
 import {
   outlineNavigationHighlightState,
   outlineNavigationHighlightTheme,
@@ -44,7 +53,9 @@ import {
 } from "./outline/navigationHighlight.js";
 
 interface VsCodeApi {
-  postMessage(message: WebviewToHostMessage | EditorReadyMessage): void;
+  postMessage(
+    message: WebviewToHostMessage | EditorReadyMessage | WebviewPresentationMessage,
+  ): void;
   getState?(): unknown;
   setState?(state: unknown): void;
 }
@@ -100,6 +111,7 @@ const vscodeEditorTheme = EditorView.theme({
 
 class MarkdownWebviewController {
   private readonly editable = new Compartment();
+  private readonly tabSizeConfiguration = new Compartment();
   private readonly livePreview: LivePreviewEngine | undefined;
   private readonly diagnostics: DiagnosticTrace;
   private readonly view: EditorView;
@@ -123,6 +135,16 @@ class MarkdownWebviewController {
   private disposed = false;
   private outlineHighlightTimer: number | undefined;
   private outlineNavigationGeneration = 0;
+  private editorConfigurationRevision = -1;
+  private styleRevision = -1;
+  private reportSequence = 1;
+  private insertSpaces = true;
+  private tabSize = 4;
+  private styleElement: HTMLStyleElement | undefined;
+  private readonly acknowledgedHistoryFocus = new Map<
+    string,
+    { readonly operation: "undo" | "redo"; readonly documentVersion: number }
+  >();
 
   public constructor(
     private readonly vscode: VsCodeApi,
@@ -154,6 +176,7 @@ class MarkdownWebviewController {
     const extensions: Extension[] = [
       vscodeEditorTheme,
       this.editable.of(EditorView.editable.of(this.controllerReady)),
+      this.tabSizeConfiguration.of(EditorState.tabSize.of(this.tabSize)),
       EditorView.updateListener.of((update): void => {
         this.handleUpdate(update);
       }),
@@ -181,11 +204,16 @@ class MarkdownWebviewController {
     if (usesBarrierKeymap(bootstrap.diagnosticMode)) {
       extensions.push(
         Prec.highest(
-          keymap.of(
-            createBarrierKeymap((action): void => {
+          keymap.of([
+            ...createBarrierKeymap((action): void => {
               this.requestBarrier(action);
             }),
-          ),
+            ...createTabKeymap({
+              isTabEditable: (): boolean => this.isTabEditable(),
+              getInsertSpaces: (): boolean => this.insertSpaces,
+              getTabSize: (): number => this.tabSize,
+            }),
+          ]),
         ),
       );
     }
@@ -222,6 +250,14 @@ class MarkdownWebviewController {
       return;
     }
 
+    if (isHostPresentationCandidate(value)) {
+      const presentation = decodeHostPresentationMessage(value);
+      if (presentation.ok) {
+        this.handlePresentationMessage(presentation.value);
+      }
+      return;
+    }
+
     this.hostMessageOrdinal += 1;
     this.diagnostics.record("host.message.received", {
       ...messageSummary(value),
@@ -252,13 +288,150 @@ class MarkdownWebviewController {
       window.clearTimeout(this.outlineHighlightTimer);
       this.outlineHighlightTimer = undefined;
     }
+    this.styleElement?.remove();
+    this.styleElement = undefined;
     this.view.destroy();
     this.livePreview?.dispose();
+  }
+
+  private handlePresentationMessage(message: HostPresentationMessage): void {
+    if (!this.matchesController(message)) {
+      return;
+    }
+    switch (message.kind) {
+      case "editor-configuration":
+        if (message.revision <= this.editorConfigurationRevision) {
+          return;
+        }
+        this.editorConfigurationRevision = message.revision;
+        this.insertSpaces = message.insertSpaces;
+        this.tabSize = message.tabSize;
+        this.view.dispatch({
+          effects: this.tabSizeConfiguration.reconfigure(EditorState.tabSize.of(this.tabSize)),
+        });
+        this.reportEditorState();
+        return;
+      case "editor-command":
+        this.handleEditorCommand(message);
+        return;
+      case "restore-history-focus":
+        this.restoreHistoryFocus(message);
+        return;
+      case "style-snapshot":
+        if (message.revision <= this.styleRevision) {
+          return;
+        }
+        this.styleRevision = message.revision;
+        this.replaceCustomStyle(message.css);
+        return;
+    }
+  }
+
+  private handleEditorCommand(message: EditorCommandMessage): void {
+    if (
+      !this.controllerReady ||
+      this.recoveryActive ||
+      message.documentVersion !== this.documentVersion
+    ) {
+      return;
+    }
+    this.requestBarrier(
+      message.command,
+      message.command === "set-eol" ? message.eol : undefined,
+      `host-command:${message.requestId}`,
+    );
+  }
+
+  private restoreHistoryFocus(message: RestoreHistoryFocusMessage): void {
+    const acknowledged = this.acknowledgedHistoryFocus.get(message.requestId);
+    this.acknowledgedHistoryFocus.delete(message.requestId);
+    if (
+      acknowledged?.operation !== message.operation ||
+      acknowledged.documentVersion !== message.documentVersion ||
+      message.documentVersion !== this.documentVersion ||
+      !this.controllerReady ||
+      this.recoveryActive ||
+      this.composition.isActive ||
+      this.inFlightSequence !== undefined ||
+      this.pendingEdits.hasPending ||
+      this.barriers.isFrozen
+    ) {
+      return;
+    }
+    // The authoritative snapshot already mapped the selection through the
+    // minimal replacement. Focusing only preserves that caret/selection.
+    this.view.focus();
+    this.reportEditorState();
+  }
+
+  private matchesController(message: {
+    readonly documentUri: string;
+    readonly sessionId: string;
+    readonly controllerId: string;
+  }): boolean {
+    return (
+      message.documentUri === this.bootstrap.documentUri &&
+      message.sessionId === this.bootstrap.sessionId &&
+      message.controllerId === this.controllerId
+    );
+  }
+
+  private replaceCustomStyle(css: string): void {
+    const next = document.createElement("style");
+    next.id = "markdown-live-editor-custom-style";
+    next.textContent = css;
+    if (this.styleElement === undefined) {
+      document.head.append(next);
+    } else {
+      this.styleElement.replaceWith(next);
+    }
+    this.styleElement = next;
+  }
+
+  private isTabEditable(): boolean {
+    return (
+      this.controllerReady &&
+      !this.disposed &&
+      !this.recoveryActive &&
+      !this.barriers.isFrozen &&
+      !this.composition.isActive &&
+      !this.view.composing
+    );
+  }
+
+  private reportEditorState(): void {
+    if (this.disposed) {
+      return;
+    }
+    const selection = this.view.state.selection.main;
+    const line = this.view.state.doc.lineAt(selection.head);
+    const column = countColumn(line.text, this.tabSize, selection.head - line.from) + 1;
+    this.vscode.postMessage({
+      kind: "editor-state",
+      protocolVersion: PROTOCOL_VERSION,
+      documentUri: this.bootstrap.documentUri,
+      sessionId: this.bootstrap.sessionId,
+      controllerId: this.controllerId,
+      reportSequence: this.reportSequence,
+      documentVersion: this.documentVersion,
+      selectionAnchor: selection.anchor,
+      selectionHead: selection.head,
+      line: line.number,
+      column,
+      focused: this.view.hasFocus,
+      composing: this.composition.isActive || this.view.composing,
+      recoveryActive: this.recoveryActive,
+      barrierActive: this.barriers.isFrozen,
+      insertSpaces: this.insertSpaces,
+      tabSize: this.tabSize,
+    });
+    this.reportSequence += 1;
   }
 
   private handleUpdate(update: ViewUpdate): void {
     this.traceCodeMirrorUpdate(update);
     this.persistState();
+    this.reportEditorState();
     if (
       !update.docChanged ||
       this.disposed ||
@@ -453,15 +626,22 @@ class MarkdownWebviewController {
     this.persistState();
   }
 
-  private requestBarrier(action: BarrierAction): void {
+  private requestBarrier(
+    action: BarrierAction,
+    eol?: "lf" | "crlf",
+    hostRequestAttemptId?: string,
+  ): void {
     if (!this.controllerReady || this.recoveryActive || this.disposed) {
       return;
     }
 
     // Freeze before queueing the barrier so an edit made after the command
     // cannot overtake it. The host still supplies the authoritative result.
-    const shortcutAttemptId = `shortcut-${String(this.nextShortcutAttempt)}`;
-    this.nextShortcutAttempt += 1;
+    const shortcutAttemptId =
+      hostRequestAttemptId ?? `shortcut-${String(this.nextShortcutAttempt)}`;
+    if (hostRequestAttemptId === undefined) {
+      this.nextShortcutAttempt += 1;
+    }
     this.diagnostics.record("shortcut.keymap.handled", {
       action,
       owner: "webview-keymap",
@@ -484,6 +664,7 @@ class MarkdownWebviewController {
       action,
       this.composition.isActive ? this.compositionGeneration : undefined,
       shortcutAttemptId,
+      eol,
     );
     this.sendPendingEdit();
     this.sendNextBarrier();
@@ -524,6 +705,7 @@ class MarkdownWebviewController {
           );
         }
         this.persistState();
+        this.reportEditorState();
         return;
       case "protocol-error":
         this.enterRecovery(message.note);
@@ -591,6 +773,7 @@ class MarkdownWebviewController {
       restoredState: this.restoredState !== undefined,
     });
     this.persistState();
+    this.reportEditorState();
   }
 
   private navigateToHeading(
@@ -746,12 +929,31 @@ class MarkdownWebviewController {
       return;
     }
 
-    this.applyAuthoritativeSnapshot(message);
+    const acknowledgedRequest =
+      this.barriers.barrierInFlightSequence === message.sequence
+        ? this.barriers.nextRequest
+        : undefined;
+    this.applyAuthoritativeSnapshot(
+      message,
+      message.operation === "undo" || message.operation === "redo" ? message.operation : undefined,
+    );
     if (this.barriers.acknowledgeBarrier(message.sequence)) {
+      if (
+        acknowledgedRequest !== undefined &&
+        (message.operation === "undo" || message.operation === "redo") &&
+        acknowledgedRequest.shortcutAttemptId.startsWith("host-command:")
+      ) {
+        const requestId = acknowledgedRequest.shortcutAttemptId.slice("host-command:".length);
+        this.acknowledgedHistoryFocus.set(requestId, {
+          operation: message.operation,
+          documentVersion: message.documentVersion,
+        });
+      }
       this.sendNextBarrier();
     }
     this.assertBarrierLiveness();
     this.persistState();
+    this.reportEditorState();
   }
 
   private handleDocumentUpdate(
@@ -840,7 +1042,10 @@ class MarkdownWebviewController {
     this.persistState();
   }
 
-  private applyAuthoritativeSnapshot(snapshot: DocumentSnapshotMessage): void {
+  private applyAuthoritativeSnapshot(
+    snapshot: DocumentSnapshotMessage,
+    historyOperation?: "undo" | "redo",
+  ): void {
     this.documentVersion = snapshot.documentVersion;
     this.pendingEdits.replaceAuthority(snapshot.text);
     const before = this.view.state.doc.toString();
@@ -857,8 +1062,19 @@ class MarkdownWebviewController {
       to: replacement.to,
       ...this.focusTraceDetails(),
     });
+    const currentSelection = this.view.state.selection.main;
+    const historyInsertionCaret =
+      historyOperation !== undefined &&
+      currentSelection.empty &&
+      replacement.from === replacement.to &&
+      currentSelection.head === replacement.from
+        ? replacement.from + replacement.insert.length
+        : undefined;
     this.view.dispatch({
       changes: replacement,
+      ...(historyInsertionCaret === undefined
+        ? {}
+        : { selection: { anchor: historyInsertionCaret } }),
       annotations: remoteUpdate.of(true),
     });
     this.persistState();
@@ -890,6 +1106,7 @@ class MarkdownWebviewController {
       `Editing paused to protect unsynchronized text: ${note} [incident ${String(recoveryIncidentId)}]`,
     );
     this.persistState();
+    this.reportEditorState();
   }
 
   private sendNextBarrier(): void {
@@ -897,6 +1114,7 @@ class MarkdownWebviewController {
     if (request === undefined) {
       if (this.barriers.completeIfIdle()) {
         this.diagnostics.record("sync.barrier.completed", this.focusTraceDetails());
+        this.reportEditorState();
       }
       return;
     }
@@ -914,15 +1132,33 @@ class MarkdownWebviewController {
     const sequence = this.nextSequence;
     this.nextSequence += 1;
     this.barriers.markBarrierSent(sequence);
-    const message: WebviewToHostMessage = {
-      kind: request.action,
-      protocolVersion: PROTOCOL_VERSION,
-      documentUri: this.bootstrap.documentUri,
-      sessionId: this.bootstrap.sessionId,
-      controllerId: this.controllerId,
-      sequence,
-      shortcutAttemptId: request.shortcutAttemptId,
-    };
+    let message: WebviewToHostMessage;
+    if (request.action === "set-eol") {
+      if (request.eol === undefined) {
+        this.enterRecovery("An EOL request reached the FIFO without a requested line ending.");
+        return;
+      }
+      message = {
+        kind: "set-eol",
+        protocolVersion: PROTOCOL_VERSION,
+        documentUri: this.bootstrap.documentUri,
+        sessionId: this.bootstrap.sessionId,
+        controllerId: this.controllerId,
+        sequence,
+        documentVersion: this.documentVersion,
+        eol: request.eol,
+      };
+    } else {
+      message = {
+        kind: request.action,
+        protocolVersion: PROTOCOL_VERSION,
+        documentUri: this.bootstrap.documentUri,
+        sessionId: this.bootstrap.sessionId,
+        controllerId: this.controllerId,
+        sequence,
+        shortcutAttemptId: request.shortcutAttemptId,
+      };
+    }
     this.diagnostics.record("sync.barrier.sent", {
       action: request.action,
       sequence,
@@ -931,6 +1167,7 @@ class MarkdownWebviewController {
       composing: this.view.composing,
       ...this.syncStateDetails(),
     });
+    this.reportEditorState();
     this.vscode.postMessage(message);
     this.persistState();
   }
@@ -1000,6 +1237,7 @@ class MarkdownWebviewController {
 
   private recordFocusEvent(kind: "focus" | "blur"): void {
     this.diagnostics.record(`dom.${kind}`, this.focusTraceDetails());
+    this.reportEditorState();
   }
 
   private focusTraceDetails(): Readonly<Record<string, TraceValue>> {
@@ -1185,6 +1423,19 @@ function isDiagnosticMode(value: unknown): value is DiagnosticMode {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isHostPresentationCandidate(value: unknown): boolean {
+  if (!isRecord(value)) {
+    return false;
+  }
+  const kind = value["kind"];
+  return (
+    kind === "editor-configuration" ||
+    kind === "editor-command" ||
+    kind === "restore-history-focus" ||
+    kind === "style-snapshot"
+  );
 }
 
 type TraceValue = boolean | number | string | undefined;

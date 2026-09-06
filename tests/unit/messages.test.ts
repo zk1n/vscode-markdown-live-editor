@@ -110,6 +110,46 @@ describe("protocol decoding", () => {
     });
   });
 
+  it("decodes a versioned set-eol operation and rejects invalid EOL values", () => {
+    expect(
+      decodeWebviewToHostMessage({
+        kind: "set-eol",
+        protocolVersion: PROTOCOL_VERSION,
+        documentUri: "file:///note.md",
+        sessionId: "session-1",
+        controllerId: "controller-1",
+        sequence: 2,
+        documentVersion: 3,
+        eol: "crlf",
+      }),
+    ).toEqual({
+      ok: true,
+      value: {
+        kind: "set-eol",
+        protocolVersion: PROTOCOL_VERSION,
+        documentUri: "file:///note.md",
+        sessionId: "session-1",
+        controllerId: "controller-1",
+        sequence: 2,
+        documentVersion: 3,
+        eol: "crlf",
+      },
+    });
+
+    expect(
+      decodeWebviewToHostMessage({
+        kind: "set-eol",
+        protocolVersion: PROTOCOL_VERSION,
+        documentUri: "file:///note.md",
+        sessionId: "session-1",
+        controllerId: "controller-1",
+        sequence: 2,
+        documentVersion: 3,
+        eol: "mixed",
+      }),
+    ).toEqual({ ok: false, error: "eol must be lf or crlf." });
+  });
+
   it("decodes a controller generation handshake with the host sequence", () => {
     expect(
       decodeHostToWebviewMessage({
