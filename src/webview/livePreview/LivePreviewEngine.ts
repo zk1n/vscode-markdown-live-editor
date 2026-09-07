@@ -39,14 +39,16 @@ export const livePreviewState = StateField.define<LivePreviewState>({
 });
 
 const livePreviewTheme = EditorView.baseTheme({
-  ".cm-editor": {
+  "&": {
     backgroundColor: "var(--vscode-editor-background, transparent)",
     color: "var(--vscode-editor-foreground, var(--vscode-foreground, inherit))",
     fontFamily:
       'var(--markdown-font-family, -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI", system-ui, "Ubuntu", "Droid Sans", sans-serif)',
     fontSize: "var(--markdown-font-size, 14px)",
+    fontWeight: "normal",
   },
   ".cm-scroller": {
+    fontFamily: "inherit",
     lineHeight: "var(--markdown-line-height, 22px)",
     overflow: "auto",
   },
@@ -60,7 +62,7 @@ const livePreviewTheme = EditorView.baseTheme({
   },
   ".cm-line": {
     lineHeight: "var(--markdown-line-height, 22px)",
-    minHeight: "var(--markdown-line-height, 22px)",
+    minHeight: "1em",
     paddingLeft: "0",
     paddingRight: "0",
   },

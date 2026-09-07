@@ -191,20 +191,14 @@ async function chooseNavigation(): Promise<StatusNavigation | undefined> {
   return value === undefined ? undefined : parseNavigation(value);
 }
 
-async function chooseIndentation(
+export async function chooseIndentation(
   context: StatusActionContext,
 ): Promise<StatusIndentation | undefined> {
   const choice = await vscode.window.showQuickPick(
     createIndentationQuickPickItems(),
     createIndentationQuickPickOptions(),
   );
-  if (choice?.value === "spaces" || choice?.value === "tabs") {
-    return {
-      insertSpaces: choice.value === "spaces",
-      tabSize: context.editorState.tabSize,
-    };
-  }
-  if (choice?.value !== "size") {
+  if (choice?.value === undefined) {
     return undefined;
   }
   const tabSize = await vscode.window.showQuickPick(
@@ -221,8 +215,13 @@ async function chooseIndentation(
     return undefined;
   }
   return {
-    insertSpaces: context.editorState.insertSpaces,
+    insertSpaces:
+      choice.value === "size" ? context.editorState.insertSpaces : choice.value === "spaces",
     tabSize: tabSize.value,
+    indentSize:
+      choice.value === "size"
+        ? (context.editorState.indentSize ?? context.editorState.tabSize)
+        : tabSize.value,
   };
 }
 

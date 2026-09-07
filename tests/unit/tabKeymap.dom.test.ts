@@ -155,3 +155,76 @@ describe("Tab keymap", () => {
     },
   );
 });
+
+// Captured from installed VS Code 1.136.1: spaces, display size, source, selection, command, result, selection.
+const standardEditorCases = [
+  [true, 2, "", 0, 0, "tab", "  ", 2, 2],
+  [true, 2, "abc", 1, 1, "tab", "a bc", 2, 2],
+  [true, 2, "- item", 2, 2, "tab", "-   item", 4, 4],
+  [true, 2, "1. item", 3, 3, "tab", "1.  item", 4, 4],
+  [true, 2, "- [ ] item", 6, 6, "tab", "- [ ]   item", 8, 8],
+  [true, 2, "abc", 1, 2, "tab", "a c", 2, 2],
+  [true, 2, " a\n   b", 0, 7, "tab", "  a\n    b", 0, 9],
+  [true, 2, " a\n   b", 0, 7, "outdent", "a\n  b", 0, 5],
+  [true, 4, "", 0, 0, "tab", "    ", 4, 4],
+  [true, 4, "abc", 1, 1, "tab", "a   bc", 4, 4],
+  [true, 4, "- item", 2, 2, "tab", "-   item", 4, 4],
+  [true, 4, "1. item", 3, 3, "tab", "1.  item", 4, 4],
+  [true, 4, "- [ ] item", 6, 6, "tab", "- [ ]   item", 8, 8],
+  [true, 4, "abc", 1, 2, "tab", "a   c", 4, 4],
+  [true, 4, " a\n   b", 0, 7, "tab", "    a\n    b", 0, 11],
+  [true, 4, " a\n   b", 0, 7, "outdent", "a\nb", 0, 3],
+  [true, 8, "", 0, 0, "tab", "        ", 8, 8],
+  [true, 8, "abc", 1, 1, "tab", "a       bc", 8, 8],
+  [true, 8, "- item", 2, 2, "tab", "-       item", 8, 8],
+  [true, 8, "1. item", 3, 3, "tab", "1.      item", 8, 8],
+  [true, 8, "- [ ] item", 6, 6, "tab", "- [ ]   item", 8, 8],
+  [true, 8, "abc", 1, 2, "tab", "a       c", 8, 8],
+  [true, 8, " a\n   b", 0, 7, "tab", "        a\n        b", 0, 19],
+  [true, 8, " a\n   b", 0, 7, "outdent", "a\nb", 0, 3],
+  [false, 2, "", 0, 0, "tab", "\t", 1, 1],
+  [false, 2, "abc", 1, 1, "tab", "a\tbc", 2, 2],
+  [false, 2, "- item", 2, 2, "tab", "- \titem", 3, 3],
+  [false, 2, "1. item", 3, 3, "tab", "1. \titem", 4, 4],
+  [false, 2, "- [ ] item", 6, 6, "tab", "- [ ] \titem", 7, 7],
+  [false, 2, "abc", 1, 2, "tab", "a\tc", 2, 2],
+  [false, 2, " a\n   b", 0, 7, "tab", "\ta\n\t\tb", 0, 6],
+  [false, 2, " a\n   b", 0, 7, "outdent", "a\n\tb", 0, 4],
+  [false, 4, "", 0, 0, "tab", "\t", 1, 1],
+  [false, 4, "abc", 1, 1, "tab", "a\tbc", 2, 2],
+  [false, 4, "- item", 2, 2, "tab", "- \titem", 3, 3],
+  [false, 4, "1. item", 3, 3, "tab", "1. \titem", 4, 4],
+  [false, 4, "- [ ] item", 6, 6, "tab", "- [ ] \titem", 7, 7],
+  [false, 4, "abc", 1, 2, "tab", "a\tc", 2, 2],
+  [false, 4, " a\n   b", 0, 7, "tab", "\ta\n\tb", 0, 5],
+  [false, 4, " a\n   b", 0, 7, "outdent", "a\nb", 0, 3],
+  [false, 8, "", 0, 0, "tab", "\t", 1, 1],
+  [false, 8, "abc", 1, 1, "tab", "a\tbc", 2, 2],
+  [false, 8, "- item", 2, 2, "tab", "- \titem", 3, 3],
+  [false, 8, "1. item", 3, 3, "tab", "1. \titem", 4, 4],
+  [false, 8, "- [ ] item", 6, 6, "tab", "- [ ] \titem", 7, 7],
+  [false, 8, "abc", 1, 2, "tab", "a\tc", 2, 2],
+  [false, 8, " a\n   b", 0, 7, "tab", "\ta\n\tb", 0, 5],
+  [false, 8, " a\n   b", 0, 7, "outdent", "a\nb", 0, 3],
+] as const;
+
+describe("installed VS Code 1.136.1 indentation oracle", () => {
+  it.each(standardEditorCases)(
+    "spaces %s / size %s / %s / selection %s:%s / %s",
+    (insertSpaces, tabSize, text, start, end, command, result, anchor, head) => {
+      const view = createView(
+        text,
+        { anchor: start, head: end },
+        {
+          insertSpaces: () => insertSpaces,
+          tabSize: () => tabSize,
+        },
+      );
+      const event = pressTab(view, command === "outdent");
+      expect(view.state.doc.toString()).toBe(result);
+      expect(view.state.selection.main.anchor).toBe(anchor);
+      expect(view.state.selection.main.head).toBe(head);
+      expect(event.defaultPrevented).toBe(true);
+    },
+  );
+});

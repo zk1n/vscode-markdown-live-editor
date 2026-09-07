@@ -45,6 +45,10 @@ export const workspace = {
   textDocuments: openDocuments,
 };
 
+export const window = {
+  showQuickPick: (): Promise<unknown> => Promise.resolve(undefined),
+};
+
 export function setTextDocuments(documents: readonly unknown[]): void {
   openDocuments.splice(0, openDocuments.length, ...documents);
 }

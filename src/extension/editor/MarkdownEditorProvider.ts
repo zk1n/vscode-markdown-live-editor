@@ -20,6 +20,7 @@ import {
 import { PROTOCOL_VERSION } from "../../protocol/messages.js";
 import {
   decodeEditorStateMessage,
+  isPreviewTypography,
   type HostPresentationMessage,
 } from "../../protocol/presentationMessages.js";
 import {
@@ -30,6 +31,7 @@ import {
 import { VscodeCustomCssHost } from "../styles/vscodeCustomCssHost.js";
 import type { MarkdownEditorSessionRegistry } from "./MarkdownEditorSessionRegistry.js";
 import { allocatePresentationRevision } from "./presentationRevision.js";
+import { DocumentIndentation } from "./DocumentIndentation.js";
 
 interface MarkdownEditorBootstrap {
   readonly diagnosticMode: DiagnosticMode;
@@ -56,6 +58,7 @@ export interface MarkdownEditorProviderOptions {
  * mutations and ordering decisions.
  */
 export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
+  private readonly indentation = new DocumentIndentation();
   public constructor(
     private readonly coordinator: DocumentSyncCoordinator,
     private readonly options: MarkdownEditorProviderOptions,
@@ -156,7 +159,10 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
       if (currentControllerId === undefined || lifecycle.disposed) {
         return;
       }
-      const configuration = resolveEditorConfiguration(document);
+      const configuration = this.indentation.resolve(
+        document,
+        resolveEditorConfiguration(document),
+      );
       postPresentation({
         kind: "editor-configuration",
         protocolVersion: PROTOCOL_VERSION,
@@ -171,6 +177,12 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
       if (currentControllerId === undefined || latestStyle === undefined || lifecycle.disposed) {
         return;
       }
+      const preview = vscode.workspace.getConfiguration("markdown.preview", document.uri);
+      const typography = {
+        fontFamily: preview.get<unknown>("fontFamily"),
+        fontSize: preview.get<unknown>("fontSize"),
+        lineHeight: preview.get<unknown>("lineHeight"),
+      };
       postPresentation({
         kind: "style-snapshot",
         protocolVersion: PROTOCOL_VERSION,
@@ -179,6 +191,7 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
         controllerId: currentControllerId,
         revision: styleRevision,
         css: latestStyle.css,
+        ...(isPreviewTypography(typography) ? { typography } : {}),
       });
       styleRevision += 1;
     };
@@ -206,15 +219,20 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
       });
       void customCssSession.start();
     };
+    const indentationDisposable = this.indentation.subscribe(document, sendConfiguration);
     const configurationDisposable = vscode.workspace.onDidChangeConfiguration((event): void => {
       if (
         event.affectsConfiguration("editor.insertSpaces", document.uri) ||
+        event.affectsConfiguration("editor.indentSize", document.uri) ||
         event.affectsConfiguration("editor.tabSize", document.uri)
       ) {
         sendConfiguration();
       }
       if (event.affectsConfiguration("vscodeMarkdownLiveEditor.customCss", document.uri)) {
         void customCssSession?.reload();
+      }
+      if (event.affectsConfiguration("markdown.preview", document.uri)) {
+        sendLatestStyle();
       }
     });
     const workspaceFoldersDisposable = vscode.workspace.onDidChangeWorkspaceFolders((): void => {
@@ -232,6 +250,7 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
       receiveDisposable.dispose();
       trackingDisposable.dispose();
       configurationDisposable.dispose();
+      indentationDisposable.dispose();
       workspaceFoldersDisposable.dispose();
       trustDisposable.dispose();
       customCssSession?.dispose();
@@ -293,7 +312,7 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
             }
             if (!trackingReady) {
               trackingReady = true;
-              trackingDisposable = this.registerSession(documentUri, sessionId, webviewPanel);
+              trackingDisposable = this.registerSession(document, sessionId, webviewPanel);
             }
             currentControllerId = controllerId;
             this.options.sessionRegistry?.replaceController(sessionId, controllerId);
@@ -455,7 +474,7 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
         return;
       }
       trackingReady = true;
-      trackingDisposable = this.registerSession(document.uri.toString(), sessionId, webviewPanel);
+      trackingDisposable = this.registerSession(document, sessionId, webviewPanel);
     });
     webview.html = createWebviewHtml(
       webview,
@@ -466,7 +485,7 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
   }
 
   private registerSession(
-    documentUri: string,
+    document: vscode.TextDocument,
     sessionId: string,
     webviewPanel: vscode.WebviewPanel,
   ): vscode.Disposable {
@@ -476,13 +495,23 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
     }
     const registration = registry.register(
       {
-        documentUri,
+        documentUri: document.uri.toString(),
         sessionId,
         reveal: (): void => {
           webviewPanel.reveal(undefined, false);
         },
         postMessage: (message) => webviewPanel.webview.postMessage(message),
-        postPresentationMessage: (message) => webviewPanel.webview.postMessage(message),
+        postPresentationMessage: (message) => {
+          if (message.kind === "editor-configuration") {
+            const delivered = this.indentation.set(document, {
+              insertSpaces: message.insertSpaces,
+              tabSize: message.tabSize,
+              indentSize: message.indentSize ?? message.tabSize,
+            });
+            if (delivered) return true;
+          }
+          return webviewPanel.webview.postMessage(message);
+        },
       },
       webviewPanel.active,
     );
@@ -508,6 +537,7 @@ function isEditorStateCandidate(value: unknown): boolean {
 function resolveEditorConfiguration(document: vscode.TextDocument): {
   readonly insertSpaces: boolean;
   readonly tabSize: number;
+  readonly indentSize: number;
 } {
   const configuration = vscode.workspace.getConfiguration("editor", {
     uri: document.uri,
@@ -515,15 +545,24 @@ function resolveEditorConfiguration(document: vscode.TextDocument): {
   });
   const configuredInsertSpaces = configuration.get<unknown>("insertSpaces");
   const configuredTabSize = configuration.get<unknown>("tabSize");
+  const configuredIndentSize = configuration.get<unknown>("indentSize");
+  const tabSize =
+    typeof configuredTabSize === "number" &&
+    Number.isSafeInteger(configuredTabSize) &&
+    configuredTabSize > 0 &&
+    configuredTabSize <= 32
+      ? configuredTabSize
+      : 4;
   return {
     insertSpaces: typeof configuredInsertSpaces === "boolean" ? configuredInsertSpaces : true,
-    tabSize:
-      typeof configuredTabSize === "number" &&
-      Number.isSafeInteger(configuredTabSize) &&
-      configuredTabSize > 0 &&
-      configuredTabSize <= 32
-        ? configuredTabSize
-        : 4,
+    tabSize,
+    indentSize:
+      typeof configuredIndentSize === "number" &&
+      Number.isSafeInteger(configuredIndentSize) &&
+      configuredIndentSize > 0 &&
+      configuredIndentSize <= 32
+        ? configuredIndentSize
+        : tabSize,
   };
 }
 

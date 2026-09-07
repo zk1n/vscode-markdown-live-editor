@@ -57,6 +57,7 @@ export interface StatusActionCallbacks {
 export interface StatusIndentation {
   readonly insertSpaces: boolean;
   readonly tabSize: number;
+  readonly indentSize?: number;
 }
 
 export interface StatusNavigation {
@@ -354,7 +355,7 @@ function formatLineColumn(state: MarkdownEditorStateReport, localizer: Localizer
 
 function formatIndentation(state: MarkdownEditorStateReport, localizer: Localizer): string {
   return state.insertSpaces
-    ? localizer.t("Spaces: {0}", state.tabSize)
+    ? localizer.t("Spaces: {0}", state.indentSize ?? state.tabSize)
     : localizer.t("Tab Size: {0}", state.tabSize);
 }
 
@@ -377,7 +378,10 @@ function isValidIndentation(value: StatusIndentation): boolean {
   return (
     typeof value.insertSpaces === "boolean" &&
     Number.isSafeInteger(value.tabSize) &&
-    value.tabSize > 0
+    value.tabSize > 0 &&
+    value.tabSize <= 32 &&
+    (value.indentSize === undefined ||
+      (Number.isSafeInteger(value.indentSize) && value.indentSize > 0 && value.indentSize <= 32))
   );
 }
 

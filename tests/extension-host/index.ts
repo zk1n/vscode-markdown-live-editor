@@ -13,6 +13,7 @@ import { textFingerprint } from "../../src/core/diagnostics/textFingerprint.js";
 import {
   createDocumentChangeHandler,
   createWillSaveTextDocumentHandler,
+  chooseIndentation,
 } from "../../src/extension/extension.js";
 import { shouldWarnForMarkdownTrailingWhitespace } from "../../src/extension/markdownTrailingWhitespace.js";
 import { PROTOCOL_VERSION, type HostToWebviewMessage } from "../../src/protocol/messages.js";
@@ -45,6 +46,7 @@ export async function run(): Promise<void> {
   const extension = vscode.extensions.getExtension(EXTENSION_ID);
   assert.ok(extension, `Extension '${EXTENSION_ID}' was not found.`);
   await extension.activate();
+  await probeIndentationPicker();
 
   const commands = await vscode.commands.getCommands(true);
   assert.ok(commands.includes(COMMAND_ID), `Command '${COMMAND_ID}' was not registered.`);
@@ -1916,5 +1918,47 @@ async function removeSmokeFile(documentUri: vscode.Uri): Promise<void> {
     await vscode.workspace.fs.delete(documentUri, { useTrash: false });
   } catch {
     // The fixture starts clean when no previous run left a smoke file behind.
+  }
+}
+
+/** Real public QuickPick interaction; delays only wait for test UI animation. */
+async function probeIndentationPicker(): Promise<void> {
+  for (const actionIndex of [0, 1, 2]) {
+    const result = chooseIndentation({
+      identity: { documentUri: "file:///picker.md", sessionId: "picker", controllerId: "picker" },
+      documentVersion: 1,
+      editorState: {
+        reportSequence: 1,
+        documentVersion: 1,
+        selectionAnchor: 0,
+        selectionHead: 0,
+        line: 1,
+        column: 1,
+        focused: true,
+        composing: false,
+        recoveryActive: false,
+        barrierActive: false,
+        insertSpaces: true,
+        tabSize: 4,
+        indentSize: 4,
+      },
+    });
+    await new Promise<void>((resolve) => setTimeout(resolve, 150));
+    for (let index = 0; index < actionIndex; index += 1) {
+      await vscode.commands.executeCommand("workbench.action.quickOpenSelectNext");
+    }
+    await vscode.commands.executeCommand("workbench.action.acceptSelectedQuickOpenItem");
+    await new Promise<void>((resolve) => setTimeout(resolve, 150));
+    await vscode.commands.executeCommand("workbench.action.quickOpenSelectNext");
+    await vscode.commands.executeCommand("workbench.action.acceptSelectedQuickOpenItem");
+    assert.deepEqual(
+      await result,
+      {
+        insertSpaces: actionIndex !== 1,
+        tabSize: 2,
+        indentSize: actionIndex === 2 ? 4 : 2,
+      },
+      "The indentation action did not continue to the size picker.",
+    );
   }
 }

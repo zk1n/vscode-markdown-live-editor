@@ -29,6 +29,7 @@ export interface MarkdownEditorStateReport {
   readonly barrierActive: boolean;
   readonly insertSpaces: boolean;
   readonly tabSize: number;
+  readonly indentSize?: number;
 }
 
 /**

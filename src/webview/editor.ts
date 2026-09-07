@@ -1,4 +1,5 @@
 import { markdown } from "@codemirror/lang-markdown";
+import { indentUnit } from "@codemirror/language";
 import {
   Annotation,
   Compartment,
@@ -141,6 +142,7 @@ class MarkdownWebviewController {
   private reportSequence = 1;
   private insertSpaces = true;
   private tabSize = 4;
+  private indentSize = 4;
   private styleElement: HTMLStyleElement | undefined;
   private readonly acknowledgedHistoryFocus = new Map<
     string,
@@ -177,7 +179,10 @@ class MarkdownWebviewController {
     const extensions: Extension[] = [
       vscodeEditorTheme,
       this.editable.of(EditorView.editable.of(this.controllerReady)),
-      this.tabSizeConfiguration.of(EditorState.tabSize.of(this.tabSize)),
+      this.tabSizeConfiguration.of([
+        EditorState.tabSize.of(this.tabSize),
+        indentUnit.of(" ".repeat(this.tabSize)),
+      ]),
       EditorView.updateListener.of((update): void => {
         this.handleUpdate(update);
       }),
@@ -225,6 +230,7 @@ class MarkdownWebviewController {
               isTabEditable: (): boolean => this.isTabEditable(),
               getInsertSpaces: (): boolean => this.insertSpaces,
               getTabSize: (): number => this.tabSize,
+              getIndentSize: (): number => this.indentSize,
             }),
           ]),
         ),
@@ -322,8 +328,12 @@ class MarkdownWebviewController {
         this.editorConfigurationRevision = message.revision;
         this.insertSpaces = message.insertSpaces;
         this.tabSize = message.tabSize;
+        this.indentSize = message.indentSize ?? message.tabSize;
         this.view.dispatch({
-          effects: this.tabSizeConfiguration.reconfigure(EditorState.tabSize.of(this.tabSize)),
+          effects: this.tabSizeConfiguration.reconfigure([
+            EditorState.tabSize.of(this.tabSize),
+            indentUnit.of(this.insertSpaces ? " ".repeat(this.indentSize) : "\t"),
+          ]),
         });
         this.reportEditorState();
         return;
@@ -338,6 +348,12 @@ class MarkdownWebviewController {
           return;
         }
         this.styleRevision = message.revision;
+        if (message.typography !== undefined) {
+          const style = document.documentElement.style;
+          style.setProperty("--markdown-font-family", message.typography.fontFamily);
+          style.setProperty("--markdown-font-size", `${String(message.typography.fontSize)}px`);
+          style.setProperty("--markdown-line-height", String(message.typography.lineHeight));
+        }
         this.replaceCustomStyle(message.css);
         return;
     }
@@ -492,6 +508,7 @@ class MarkdownWebviewController {
       "view.composing": gate.viewComposing,
       insertSpaces: this.insertSpaces,
       tabSize: this.tabSize,
+      indentSize: this.indentSize,
     });
   }
 
@@ -552,6 +569,7 @@ class MarkdownWebviewController {
       barrierActive: this.barriers.isFrozen,
       insertSpaces: this.insertSpaces,
       tabSize: this.tabSize,
+      indentSize: this.indentSize,
     });
     this.reportSequence += 1;
   }

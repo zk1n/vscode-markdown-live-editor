@@ -68,6 +68,10 @@ Use the maintained ESLint 9 line rather than immediately adopting a newly releas
 
 ### CodeMirror 6
 
+2026-09-07: 既存lockfile内の`@codemirror/language` 6.12.4（MIT）を直接依存にも明記する。
+`indentUnit`を明示reconfigureし、Tab設定とMarkdown language側indent unitを一致させるため。
+採用済みCodeMirror 6境界内であり、新しいpackage version / transitive graph / rendererは追加しない。
+
 Accepted core editor engine.
 
 Reasons:

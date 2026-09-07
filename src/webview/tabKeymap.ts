@@ -1,4 +1,10 @@
-import { countColumn, type ChangeSpec, type EditorState, type Line } from "@codemirror/state";
+import {
+  countColumn,
+  EditorSelection,
+  type ChangeSpec,
+  type EditorState,
+  type Line,
+} from "@codemirror/state";
 import type { KeyBinding } from "@codemirror/view";
 import type { EditorView } from "@codemirror/view";
 
@@ -6,6 +12,7 @@ export interface TabKeymapGate {
   isTabEditable: () => boolean;
   getInsertSpaces: () => boolean;
   getTabSize: () => number;
+  getIndentSize?: () => number;
 }
 
 export function createTabKeymap(gate: TabKeymapGate): readonly KeyBinding[] {
@@ -13,11 +20,21 @@ export function createTabKeymap(gate: TabKeymapGate): readonly KeyBinding[] {
     if (!gate.isTabEditable()) {
       return true;
     }
-    if (hasSelection(view.state)) {
-      indentSelectedLines(view, gate.getInsertSpaces(), gate.getTabSize());
+    if (hasMultilineSelection(view.state)) {
+      indentSelectedLines(
+        view,
+        gate.getInsertSpaces(),
+        gate.getTabSize(),
+        gate.getIndentSize?.() ?? gate.getTabSize(),
+      );
       return true;
     }
-    insertTabAtCollapsedCarets(view, gate.getInsertSpaces(), gate.getTabSize());
+    insertTabAtCollapsedCarets(
+      view,
+      gate.getInsertSpaces(),
+      gate.getTabSize(),
+      gate.getIndentSize?.() ?? gate.getTabSize(),
+    );
     return true;
   };
 
@@ -25,7 +42,12 @@ export function createTabKeymap(gate: TabKeymapGate): readonly KeyBinding[] {
     if (!gate.isTabEditable()) {
       return true;
     }
-    outdentSelectedLines(view, gate.getTabSize());
+    outdentSelectedLines(
+      view,
+      gate.getInsertSpaces(),
+      gate.getTabSize(),
+      gate.getIndentSize?.() ?? gate.getTabSize(),
+    );
     return true;
   };
 
@@ -45,54 +67,67 @@ export function createTabKeymap(gate: TabKeymapGate): readonly KeyBinding[] {
   ];
 }
 
-function hasSelection(state: EditorState): boolean {
-  return state.selection.ranges.some((selection) => selection.from !== selection.to);
+function hasMultilineSelection(state: EditorState): boolean {
+  return state.selection.ranges.some(
+    (selection) =>
+      state.doc.lineAt(selection.from).number !== state.doc.lineAt(selection.to).number,
+  );
 }
 
 function insertTabAtCollapsedCarets(
   view: EditorView,
   insertSpaces: boolean,
   tabSize: number,
+  indentSize: number,
 ): void {
-  if (!insertSpaces) {
-    view.dispatch(view.state.replaceSelection("\t"));
-    return;
-  }
-
   const normalizedTabSize = normalizeTabSize(tabSize);
-  const changes = view.state.selection.ranges.map((selection) => {
+  const transaction = view.state.changeByRange((selection) => {
     const line = view.state.doc.lineAt(selection.from);
     const column = countColumn(line.text, normalizedTabSize, selection.from - line.from);
-    const insertionSize = nextTabStopDistance(column, normalizedTabSize);
+    const insertionSize = nextTabStopDistance(column, normalizeTabSize(indentSize));
+    const insert = insertSpaces ? " ".repeat(insertionSize) : "\t";
     return {
-      from: selection.from,
-      to: selection.to,
-      insert: " ".repeat(insertionSize),
+      changes: { from: selection.from, to: selection.to, insert },
+      range: EditorSelection.cursor(selection.from + insert.length),
     };
   });
-  view.dispatch({ changes });
+  view.dispatch({ ...transaction, userEvent: "input.indent", scrollIntoView: true });
 }
 
-function indentSelectedLines(view: EditorView, insertSpaces: boolean, tabSize: number): void {
-  const unit = insertSpaces ? " ".repeat(normalizeTabSize(tabSize)) : "\t";
-  const changes = selectedLines(view.state).map((line) => ({ from: line.from, insert: unit }));
+function indentSelectedLines(
+  view: EditorView,
+  insertSpaces: boolean,
+  tabSize: number,
+  indentSize: number,
+): void {
+  const size = normalizeTabSize(insertSpaces ? indentSize : tabSize);
+  const changes = selectedLines(view.state).map((line) => {
+    const leading = /^[\t ]*/u.exec(line.text)?.[0] ?? "";
+    const column = countColumn(leading, normalizeTabSize(tabSize));
+    const target = column + nextTabStopDistance(column, size);
+    const insert = insertSpaces ? " ".repeat(target) : "\t".repeat(Math.floor(target / size));
+    return { from: line.from, to: line.from + leading.length, insert };
+  });
   if (changes.length > 0) {
     view.dispatch({ changes, userEvent: "input.indent" });
   }
 }
 
-function outdentSelectedLines(view: EditorView, tabSize: number): void {
-  const normalizedTabSize = normalizeTabSize(tabSize);
+function outdentSelectedLines(
+  view: EditorView,
+  insertSpaces: boolean,
+  tabSize: number,
+  indentSize: number,
+): void {
+  const normalizedTabSize = normalizeTabSize(insertSpaces ? indentSize : tabSize);
   const changes: ChangeSpec[] = [];
   for (const line of selectedLines(view.state)) {
-    if (line.text.startsWith("\t")) {
-      changes.push({ from: line.from, to: line.from + 1, insert: "" });
-      continue;
-    }
-    const leadingSpaces = /^ +/u.exec(line.text)?.[0].length ?? 0;
-    const deleteCount = Math.min(leadingSpaces, normalizedTabSize);
-    if (deleteCount > 0) {
-      changes.push({ from: line.from, to: line.from + deleteCount, insert: "" });
+    const leading = /^[\t ]*/u.exec(line.text)?.[0] ?? "";
+    const column = countColumn(leading, normalizeTabSize(tabSize));
+    if (column > 0) {
+      const target = column - (column % normalizedTabSize || normalizedTabSize);
+      const insert = insertSpaces ? " ".repeat(target) : "\t".repeat(target / normalizedTabSize);
+      changes.push({ from: line.from, to: line.from + leading.length, insert });
     }
   }
   if (changes.length > 0) {
