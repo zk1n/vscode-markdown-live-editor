@@ -1,4 +1,5 @@
 import { deleteCharBackward, deleteCharForward } from "@codemirror/commands";
+import { markdownLanguage } from "@codemirror/lang-markdown";
 import { EditorState, type Extension, type Range, StateField } from "@codemirror/state";
 import { Decoration, type DecorationSet, EditorView } from "@codemirror/view";
 
@@ -108,7 +109,7 @@ const livePreviewTheme = EditorView.baseTheme({
   ".cm-live-preview-inline-code": {
     backgroundColor:
       "var(--vscode-textCodeBlock-background, var(--vscode-textPreformat-background, transparent))",
-    color: "var(--vscode-textPreformat-foreground, var(--vscode-editor-foreground, inherit))",
+    color: "inherit",
     borderRadius: "3px",
     fontFamily:
       'var(--vscode-editor-font-family, "SF Mono", Monaco, Menlo, Consolas, "Ubuntu Mono", "Liberation Mono", "DejaVu Sans Mono", "Courier New", monospace)',
@@ -163,6 +164,12 @@ const livePreviewTheme = EditorView.baseTheme({
     lineHeight: "inherit",
     position: "absolute",
     top: "0",
+  },
+  ".cm-live-preview-list-unordered-marker-depth-2::before": {
+    content: '"◦"',
+  },
+  ".cm-live-preview-list-unordered-marker-depth-3::before": {
+    content: '"▪"',
   },
   ".cm-live-preview-task-marker": {
     color: "transparent",
@@ -278,6 +285,7 @@ class CodeMirrorDecorationLivePreviewEngine implements LivePreviewEngine {
 function buildDecorations(state: EditorState): DecorationSet {
   const documentText = state.doc.toString();
   const selections = state.selection.ranges.map(({ from, to }) => ({ from, to }));
+  const unorderedMarkerDepths = findUnorderedMarkerDepths(documentText);
   const decorations = buildStructuralLineDecorations(state, selections);
 
   for (const syntax of findPresentationSyntax(documentText)) {
@@ -295,10 +303,9 @@ function buildDecorations(state: EditorState): DecorationSet {
           );
         } else {
           decorations.push(
-            Decoration.mark({ class: markerClass(marker.presentation) }).range(
-              marker.from,
-              marker.to,
-            ),
+            Decoration.mark({
+              class: markerClass(marker.presentation, unorderedMarkerDepths.get(marker.from)),
+            }).range(marker.from, marker.to),
           );
         }
       }
@@ -319,6 +326,36 @@ function buildDecorations(state: EditorState): DecorationSet {
   }
 
   return Decoration.set(decorations, true);
+}
+
+/**
+ * Markdown's parse tree, rather than source indentation, determines the
+ * presentation depth. That keeps tab-expanded and space-indented nested lists
+ * visually equivalent without changing their document or editing semantics.
+ */
+function findUnorderedMarkerDepths(documentText: string): ReadonlyMap<number, number> {
+  const depths = new Map<number, number>();
+  const tree = markdownLanguage.parser.parse(documentText);
+
+  tree.iterate({
+    enter: ({ from, name, to }): void => {
+      if (name !== "ListMark" || !/^[+*-]$/.test(documentText.slice(from, to))) {
+        return;
+      }
+
+      let depth = 0;
+      let node: ReturnType<typeof tree.resolve> | null = tree.resolve(from, 1);
+      while (node !== null) {
+        if (node.name === "ListItem") {
+          depth += 1;
+        }
+        node = node.parent;
+      }
+      depths.set(from, Math.min(Math.max(depth, 1), 3));
+    },
+  });
+
+  return depths;
 }
 
 function buildStructuralLineDecorations(
@@ -405,12 +442,17 @@ function isHorizontalRule(line: string): boolean {
 
 function markerClass(
   presentation: "list-ordered" | "list-unordered" | "task-checked" | "task-unchecked",
+  unorderedDepth?: number,
 ): string {
   switch (presentation) {
     case "list-ordered":
       return "cm-live-preview-list-marker cm-live-preview-list-ordered-marker";
-    case "list-unordered":
-      return "cm-live-preview-list-marker cm-live-preview-list-unordered-marker";
+    case "list-unordered": {
+      const baseClass = "cm-live-preview-list-marker cm-live-preview-list-unordered-marker";
+      return unorderedDepth === 2 || unorderedDepth === 3
+        ? `${baseClass} cm-live-preview-list-unordered-marker-depth-${String(unorderedDepth)}`
+        : baseClass;
+    }
     case "task-checked":
       return "cm-live-preview-task-marker cm-live-preview-task-checked";
     case "task-unchecked":

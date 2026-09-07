@@ -131,19 +131,27 @@ async function main() {
         );
         break;
       } catch (error) {
-        const compactOutput = runErrorOutput.slice(-8000);
+        const compactOutput = redactRuntimePaths(runErrorOutput.slice(-8000), [
+          candidate.path,
+          userDataDirectory,
+          projectRoot,
+        ]);
         const requestState = requestLog.length === 0 ? "no-requests" : requestLog.join(", ");
         errors.push(
-          `${candidate.label} (${candidate.path}, ${browserMode}): ${String(error)}\nOutput:${compactOutput}\nRequests:${requestState}`,
+          `${candidate.label} (${browserMode}): ${redactRuntimePaths(String(error), [
+            candidate.path,
+            userDataDirectory,
+            projectRoot,
+          ])}\nOutput:${compactOutput}\nRequests:${requestState}`,
         );
       }
       if (finalResult !== null) {
-        finalResult.browser = candidate.path;
+        finalResult.browser = candidate.label;
         break;
       }
     }
     if (finalResult !== null) {
-      finalResult.browser = candidate.path;
+      finalResult.browser = candidate.label;
       break;
     }
     harnessResult = null;
@@ -152,7 +160,7 @@ async function main() {
   }
 
   if (finalResult === null) {
-    throw new Error(`All browser candidates failed:\n${errors.join("\n")}`);
+    throw new Error(redactRuntimePaths(`All browser candidates failed:\n${errors.join("\n")}`));
   }
 
   process.stdout.write(`${JSON.stringify(finalResult)}\n`);
@@ -260,6 +268,31 @@ async function runBrowserCandidate(candidate, browserFlags, harnessUrl) {
   } finally {
     clearTimeout(timeoutHandle);
   }
+}
+
+/**
+ * Removes machine-specific filesystem locations before runner diagnostics are
+ * emitted. Browser executable paths are intentionally usable only at the
+ * spawn/access boundary; public output identifies the candidate by label.
+ */
+export function redactRuntimePaths(value, privatePaths = []) {
+  let redacted = String(value);
+  for (const privatePath of privatePaths) {
+    if (typeof privatePath !== "string" || privatePath.length === 0) {
+      continue;
+    }
+    redacted = redacted.replace(
+      new RegExp(escapeRegularExpression(privatePath), "gi"),
+      "[redacted-path]",
+    );
+  }
+  return redacted
+    .replace(/file:\/\/\/?[^\s"'<>]+/giu, "file:[redacted-path]")
+    .replace(/(?:[a-z]:\\|\\\\)[^\r\n]*/giu, "[redacted-path]");
+}
+
+function escapeRegularExpression(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
 }
 
 function contentType(target) {

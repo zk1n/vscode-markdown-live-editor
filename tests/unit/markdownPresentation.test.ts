@@ -237,14 +237,21 @@ describe("LivePreviewEngine", () => {
     engine.dispose();
   });
 
-  it("presents parser-recognized nested markers but leaves four-space top-level code raw", () => {
-    const source = "    - code\n- parent\n    - nested\n    - [ ] nested task";
+  it("uses parser-derived unordered marker depth while leaving indentation and code raw", () => {
+    const source = [
+      "    - code",
+      "- parent",
+      "  - two-space child",
+      "    - four-space child",
+      "      - five-space child",
+      "        - six-space child",
+      "\t- tab child",
+      "    - [ ] nested task",
+    ].join("\n");
     const syntax = findPresentationSyntax(source);
-    const nestedList = syntax.find(
-      ({ kind, from }) => kind === "list" && from === source.indexOf("- nested"),
-    );
+    const nestedList = syntax.filter(({ kind }) => kind === "list");
     const nestedTask = syntax.find(({ kind }) => kind === "task");
-    if (nestedList === undefined || nestedTask === undefined) {
+    if (nestedList.length !== 6 || nestedTask === undefined) {
       throw new Error("Expected parser-recognized nested list and task.");
     }
 
@@ -254,9 +261,14 @@ describe("LivePreviewEngine", () => {
       selection: { anchor: 0 },
       extensions: [engine.extension],
     });
-    expect(
-      hasMarkerClassAt(state, nestedList.markers[0]?.from ?? -1, nestedList.markers[0]?.to ?? -1),
-    ).toBe(true);
+    expect(nestedList.map(({ markers }) => markerClassAt(state, markers[0]?.from ?? -1))).toEqual([
+      "cm-live-preview-list-marker cm-live-preview-list-unordered-marker",
+      "cm-live-preview-list-marker cm-live-preview-list-unordered-marker cm-live-preview-list-unordered-marker-depth-2",
+      "cm-live-preview-list-marker cm-live-preview-list-unordered-marker cm-live-preview-list-unordered-marker-depth-3",
+      "cm-live-preview-list-marker cm-live-preview-list-unordered-marker cm-live-preview-list-unordered-marker-depth-3",
+      "cm-live-preview-list-marker cm-live-preview-list-unordered-marker cm-live-preview-list-unordered-marker-depth-3",
+      "cm-live-preview-list-marker cm-live-preview-list-unordered-marker cm-live-preview-list-unordered-marker-depth-3",
+    ]);
     expect(
       hasDecorationClassAt(
         state,
@@ -273,6 +285,7 @@ describe("LivePreviewEngine", () => {
         "cm-live-preview-list-marker",
       ),
     ).toBe(false);
+    expect(state.doc.toString()).toBe(source);
 
     engine.dispose();
   });
@@ -517,6 +530,19 @@ function hasDecorationClassAt(
     }
   });
   return found;
+}
+
+function markerClassAt(state: EditorState, position: number): string | undefined {
+  let className: string | undefined;
+  state
+    .field(livePreviewState)
+    .decorations.between(position, position + 1, (_from, _to, value): void => {
+      const candidate = decorationClass(value);
+      if (candidate?.includes("cm-live-preview-list-unordered-marker") === true) {
+        className = candidate;
+      }
+    });
+  return className;
 }
 
 function hasHiddenPresentation(value: Decoration): boolean {
