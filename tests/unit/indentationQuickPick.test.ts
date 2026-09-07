@@ -1,14 +1,13 @@
 import { describe, expect, it, vi } from "vitest";
-import * as vscode from "vscode";
 import { readFileSync } from "node:fs";
 
 import {
   createIndentationQuickPickItems,
   createIndentationQuickPickOptions,
-  chooseIndentation,
+  createTabSizeQuickPickItems,
+  createTabSizeQuickPickOptions,
 } from "../../src/extension/extension.js";
 import type { Localizer } from "../../src/extension/localization.js";
-import type { StatusActionContext } from "../../src/extension/status/MarkdownEditorStatusBarManager.js";
 import { DocumentIndentation } from "../../src/extension/editor/DocumentIndentation.js";
 
 describe("indentation status quick pick", () => {
@@ -78,31 +77,15 @@ describe("indentation status quick pick", () => {
     expect(bundle).toContain('"Select Action": "アクションの選択"');
     expect(bundle).toContain('"change view": "ビューの変更"');
     expect(bundle).toContain('"Change Tab Display Size": "タブ表示サイズの変更"');
+    expect(bundle).toContain(
+      '"Select Tab Size for Current File": "現在のファイルのタブ サイズを選択"',
+    );
   });
 });
 
 const englishLocalizer: Localizer = {
   t(message: string): string {
     return message;
-  },
-};
-
-const pickerContext: StatusActionContext = {
-  identity: { documentUri: "file:///note.md", sessionId: "s", controllerId: "c" },
-  documentVersion: 1,
-  editorState: {
-    reportSequence: 1,
-    documentVersion: 1,
-    selectionAnchor: 0,
-    selectionHead: 0,
-    line: 1,
-    column: 1,
-    focused: true,
-    composing: false,
-    recoveryActive: false,
-    barrierActive: false,
-    insertSpaces: false,
-    tabSize: 4,
   },
 };
 
@@ -134,30 +117,53 @@ describe("indentation picker sequence", () => {
     expect(first).toHaveBeenCalledTimes(1);
     expect(second).toHaveBeenCalledTimes(2);
   });
-  it.each(["spaces", "tabs", "size"])("opens size selection after %s", async (value) => {
-    const pick = vi.spyOn(vscode.window, "showQuickPick");
-    const action = { label: value, value };
-    const size = { label: "2", value: 2 };
-    pick.mockResolvedValueOnce(action);
-    pick.mockResolvedValueOnce(size);
-    expect(await chooseIndentation(pickerContext)).toEqual({
-      insertSpaces: value === "spaces",
-      tabSize: 2,
-      indentSize: value === "size" ? 4 : 2,
+  it("marks configured, default, and current tab sizes like the standard picker", () => {
+    const items = createTabSizeQuickPickItems(4, 2, englishLocalizer);
+
+    expect(items).toEqual([
+      { label: "1", value: 1 },
+      { label: "2", value: 2, description: "Current Tab Size" },
+      { label: "3", value: 3 },
+      { label: "4", value: 4, description: "Default Tab Size" },
+      { label: "5", value: 5 },
+      { label: "6", value: 6 },
+      { label: "7", value: 7 },
+      { label: "8", value: 8 },
+    ]);
+    expect(createTabSizeQuickPickItems(4, 4, englishLocalizer)[3]).toEqual({
+      label: "4",
+      value: 4,
+      description: "Configured Tab Size",
     });
-    expect(pick).toHaveBeenCalledTimes(2);
-    expect(pick.mock.calls[1]?.[0]).toEqual(
-      Array.from({ length: 8 }, (_, i) => ({ label: String(i + 1), value: i + 1 })),
-    );
-    pick.mockRestore();
   });
 
-  it("does not apply a mode change when size selection is cancelled", async () => {
-    const pick = vi.spyOn(vscode.window, "showQuickPick");
-    const action = { label: "spaces", value: "spaces" };
-    pick.mockResolvedValueOnce(action);
-    pick.mockResolvedValueOnce(undefined);
-    expect(await chooseIndentation(pickerContext)).toBeUndefined();
-    pick.mockRestore();
+  it("uses the current document tab size as the active item without a custom title", () => {
+    const items = createTabSizeQuickPickItems(4, 12, englishLocalizer);
+
+    expect(createTabSizeQuickPickOptions(items, 12, englishLocalizer)).toEqual({
+      placeHolder: "Select Tab Size for Current File",
+      activeItem: items[7],
+    });
+    expect(createTabSizeQuickPickOptions(items, 2, englishLocalizer)).toEqual({
+      placeHolder: "Select Tab Size for Current File",
+      activeItem: items[1],
+    });
+  });
+
+  it("localizes the standard tab-size placeholder and descriptions", () => {
+    const translations: Readonly<Record<string, string>> = {
+      "Select Tab Size for Current File": "現在のファイルのタブ サイズを選択",
+      "Configured Tab Size": "構成されたタブ サイズ",
+      "Default Tab Size": "既定のタブ サイズ",
+      "Current Tab Size": "現在のタブ サイズ",
+    };
+    const localizer: Localizer = { t: (message): string => translations[message] ?? message };
+    const items = createTabSizeQuickPickItems(4, 2, localizer);
+
+    expect(createTabSizeQuickPickOptions(items, 2, localizer).placeHolder).toBe(
+      "現在のファイルのタブ サイズを選択",
+    );
+    expect(items[1]?.description).toBe("現在のタブ サイズ");
+    expect(items[3]?.description).toBe("既定のタブ サイズ");
   });
 });

@@ -120,11 +120,13 @@ const livePreviewTheme = EditorView.baseTheme({
     color: "var(--vscode-textBlockQuote-foreground, var(--vscode-editor-foreground, inherit))",
   },
   ".cm-line.cm-live-preview-blockquote-line": {
+    backgroundColor:
+      "var(--vscode-textBlockQuote-background, var(--vscode-editorWidget-background, transparent))",
     borderLeft:
       "5px solid var(--vscode-textBlockQuote-border, var(--vscode-textSeparator-foreground, var(--vscode-editorWidget-border, currentColor)))",
     borderRadius: "2px",
     boxSizing: "border-box",
-    padding: "0 16px 0 10px",
+    padding: "0 16px 0 12px",
   },
   ".cm-live-preview-link": {
     color: "var(--vscode-textLink-foreground, var(--vscode-editor-foreground, inherit))",

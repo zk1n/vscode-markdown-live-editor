@@ -8,36 +8,59 @@ import { spawn } from "node:child_process";
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const projectRootPrefix = `${projectRoot}${path.sep}`;
-const userDataDirectory = await mkdtemp(path.join(os.tmpdir(), "markdown-live-editor-geometry-"));
-const browserCandidates = await discoverBrowserCandidates();
-
-if (browserCandidates.length === 0) {
-  throw new Error("No usable Chromium-family browser executable was found.");
-}
-
 let harnessResult = null;
 let resultResolver = null;
 let runErrorOutput = "";
 const requestLog = [];
 const holdResponses = [];
 
-const server = createServer(async (request, response) => {
-  const pathname = new URL(request.url ?? "/", "http://127.0.0.1").pathname;
-  requestLog.push(`${request.method ?? "GET"} ${pathname}`);
-  if (pathname === "/__geometry-harness-hold") {
-    holdResponses.push(response);
-    return;
+if (isMainModule()) {
+  await main();
+}
+
+async function main() {
+  const userDataDirectory = await mkdtemp(path.join(os.tmpdir(), "markdown-live-editor-geometry-"));
+  const browserCandidates = await discoverBrowserCandidates();
+
+  if (browserCandidates.length === 0) {
+    throw new Error("No usable Chromium-family browser executable was found.");
   }
-  if (pathname === "/__geometry-harness-result") {
-    if (request.method === "GET") {
-      const requestUrl = new URL(request.url ?? "/", "http://127.0.0.1");
-      const encodedPayload = requestUrl.searchParams.get("payload");
-      if (encodedPayload === null) {
-        response.writeHead(400).end("geometry result payload is missing");
+
+  const server = createServer(async (request, response) => {
+    const pathname = new URL(request.url ?? "/", "http://127.0.0.1").pathname;
+    requestLog.push(`${request.method ?? "GET"} ${pathname}`);
+    if (pathname === "/__geometry-harness-hold") {
+      holdResponses.push(response);
+      return;
+    }
+    if (pathname === "/__geometry-harness-result") {
+      if (request.method === "GET") {
+        const requestUrl = new URL(request.url ?? "/", "http://127.0.0.1");
+        const encodedPayload = requestUrl.searchParams.get("payload");
+        if (encodedPayload === null) {
+          response.writeHead(400).end("geometry result payload is missing");
+          return;
+        }
+        try {
+          const payload = JSON.parse(encodedPayload);
+          harnessResult = payload;
+          releaseHarnessHolds();
+          if (resultResolver !== null) {
+            resultResolver(payload);
+            resultResolver = null;
+          }
+          response.writeHead(200).end("ok");
+        } catch (error) {
+          response.writeHead(400).end(`invalid geometry result payload: ${String(error)}`);
+        }
+        return;
+      }
+      if (request.method !== "POST") {
+        response.writeHead(405).end("method not allowed");
         return;
       }
       try {
-        const payload = JSON.parse(encodedPayload);
+        const payload = await parseJsonBody(request);
         harnessResult = payload;
         releaseHarnessHolds();
         if (resultResolver !== null) {
@@ -50,125 +73,108 @@ const server = createServer(async (request, response) => {
       }
       return;
     }
-    if (request.method !== "POST") {
-      response.writeHead(405).end("method not allowed");
+
+    const target = path.resolve(projectRoot, `.${decodeURIComponent(pathname)}`);
+    if (target !== projectRoot && !target.startsWith(projectRootPrefix)) {
+      response.writeHead(403).end();
       return;
     }
     try {
-      const payload = await parseJsonBody(request);
-      harnessResult = payload;
-      releaseHarnessHolds();
-      if (resultResolver !== null) {
-        resultResolver(payload);
-        resultResolver = null;
+      const targetStat = await stat(target);
+      if (!targetStat.isFile()) {
+        response.writeHead(404).end();
+        return;
       }
-      response.writeHead(200).end("ok");
-    } catch (error) {
-      response.writeHead(400).end(`invalid geometry result payload: ${String(error)}`);
-    }
-    return;
-  }
-
-  const target = path.resolve(projectRoot, `.${decodeURIComponent(pathname)}`);
-  if (target !== projectRoot && !target.startsWith(projectRootPrefix)) {
-    response.writeHead(403).end();
-    return;
-  }
-  try {
-    const targetStat = await stat(target);
-    if (!targetStat.isFile()) {
+      response.writeHead(200, { "content-type": contentType(target) });
+      response.end(await readFile(target));
+    } catch {
       response.writeHead(404).end();
-      return;
     }
-    response.writeHead(200, { "content-type": contentType(target) });
-    response.end(await readFile(target));
-  } catch {
-    response.writeHead(404).end();
+  });
+
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  if (address === null || typeof address === "string") {
+    throw new Error("The geometry harness server did not receive a TCP port.");
   }
-});
+  const harnessUrl = `http://127.0.0.1:${String(address.port)}/tests/browser/geometry-harness.html`;
 
-await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
-const address = server.address();
-if (address === null || typeof address === "string") {
-  throw new Error("The geometry harness server did not receive a TCP port.");
-}
-const harnessUrl = `http://127.0.0.1:${String(address.port)}/tests/browser/geometry-harness.html`;
+  const browserFlags = [
+    // The managed Windows test environment denies Chromium's child-process
+    // sandbox token. This harness serves only repository files on loopback from
+    // a one-shot profile, so disable that browser sandbox explicitly here.
+    "--no-sandbox",
+    "--disable-gpu",
+    "--dump-dom",
+    "--no-first-run",
+    "--no-default-browser-check",
+    "--no-pings",
+    "--virtual-time-budget=5000",
+    "--enable-logging=stderr",
+    "--log-level=0",
+    // Keep every fixture line inside the viewport so elementFromPoint can
+    // independently identify the visible DOM line at each tested coordinate.
+    "--window-size=1000,1400",
+    `--user-data-dir=${userDataDirectory}`,
+  ];
+  const browserModes = ["--headless=new"];
 
-const browserFlags = [
-  // The managed Windows test environment denies Chromium's child-process
-  // sandbox token. This harness serves only repository files on loopback from
-  // a one-shot profile, so disable that browser sandbox explicitly here.
-  "--no-sandbox",
-  "--disable-gpu",
-  "--dump-dom",
-  "--no-first-run",
-  "--no-default-browser-check",
-  "--no-pings",
-  "--virtual-time-budget=5000",
-  "--enable-logging=stderr",
-  "--log-level=0",
-  // Keep every fixture line inside the viewport so elementFromPoint can
-  // independently identify the visible DOM line at each tested coordinate.
-  "--window-size=1000,1400",
-  `--user-data-dir=${userDataDirectory}`,
-];
-const browserModes = ["--headless=new"];
-
-let finalResult = null;
-const errors = [];
-for (const candidate of browserCandidates) {
-  for (const browserMode of browserModes) {
-    try {
-      finalResult = await runBrowserCandidate(
-        candidate,
-        [...browserFlags, browserMode],
-        harnessUrl,
-      );
-      break;
-    } catch (error) {
-      const compactOutput = runErrorOutput.slice(-8000);
-      const requestState = requestLog.length === 0 ? "no-requests" : requestLog.join(", ");
-      errors.push(
-        `${candidate.label} (${candidate.path}, ${browserMode}): ${String(error)}\nOutput:${compactOutput}\nRequests:${requestState}`,
-      );
+  let finalResult = null;
+  const errors = [];
+  for (const candidate of browserCandidates) {
+    for (const browserMode of browserModes) {
+      try {
+        finalResult = await runBrowserCandidate(
+          candidate,
+          [...browserFlags, browserMode],
+          harnessUrl,
+        );
+        break;
+      } catch (error) {
+        const compactOutput = runErrorOutput.slice(-8000);
+        const requestState = requestLog.length === 0 ? "no-requests" : requestLog.join(", ");
+        errors.push(
+          `${candidate.label} (${candidate.path}, ${browserMode}): ${String(error)}\nOutput:${compactOutput}\nRequests:${requestState}`,
+        );
+      }
+      if (finalResult !== null) {
+        finalResult.browser = candidate.path;
+        break;
+      }
     }
     if (finalResult !== null) {
       finalResult.browser = candidate.path;
       break;
     }
+    harnessResult = null;
+    resultResolver = null;
+    runErrorOutput = "";
   }
-  if (finalResult !== null) {
-    finalResult.browser = candidate.path;
-    break;
+
+  if (finalResult === null) {
+    throw new Error(`All browser candidates failed:\n${errors.join("\n")}`);
   }
-  harnessResult = null;
-  resultResolver = null;
-  runErrorOutput = "";
-}
 
-if (finalResult === null) {
-  throw new Error(`All browser candidates failed:\n${errors.join("\n")}`);
-}
+  process.stdout.write(`${JSON.stringify(finalResult)}\n`);
+  if (
+    finalResult.error !== undefined ||
+    finalResult.geometryMatches !== true ||
+    finalResult.hitTestsMatch !== true
+  ) {
+    process.exitCode = 1;
+  }
 
-process.stdout.write(`${JSON.stringify(finalResult)}\n`);
-if (
-  finalResult.error !== undefined ||
-  finalResult.geometryMatches !== true ||
-  finalResult.hitTestsMatch !== true
-) {
-  process.exitCode = 1;
-}
+  server.closeAllConnections();
+  await Promise.race([new Promise((resolve) => server.close(resolve)), delay(2_000)]);
 
-server.closeAllConnections();
-await Promise.race([new Promise((resolve) => server.close(resolve)), delay(2_000)]);
-
-try {
-  await rm(userDataDirectory, { force: true, recursive: true, maxRetries: 3, retryDelay: 100 });
-} catch (error) {
-  // Chrome's Crashpad child can briefly retain a dump after the browser
-  // closes. Preserve the harness result instead of replacing it with a
-  // cleanup-only error.
-  process.stderr.write(`Geometry harness temporary cleanup failed: ${String(error)}\n`);
+  try {
+    await rm(userDataDirectory, { force: true, recursive: true, maxRetries: 3, retryDelay: 100 });
+  } catch (error) {
+    // Chrome's Crashpad child can briefly retain a dump after the browser
+    // closes. Preserve the harness result instead of replacing it with a
+    // cleanup-only error.
+    process.stderr.write(`Geometry harness temporary cleanup failed: ${String(error)}\n`);
+  }
 }
 
 async function runBrowserCandidate(candidate, browserFlags, harnessUrl) {
@@ -265,50 +271,7 @@ function contentType(target) {
 
 async function discoverBrowserCandidates() {
   const candidates = [];
-  const candidatesByPriority = [
-    { label: "CHROME_PATH", path: process.env.CHROME_PATH },
-    { label: "EDGE_PATH", path: process.env.EDGE_PATH },
-    {
-      label: "CHROME",
-      path: path.join(
-        process.env["PROGRAMFILES"] ?? "C:\\Program Files",
-        "Google",
-        "Chrome",
-        "Application",
-        "chrome.exe",
-      ),
-    },
-    {
-      label: "CHROME",
-      path: path.join(
-        process.env["PROGRAMFILES(x86)"] ?? "C:\\Program Files (x86)",
-        "Google",
-        "Chrome",
-        "Application",
-        "chrome.exe",
-      ),
-    },
-    {
-      label: "MS_EDGE",
-      path: path.join(
-        process.env["PROGRAMFILES"] ?? "C:\\Program Files",
-        "Microsoft",
-        "Edge",
-        "Application",
-        "msedge.exe",
-      ),
-    },
-    {
-      label: "MS_EDGE",
-      path: path.join(
-        process.env["PROGRAMFILES(x86)"] ?? "C:\\Program Files (x86)",
-        "Microsoft",
-        "Edge",
-        "Application",
-        "msedge.exe",
-      ),
-    },
-  ];
+  const candidatesByPriority = buildBrowserCandidateSpecs(process.env);
 
   for (const candidate of candidatesByPriority) {
     if (candidate.path === undefined) {
@@ -322,6 +285,64 @@ async function discoverBrowserCandidates() {
     }
   }
   return candidates;
+}
+
+/**
+ * Builds candidate paths from the caller's runtime environment only.
+ *
+ * Keeping this pure makes the public runner testable without probing a
+ * machine, and deliberately avoids embedding a local installation path in a
+ * source file that may be included in the filtered public projection.
+ */
+export function buildBrowserCandidateSpecs(environment) {
+  const candidates = [
+    { label: "CHROME_PATH", path: environment.CHROME_PATH },
+    { label: "EDGE_PATH", path: environment.EDGE_PATH },
+  ];
+  const programFileRoots = [
+    environment.ProgramFiles,
+    environment.PROGRAMFILES,
+    environment.ProgramW6432,
+    environment["ProgramFiles(x86)"],
+    environment["PROGRAMFILES(X86)"],
+  ].filter((root) => typeof root === "string" && root.length > 0);
+
+  for (const root of programFileRoots) {
+    candidates.push(
+      {
+        label: "CHROME",
+        path: path.join(root, "Google", "Chrome", "Application", "chrome.exe"),
+      },
+      {
+        label: "MS_EDGE",
+        path: path.join(root, "Microsoft", "Edge", "Application", "msedge.exe"),
+      },
+    );
+  }
+
+  const pathValue = environment.PATH ?? environment.Path;
+  if (typeof pathValue === "string") {
+    for (const directory of pathValue.split(path.delimiter)) {
+      if (directory.length === 0) {
+        continue;
+      }
+      candidates.push(
+        { label: "PATH_CHROME", path: path.join(directory, "chrome.exe") },
+        { label: "PATH_MS_EDGE", path: path.join(directory, "msedge.exe") },
+      );
+    }
+  }
+
+  return candidates.filter(
+    (candidate) => typeof candidate.path === "string" && candidate.path.length > 0,
+  );
+}
+
+function isMainModule() {
+  const entryPoint = process.argv[1];
+  return (
+    typeof entryPoint === "string" && path.resolve(entryPoint) === fileURLToPath(import.meta.url)
+  );
 }
 
 async function parseJsonBody(request) {

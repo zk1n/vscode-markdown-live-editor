@@ -18,5 +18,9 @@
   "Change Tab Display Size": "タブ表示サイズの変更",
   "Select Action": "アクションの選択",
   "Select tab size": "タブ サイズを選択",
-  "Tab Size": "タブ サイズ"
+  "Tab Size": "タブ サイズ",
+  "Select Tab Size for Current File": "現在のファイルのタブ サイズを選択",
+  "Configured Tab Size": "構成されたタブ サイズ",
+  "Default Tab Size": "既定のタブ サイズ",
+  "Current Tab Size": "現在のタブ サイズ"
 }
