@@ -11,7 +11,7 @@ Save / recovery / compositionのauthorityとorderingをpresentation機能へ移�
 
 ## Decision
 
-- Webviewはeffective `editor.insertSpaces` / `editor.tabSize`をtyped presentation messageで受け取る。Tab / Shift+Tabは
+- Webviewはeffective `editor.insertSpaces` / `editor.tabSize` / `editor.indentSize`をtyped presentation messageで受け取る。Tab / Shift+Tabは
   CodeMirror source transactionとして実行するが、composition、recovery、barrier中は内容を変更せずfocus traversalだけを防ぐ。
 - Webviewはcontroller/session/document version付きのselection、Ln / Col、indentation状態を報告する。Extensionはactive
   `TabInputCustom`、panel session、controller generation、open `TextDocument.version`を一致させた場合だけnative Status Barへ表示する。
@@ -24,6 +24,7 @@ Save / recovery / compositionのauthorityとorderingをpresentation機能へ移�
   focusを戻す。Webviewは結果を先読みせず、authoritative snapshotに対する最小replacementのselection mappingを使う。
 - Style FoundationはVS Code theme token中心のCodeMirror decoration / themeとする。theme切替とstyle snapshotはdocument transaction、
   reparse、selection / focus reset、sync、Save、Undo entryを生成しない。Native Markdown OutlineはVS Code Tree Viewのまま対象外とする。
+  `markdown.preview.fontFamily` / `fontSize` / `lineHeight`も検証済みpresentation snapshotで伝播し、CSS適用後にmeasureを要求する。
 - Custom CSSはUser Settingsのliteral CSSと、trusted owning workspaceの固定`.vscode/markdown-live-editor.css`だけを許す。
   multi-rootではactive documentのowning folderだけを参照する。64 KiB/source・128 KiB combined、fatal UTF-8、NUL、CSS escape、
   `@import`、`url()`、resource scheme、不均衡structureを拒否し、検証済みsnapshotだけをdedicated `<style>`へ原子的に置換する。
@@ -33,7 +34,9 @@ Save / recovery / compositionのauthorityとorderingをpresentation機能へ移�
 ## Consequences
 
 - Status Barとpresentationは可視性を高めるが、document authorityではない。state reportが`TextDocument.version`へ追いつくまでstatusをhideする。
-- indentation変更はそのLive Editor controllerのediting configurationであり、workspace/user settingsを暗黙に書き換えない。
+- 2026-09-07の修正ではindentation変更をopen `TextDocument`単位の一時editing configurationとして保持する。
+  同じdocumentの全live panelへcontroller identity付きで再送し、subscriptionはsession dispose時に解除する。
+  Spaces / Tabs選択はindent sizeとtab sizeを更新し、tab display size変更はindent sizeを保持する。workspace/user settingsを暗黙に書き換えない。
 - safe public routeがないencoding変更は通常Text Editorの既存操作へ委ねる。表示値はactual disk bytesの推測ではない。
 - CSS escapeを含む合法な装飾など、安全側の制限で利用できないCSSがある。v0.1はresource-loading tokenの完全parserを所有しない。
 - 自動回帰はsource / message非生成、identity/version rejection、watcher lifecycle、EOL Undo / Redo / Saveを検証する。
