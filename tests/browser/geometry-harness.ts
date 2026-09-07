@@ -71,6 +71,7 @@ const source = [
   "> quoted text",
   "- list item",
   "  - nested item",
+  "    - deeply nested item",
   "- [ ] task item",
   "1. ordered item",
   "",
@@ -88,6 +89,10 @@ if (parent === null) {
 const engine = createLivePreviewEngine();
 // Installed Markdown Preview defaults, supplied by the host style snapshot.
 document.documentElement.style.setProperty("--markdown-line-height", "1.6");
+document.documentElement.style.setProperty(
+  "--vscode-editor-font-family",
+  "OracleEditor, monospace",
+);
 const view = new EditorView({
   parent,
   state: EditorState.create({
@@ -110,6 +115,7 @@ async function runGeometryHarness(editor: EditorView): Promise<void> {
   editor.requestMeasure();
   await animationFrame();
   const base = measurePhase(editor, "base");
+  assertVisualParity(editor, source);
   if (
     base.typography.fontFamily === "monospace" ||
     base.typography.fontSize !== "14px" ||
@@ -157,11 +163,11 @@ function measurePhase(editor: EditorView, name: string): GeometryPhaseResult {
   const dragTests = [
     dragMetadata("heading-to-paragraph", "down", lineMetadata, 1, 3),
     dragMetadata("paragraph-to-list", "down", lineMetadata, 3, 5),
-    dragMetadata("list-to-task", "down", lineMetadata, 5, 7),
-    dragMetadata("task-to-blank", "down", lineMetadata, 7, 9),
-    dragMetadata("fence-to-paragraph", "down", lineMetadata, 10, 15),
-    dragMetadata("paragraph-to-heading", "up", lineMetadata, 15, 1),
-    dragMetadata("task-to-paragraph", "up", lineMetadata, 7, 3),
+    dragMetadata("list-to-task", "down", lineMetadata, 6, 8),
+    dragMetadata("task-to-blank", "down", lineMetadata, 8, 10),
+    dragMetadata("fence-to-paragraph", "down", lineMetadata, 11, 16),
+    dragMetadata("paragraph-to-heading", "up", lineMetadata, 16, 1),
+    dragMetadata("task-to-paragraph", "up", lineMetadata, 8, 3),
   ];
   const contentStyle = getComputedStyle(editor.contentDOM);
   return {
@@ -196,6 +202,67 @@ function measurePhase(editor: EditorView, name: string): GeometryPhaseResult {
     lineMetadata,
     name,
   };
+}
+
+function assertVisualParity(editor: EditorView, expectedSource: string): void {
+  const markers = [
+    ...editor.contentDOM.querySelectorAll<HTMLElement>(".cm-live-preview-native-unordered-marker"),
+  ];
+  const expectedTypes = ["disc", "circle", "square"];
+  if (markers.length !== expectedTypes.length) {
+    throw new Error(`Expected ${String(expectedTypes.length)} native unordered markers.`);
+  }
+  const textLefts = markers.map((marker, index) => {
+    const style = getComputedStyle(marker);
+    if (
+      style.display !== "inline flow-root list-item" ||
+      style.listStyleType !== expectedTypes[index] ||
+      style.color !== getComputedStyle(editor.contentDOM).color ||
+      style.lineHeight !== getComputedStyle(editor.contentDOM).lineHeight
+    ) {
+      throw new Error(`Native marker ${String(index + 1)} did not inherit the Preview style.`);
+    }
+    const line = marker.closest<HTMLElement>(".cm-line");
+    const textNode = line === null ? undefined : firstTextNode(line);
+    const textRect = textNode === undefined ? null : textRectFor(textNode);
+    if (textRect === null) {
+      throw new Error(`Native marker ${String(index + 1)} has no text geometry.`);
+    }
+    return textRect.left;
+  });
+  if (
+    textLefts.some(
+      (left, index) => index > 0 && Math.abs(left - (textLefts[index - 1] ?? left) - 40) > 1,
+    )
+  ) {
+    throw new Error("Native marker depths did not increase text geometry by 40px.");
+  }
+
+  const inlineCode = editor.contentDOM.querySelector<HTMLElement>(".cm-live-preview-inline-code");
+  if (inlineCode === null) {
+    throw new Error("Inline code presentation is missing.");
+  }
+  const codeStyle = getComputedStyle(inlineCode);
+  const contentStyle = getComputedStyle(editor.contentDOM);
+  if (
+    codeStyle.color !== contentStyle.color ||
+    codeStyle.backgroundColor !== "rgba(0, 0, 0, 0)" ||
+    codeStyle.borderRadius !== "0px" ||
+    codeStyle.paddingLeft !== "0px" ||
+    codeStyle.paddingRight !== "0px" ||
+    codeStyle.fontFamily !==
+      getComputedStyle(document.documentElement)
+        .getPropertyValue("--vscode-editor-font-family")
+        .trim() ||
+    codeStyle.fontSize !== contentStyle.fontSize ||
+    codeStyle.fontWeight !== contentStyle.fontWeight ||
+    codeStyle.lineHeight !== "18.998px"
+  ) {
+    throw new Error("Inline code did not match the VS Code 1.136.1 style oracle.");
+  }
+  if (editor.state.doc.toString() !== expectedSource) {
+    throw new Error("Presentation changed the Markdown source.");
+  }
 }
 
 async function publishResult(

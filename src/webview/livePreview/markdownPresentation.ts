@@ -38,6 +38,20 @@ export interface SelectionRange {
 }
 
 /**
+ * A single physical line belonging to a CommonMark indented code block. The
+ * parser, rather than a leading-whitespace heuristic, establishes membership
+ * and the content offset. That offset preserves container prefixes (such as
+ * blockquotes and list continuations) without guessing at their width.
+ */
+export interface IndentedCodeBlockLine {
+  readonly from: number;
+  readonly to: number;
+  readonly indentationTo: number;
+  readonly isFirst: boolean;
+  readonly isLast: boolean;
+}
+
+/**
  * Deliberately conservative v0.1 recognition for presentation only. It skips
  * fenced code blocks, keeps complex/nested inline forms as source, and does
  * not attempt to normalize or rewrite Markdown.
@@ -162,17 +176,23 @@ function findListAndTaskSyntax(text: string): ReadonlyMap<number, PresentationSy
 
     const marker = text.slice(listMark.from, listMark.to);
     if (taskMarker === undefined) {
+      const isUnordered = /^[+*-]$/.test(marker);
+      const markerFrom = isUnordered ? whitespacePrefixStart(text, listMark.from) : listMark.from;
       ranges.set(lineStart(text, listMark.from), {
         kind: "list",
-        from: listMark.from,
+        from: markerFrom,
         to: contentTo,
         contentFrom,
         contentTo,
         markers: [
           {
-            from: listMark.from,
+            // A whitespace-only prefix is structural list indentation. Keep it
+            // with the inactive unordered marker so the native list widget can
+            // supply the Preview's measured indentation. Container prefixes
+            // such as `> ` deliberately remain source DOM.
+            from: markerFrom,
             to: contentFrom,
-            presentation: /^[+*-]$/.test(marker) ? "list-unordered" : "list-ordered",
+            presentation: isUnordered ? "list-unordered" : "list-ordered",
           },
         ],
       });
@@ -199,6 +219,11 @@ function findListAndTaskSyntax(text: string): ReadonlyMap<number, PresentationSy
     });
   }
   return ranges;
+}
+
+function whitespacePrefixStart(text: string, position: number): number {
+  const start = lineStart(text, position);
+  return /^[ \t]*$/.test(text.slice(start, position)) ? start : position;
 }
 
 function findListMarkForTask(
@@ -232,6 +257,47 @@ function findCodeBlockRanges(text: string): readonly SourceRange[] {
     },
   });
   return ranges;
+}
+
+/**
+ * Returns only parser-recognized indented code. Fenced code deliberately has
+ * a separate presentation path, so it is not returned here.
+ *
+ * The parser-derived CodeText offset is presentation metadata only. It hides
+ * every structural prefix on an inactive line; it never edits or normalizes
+ * the CodeMirror document.
+ */
+export function findIndentedCodeBlockLines(text: string): readonly IndentedCodeBlockLine[] {
+  const blocks: SourceRange[] = [];
+  const codeTextRanges: SourceRange[] = [];
+  presentationParser.parse(text).iterate({
+    enter: ({ from, name, to }): void => {
+      if (name === "CodeBlock") {
+        blocks.push({ from: lineStart(text, from), to: lineEnd(text, to) });
+      } else if (name === "CodeText") {
+        codeTextRanges.push({ from, to });
+      }
+    },
+  });
+
+  const lines: IndentedCodeBlockLine[] = [];
+  for (const block of blocks) {
+    const codeTexts = codeTextRanges.filter(
+      (codeText) => codeText.from >= block.from && codeText.to <= block.to,
+    );
+    for (const [index, codeText] of codeTexts.entries()) {
+      const from = lineStart(text, codeText.from);
+      const to = lineEnd(text, codeText.from);
+      lines.push({
+        from,
+        to,
+        indentationTo: codeText.from,
+        isFirst: index === 0,
+        isLast: index === codeTexts.length - 1,
+      });
+    }
+  }
+  return lines;
 }
 
 function lineEnd(text: string, position: number): number {

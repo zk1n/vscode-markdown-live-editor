@@ -630,7 +630,7 @@ describe("MarkdownWebviewController Live Preview source integrity", () => {
 
     expect(
       [...content.querySelectorAll<HTMLElement>(".cm-line")].map((line) => line.textContent),
-    ).toEqual(["- list item", "- link"]);
+    ).toEqual(["- list item", "link"]);
     const beforeInput = await emulateNativeLineJoin(content, "deleteContentForward");
 
     expect(view.state.doc.toString()).toBe(expected);
@@ -671,7 +671,7 @@ describe("MarkdownWebviewController Live Preview source integrity", () => {
 
     expect(
       [...content.querySelectorAll<HTMLElement>(".cm-line")].map((line) => line.textContent),
-    ).toEqual(["- list item", "- link"]);
+    ).toEqual(["list item", "- link"]);
     const beforeInput = await emulateNativeLineJoin(content, "deleteContentBackward");
 
     expect(view.state.doc.toString()).toBe(expected);
@@ -1101,7 +1101,7 @@ describe("MarkdownWebviewController Live Preview source integrity", () => {
     expect(content.querySelector(".cm-live-preview-strikethrough")).not.toBeNull();
     expect(content.querySelector(".cm-live-preview-inline-code")).not.toBeNull();
     expect(content.querySelector(".cm-live-preview-link")).not.toBeNull();
-    expect(content.querySelector(".cm-live-preview-list-unordered-marker")).not.toBeNull();
+    expect(content.querySelector(".cm-live-preview-native-unordered-marker")).not.toBeNull();
     expect(content.querySelector(".cm-live-preview-list-ordered-marker")).not.toBeNull();
     expect(content.querySelector(".cm-live-preview-task-checked")).not.toBeNull();
     expect(content.querySelector(".cm-live-preview-blockquote")).not.toBeNull();
