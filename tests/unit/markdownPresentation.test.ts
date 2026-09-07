@@ -181,9 +181,9 @@ describe("LivePreviewEngine", () => {
     engine.dispose();
   });
 
-  it("keeps the Preview-aligned heading rhythm and list gutter as presentation-only CSS", () => {
+  it("keeps the Preview-inspired heading rhythm and list gutter as presentation-only CSS", () => {
     const source =
-      "# one\n## two\n#### four\n##### five\n###### six\n- item\n1. ordered\n- [ ] task";
+      "# one\n## two\n#### four\n##### five\n###### six\n- item\n1. ordered\n---\n- [ ] task";
     const engine = createLivePreviewEngine();
     const view = new EditorView({
       parent: document.body,
@@ -204,13 +204,32 @@ describe("LivePreviewEngine", () => {
     const ordered = view.contentDOM.querySelector<HTMLElement>(
       ".cm-live-preview-list-ordered-marker",
     );
+    const horizontalRule = view.contentDOM.querySelector<HTMLElement>(
+      ".cm-line.cm-live-preview-horizontal-rule",
+    );
     expect(h1?.closest(".cm-line")?.className).toContain("cm-live-preview-heading-line-1");
     expect(h4).not.toBeNull();
     expect(h5).not.toBeNull();
     expect(h6).not.toBeNull();
     expect(unordered).not.toBeNull();
     expect(ordered).not.toBeNull();
+    expect(horizontalRule?.textContent).toBe("---");
     // Theme/style changes must not alter source or create a transaction.
+    expect(view.state.doc.toString()).toBe(source);
+
+    const ruleFrom = source.indexOf("---");
+    view.dispatch({ selection: { anchor: ruleFrom + 1 } });
+    expect(view.contentDOM.querySelector(".cm-line.cm-live-preview-horizontal-rule")).toBeNull();
+    expect(view.state.doc.toString()).toBe(source);
+
+    view.dispatch({ selection: { anchor: ruleFrom, head: ruleFrom + 2 } });
+    expect(view.contentDOM.querySelector(".cm-line.cm-live-preview-horizontal-rule")).toBeNull();
+    expect(view.state.doc.toString()).toBe(source);
+
+    view.dispatch({ selection: { anchor: source.length } });
+    expect(
+      view.contentDOM.querySelector(".cm-line.cm-live-preview-horizontal-rule"),
+    ).not.toBeNull();
     expect(view.state.doc.toString()).toBe(source);
 
     view.destroy();

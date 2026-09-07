@@ -418,9 +418,11 @@ describe("MarkdownWebviewController M10 presentation controls", () => {
 
   it("atomically replaces validated CSS without a CodeMirror transaction or source message", async () => {
     const { content, view } = await createController("# Heading", "off");
+    const requestMeasure = vi.spyOn(view, "requestMeasure");
     const identity = latestControllerIdentity();
     view.dispatch({ selection: { anchor: 2 } });
     view.focus();
+    const measurementsBeforeStyleSnapshots = requestMeasure.mock.calls.length;
     const beforeSelection = view.state.selection.main;
     const beforeEdits = editMessages().length;
 
@@ -457,6 +459,7 @@ describe("MarkdownWebviewController M10 presentation controls", () => {
     expect(view.hasFocus).toBe(true);
     expect(document.activeElement).toBe(content);
     expect(editMessages()).toHaveLength(beforeEdits);
+    expect(requestMeasure).toHaveBeenCalledTimes(measurementsBeforeStyleSnapshots + 2);
   });
 
   it("routes an EOL status command through the existing FIFO without changing canonical text", async () => {

@@ -169,14 +169,14 @@ export class MarkdownOutlineTreeProvider
   }
 
   public handleDocumentChange(document: OutlineDocument): void {
-    if (this.sessions.activeSession?.documentUri !== document.uri.toString()) {
+    if (this.sessions.activeCustomEditorSession?.documentUri !== document.uri.toString()) {
       return;
     }
     this.setSnapshot(document);
   }
 
   public async navigateTo(item: MarkdownOutlineTreeItem): Promise<boolean> {
-    const session = this.sessions.activeSession;
+    const session = this.sessions.activeCustomEditorSession;
     const snapshot = this.snapshot;
     if (
       session === undefined ||
@@ -235,7 +235,7 @@ export class MarkdownOutlineTreeProvider
   }
 
   private refreshActiveDocument(): void {
-    const session = this.sessions.activeSession;
+    const session = this.sessions.activeCustomEditorSession;
     const document = session === undefined ? undefined : findOpenDocument(session.documentUri);
     if (document === undefined) {
       if (this.snapshot === undefined) {

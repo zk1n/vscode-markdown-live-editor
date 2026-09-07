@@ -17,7 +17,7 @@ import {
 } from "./editor/MarkdownEditorSessionRegistry.js";
 import { allocatePresentationRevision } from "./editor/presentationRevision.js";
 import { shouldWarnForMarkdownTrailingWhitespace } from "./markdownTrailingWhitespace.js";
-import { vscodeLocalizer } from "./localization.js";
+import { vscodeLocalizer, type Localizer } from "./localization.js";
 import {
   MARKDOWN_OUTLINE_VIEW_ID,
   NAVIGATE_TO_OUTLINE_HEADING_COMMAND,
@@ -195,12 +195,8 @@ async function chooseIndentation(
   context: StatusActionContext,
 ): Promise<StatusIndentation | undefined> {
   const choice = await vscode.window.showQuickPick(
-    [
-      { label: vscodeLocalizer.t("Indent Using Spaces"), value: "spaces" as const },
-      { label: vscodeLocalizer.t("Indent Using Tabs"), value: "tabs" as const },
-      { label: vscodeLocalizer.t("Change Tab Size…"), value: "size" as const },
-    ],
-    { placeHolder: vscodeLocalizer.t("Change Markdown Live Editor indentation") },
+    createIndentationQuickPickItems(),
+    createIndentationQuickPickOptions(),
   );
   if (choice?.value === "spaces" || choice?.value === "tabs") {
     return {
@@ -228,6 +224,52 @@ async function chooseIndentation(
     insertSpaces: context.editorState.insertSpaces,
     tabSize: tabSize.value,
   };
+}
+
+type IndentationQuickPickValue = "spaces" | "tabs" | "size";
+
+interface IndentationQuickPickItem extends vscode.QuickPickItem {
+  readonly value?: IndentationQuickPickValue;
+}
+
+/**
+ * Keeps the status-bar picker on VS Code's standard indentation action
+ * surface. The separator is a public QuickPick API item and cannot be picked.
+ */
+export function createIndentationQuickPickItems(
+  localizer = vscodeLocalizer,
+): readonly IndentationQuickPickItem[] {
+  const spaces = createIndentationQuickPickAction(localizer, "Indent Using Spaces", "spaces");
+  const tabs = createIndentationQuickPickAction(localizer, "Indent Using Tabs", "tabs");
+  const tabDisplaySize = createIndentationQuickPickAction(
+    localizer,
+    "Change Tab Display Size",
+    "size",
+  );
+  return [
+    {
+      label: localizer.t("change view"),
+      kind: vscode.QuickPickItemKind.Separator,
+    },
+    spaces,
+    tabs,
+    tabDisplaySize,
+  ];
+}
+
+export function createIndentationQuickPickOptions(
+  localizer = vscodeLocalizer,
+): vscode.QuickPickOptions {
+  return { placeHolder: localizer.t("Select Action") };
+}
+
+function createIndentationQuickPickAction(
+  localizer: Localizer,
+  alias: string,
+  value: IndentationQuickPickValue,
+): IndentationQuickPickItem {
+  const label = localizer.t(alias);
+  return label === alias ? { label, value } : { label, detail: alias, value };
 }
 
 function postActiveHistoryCommand(

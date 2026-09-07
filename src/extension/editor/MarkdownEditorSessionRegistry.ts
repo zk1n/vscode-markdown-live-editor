@@ -64,14 +64,27 @@ export class MarkdownEditorSessionRegistry {
   }
 
   /**
+   * The Live Editor panel in the currently active editor tab. Unlike
+   * `activeSession`, this deliberately has no last-active fallback: callers
+   * that represent the current editor (rather than a retained session) must
+   * become empty after focus moves to another editor.
+   */
+  public get activeCustomEditorSession(): MarkdownEditorSessionHandle | undefined {
+    return this.activePanelSessionId === undefined
+      ? undefined
+      : this.sessions.get(this.activePanelSessionId)?.handle;
+  }
+
+  /**
    * Unlike `activeSession`, this is undefined as soon as no Live Editor panel
    * is active. It never falls back to a merely last-used panel.
    */
   public get activeStatusSession(): ActiveStatusSession | undefined {
-    if (this.activePanelSessionId === undefined) {
+    const handle = this.activeCustomEditorSession;
+    if (handle === undefined) {
       return undefined;
     }
-    const session = this.sessions.get(this.activePanelSessionId);
+    const session = this.sessions.get(handle.sessionId);
     if (session?.controllerId === undefined || session.editorState === undefined) {
       return undefined;
     }

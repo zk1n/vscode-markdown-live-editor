@@ -42,32 +42,30 @@ const livePreviewTheme = EditorView.baseTheme({
   ".cm-editor": {
     backgroundColor: "var(--vscode-editor-background, transparent)",
     color: "var(--vscode-editor-foreground, var(--vscode-foreground, inherit))",
-    fontFamily: "var(--vscode-editor-font-family, var(--vscode-font-family, sans-serif))",
-    fontSize: "var(--vscode-editor-font-size, 14px)",
+    fontFamily:
+      'var(--markdown-font-family, -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI", system-ui, "Ubuntu", "Droid Sans", sans-serif)',
+    fontSize: "var(--markdown-font-size, 14px)",
   },
   ".cm-scroller": {
-    lineHeight: "22px",
+    lineHeight: "var(--markdown-line-height, 22px)",
     overflow: "auto",
-    // Matches the bundled Markdown Preview's default reading gutter without
-    // taking a runtime dependency on its stylesheet or DOM structure.
-    padding: "0 26px",
   },
   ".cm-content": {
     boxSizing: "border-box",
     minHeight: "100%",
-    padding: "0 0 2rem",
+    // VS Code 1.136.1 markdown.css uses a 26px reading gutter and 1em top
+    // inset. Keeping the inset on CodeMirror's measured content preserves its
+    // documentTop/coordinate model.
+    padding: "1em 26px 2rem",
   },
   ".cm-line": {
-    lineHeight: "22px",
-    minHeight: "22px",
+    lineHeight: "var(--markdown-line-height, 22px)",
+    minHeight: "var(--markdown-line-height, 22px)",
+    paddingLeft: "0",
+    paddingRight: "0",
   },
   ".cm-line.cm-live-preview-heading-line": {
     lineHeight: "1.25",
-    marginBottom: "16px",
-    marginTop: "24px",
-  },
-  ".cm-line.cm-live-preview-heading-line-1": {
-    marginTop: "0",
   },
   ".cm-line.cm-live-preview-heading-line-1, .cm-line.cm-live-preview-heading-line-2": {
     borderBottom:
@@ -97,7 +95,7 @@ const livePreviewTheme = EditorView.baseTheme({
     fontSize: "0.85em",
   },
   ".cm-live-preview-strong": {
-    fontWeight: "600",
+    fontWeight: "bold",
   },
   ".cm-live-preview-emphasis": {
     fontStyle: "italic",
@@ -110,42 +108,46 @@ const livePreviewTheme = EditorView.baseTheme({
       "var(--vscode-textCodeBlock-background, var(--vscode-textPreformat-background, transparent))",
     color: "var(--vscode-textPreformat-foreground, var(--vscode-editor-foreground, inherit))",
     borderRadius: "3px",
-    fontFamily: "var(--vscode-editor-font-family, var(--vscode-font-family, monospace))",
+    fontFamily:
+      'var(--vscode-editor-font-family, "SF Mono", Monaco, Menlo, Consolas, "Ubuntu Mono", "Liberation Mono", "DejaVu Sans Mono", "Courier New", monospace)',
+    fontSize: "1em",
+    lineHeight: "1.357em",
     padding: "0 0.2em",
   },
   ".cm-live-preview-blockquote": {
-    borderLeft:
-      "2px solid var(--vscode-textBlockQuote-border, var(--vscode-textSeparator-foreground, var(--vscode-editorWidget-border, currentColor)))",
     color: "var(--vscode-textBlockQuote-foreground, var(--vscode-editor-foreground, inherit))",
-    paddingLeft: "1em",
   },
   ".cm-line.cm-live-preview-blockquote-line": {
-    backgroundColor: "var(--vscode-textBlockQuote-background, transparent)",
+    borderLeft:
+      "5px solid var(--vscode-textBlockQuote-border, var(--vscode-textSeparator-foreground, var(--vscode-editorWidget-border, currentColor)))",
+    borderRadius: "2px",
+    boxSizing: "border-box",
+    padding: "0 16px 0 10px",
   },
   ".cm-live-preview-link": {
     color: "var(--vscode-textLink-foreground, var(--vscode-editor-foreground, inherit))",
-    textDecoration: "underline",
+    textDecoration: "none",
   },
   ".cm-live-preview-link:hover": {
     color:
       "var(--vscode-textLink-activeForeground, var(--vscode-textLink-foreground, var(--vscode-editor-foreground, inherit)))",
+    textDecoration: "underline",
   },
   ".cm-live-preview-list-marker": {
     color: "var(--vscode-descriptionForeground, var(--vscode-editor-foreground))",
-    fontWeight: "500",
   },
   ".cm-live-preview-list-ordered-marker": {
     boxSizing: "border-box",
     display: "inline-block",
     paddingRight: "0.5em",
     textAlign: "right",
-    width: "2.5em",
+    width: "2.85em",
   },
   ".cm-live-preview-list-unordered-marker": {
     color: "transparent",
     display: "inline-block",
     position: "relative",
-    width: "2.5em",
+    width: "2.85em",
     verticalAlign: "baseline",
     whiteSpace: "nowrap",
   },
@@ -186,25 +188,45 @@ const livePreviewTheme = EditorView.baseTheme({
   ".cm-line.cm-live-preview-fenced-code-line": {
     backgroundColor:
       "var(--vscode-textCodeBlock-background, var(--vscode-editorWidget-background, transparent))",
-    fontFamily: "var(--vscode-editor-font-family, var(--vscode-font-family, monospace))",
+    borderLeft:
+      "1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border, transparent))",
+    borderRight:
+      "1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border, transparent))",
+    boxSizing: "border-box",
+    fontFamily:
+      'var(--vscode-editor-font-family, "SF Mono", Monaco, Menlo, Consolas, "Ubuntu Mono", "Liberation Mono", "DejaVu Sans Mono", "Courier New", monospace)',
+    lineHeight: "1.357em",
+    paddingLeft: "16px",
+    paddingRight: "16px",
     whiteSpace: "pre-wrap",
   },
   ".cm-line.cm-live-preview-fenced-code-start": {
+    borderTop:
+      "1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border, transparent))",
     borderTopLeftRadius: "3px",
     borderTopRightRadius: "3px",
-    paddingTop: "0.35em",
+    paddingTop: "16px",
   },
   ".cm-line.cm-live-preview-fenced-code-end": {
+    borderBottom:
+      "1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border, transparent))",
     borderBottomLeftRadius: "3px",
     borderBottomRightRadius: "3px",
-    paddingBottom: "0.35em",
+    paddingBottom: "16px",
   },
   ".cm-line.cm-live-preview-horizontal-rule": {
-    borderTop:
+    color: "transparent",
+    position: "relative",
+  },
+  ".cm-line.cm-live-preview-horizontal-rule::after": {
+    borderBottom:
       "1px solid var(--vscode-textSeparator-foreground, var(--vscode-editorWidget-border, currentColor))",
-    color: "var(--vscode-descriptionForeground, var(--vscode-editor-foreground, inherit))",
-    marginTop: "0.8em",
-    paddingTop: "0.8em",
+    content: '""',
+    left: "0",
+    pointerEvents: "none",
+    position: "absolute",
+    right: "0",
+    top: "50%",
   },
 });
 
@@ -252,7 +274,7 @@ class CodeMirrorDecorationLivePreviewEngine implements LivePreviewEngine {
 function buildDecorations(state: EditorState): DecorationSet {
   const documentText = state.doc.toString();
   const selections = state.selection.ranges.map(({ from, to }) => ({ from, to }));
-  const decorations = buildStructuralLineDecorations(state);
+  const decorations = buildStructuralLineDecorations(state, selections);
 
   for (const syntax of findPresentationSyntax(documentText)) {
     if (!isSyntaxActive(syntax, selections)) {
@@ -295,7 +317,10 @@ function buildDecorations(state: EditorState): DecorationSet {
   return Decoration.set(decorations, true);
 }
 
-function buildStructuralLineDecorations(state: EditorState): Range<Decoration>[] {
+function buildStructuralLineDecorations(
+  state: EditorState,
+  selections: readonly { readonly from: number; readonly to: number }[],
+): Range<Decoration>[] {
   const decorations: Range<Decoration>[] = [];
   let fence: { readonly character: "`" | "~"; readonly length: number } | undefined;
 
@@ -334,7 +359,10 @@ function buildStructuralLineDecorations(state: EditorState): Range<Decoration>[]
       decorations.push(
         Decoration.line({ class: "cm-live-preview-fenced-code-line" }).range(line.from),
       );
-    } else if (isHorizontalRule(line.text)) {
+    } else if (
+      isHorizontalRule(line.text) &&
+      !isLineSelectionActive(line.from, line.to, selections)
+    ) {
       decorations.push(
         Decoration.line({ class: "cm-live-preview-horizontal-rule" }).range(line.from),
       );
@@ -342,6 +370,14 @@ function buildStructuralLineDecorations(state: EditorState): Range<Decoration>[]
   }
 
   return decorations;
+}
+
+function isLineSelectionActive(
+  lineFrom: number,
+  lineTo: number,
+  selections: readonly { readonly from: number; readonly to: number }[],
+): boolean {
+  return selections.some(({ from, to }) => from <= lineTo && to >= lineFrom);
 }
 
 function syntaxLineClass(kind: string, headingLevel: number | undefined): string | undefined {

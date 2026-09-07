@@ -42,6 +42,14 @@ Use VS Code test tooling for:
 - Save where automation is feasible
 - LF↔CRLF、Undo / Redo、Save後disk EOLとcanonical protocol text
 
+### Actual browser geometry
+
+`npm run test:browser-geometry`はinstalled Chrome / Edgeの実layout engineで、fixture各行の
+DOM bounds、CodeMirror `lineBlock`、`coordsAtPos`、`posAtCoords`を比較する。source blank line、heading、
+paragraph、blockquote、list / nested / task、fenced code、HRを含め、base Styleとvertical metric変更後の
+`requestMeasure()`の両phaseを検証する。happy-dom/jsdomのlayout結果をpixel / hit-test evidenceに使わない。
+この自動試験もtrusted physical mouse drag、theme表示、IMEのHuman Gateを代替しない。
+
 ### Manual
 
 Required where automation cannot faithfully cover OS input behavior:
@@ -136,10 +144,13 @@ npm run lint
 npm test
 npm run build
 npm run check
+npm run test:browser-geometry
 npm run test:extension-host
 ```
 
 `npm run check` is the pre-integration baseline.
+
+`npm run test:browser-geometry`は実Chromium-family browserを必要とする独立したgeometry regressionである。
 
 `npm run test:extension-host` is the separately runnable public-API smoke
 suite. It uses a pinned VS Code test instance and may download it on its first
