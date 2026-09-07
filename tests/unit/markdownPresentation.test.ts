@@ -9,6 +9,7 @@ import {
   livePreviewState,
 } from "../../src/webview/livePreview/LivePreviewEngine.js";
 import {
+  findIndentedCodeBlockLines,
   findPresentationSyntax,
   isSyntaxActive,
 } from "../../src/webview/livePreview/markdownPresentation.js";
@@ -125,6 +126,55 @@ describe("Markdown presentation syntax", () => {
     expect(indentedInline.some(({ kind }) => kind === "strong")).toBe(false);
   });
 
+  it("uses parser-derived code text offsets for indented code container prefixes", () => {
+    const source = [
+      ">     quote code",
+      ">       second",
+      ">",
+      ">     after",
+      "",
+      "- parent",
+      "",
+      "      list continuation code",
+      "      second line",
+    ].join("\n");
+
+    const lines = findIndentedCodeBlockLines(source);
+    expect(
+      lines.map(({ from, indentationTo, isFirst, isLast }) => ({
+        from,
+        indentationTo,
+        isFirst,
+        isLast,
+      })),
+    ).toEqual([
+      { from: 0, indentationTo: 6, isFirst: true, isLast: false },
+      { from: 17, indentationTo: 23, isFirst: false, isLast: false },
+      { from: 32, indentationTo: 33, isFirst: false, isLast: false },
+      { from: 34, indentationTo: 40, isFirst: false, isLast: true },
+      { from: 57, indentationTo: 63, isFirst: true, isLast: false },
+      { from: 86, indentationTo: 92, isFirst: false, isLast: true },
+    ]);
+    expect(lines.map(({ from, indentationTo }) => source.slice(from, indentationTo))).toEqual([
+      ">     ",
+      ">     ",
+      ">",
+      ">     ",
+      "      ",
+      "      ",
+    ]);
+
+    const mixedPrefix = " \tmixed prefix";
+    expect(findIndentedCodeBlockLines(mixedPrefix)).toEqual([
+      expect.objectContaining({
+        from: 0,
+        indentationTo: " \t".length,
+        isFirst: true,
+        isLast: true,
+      }),
+    ]);
+  });
+
   it("reveals an enclosing syntax range for a caret or a boundary-crossing selection", () => {
     const [strong] = findPresentationSyntax("**日本語**");
     expect(strong).toBeDefined();
@@ -204,9 +254,7 @@ describe("LivePreviewEngine", () => {
       selection: { anchor: source.length },
       extensions: [engine.extension],
     });
-    expect(markClasses(state)).toContain(
-      "cm-live-preview-list-marker cm-live-preview-list-unordered-marker",
-    );
+    expect(unorderedWidgetDepths(state)).toEqual([1, 1, 1]);
     expect(markClasses(state)).toContain(
       "cm-live-preview-list-marker cm-live-preview-list-ordered-marker",
     );
@@ -214,11 +262,32 @@ describe("LivePreviewEngine", () => {
       "cm-live-preview-task-marker cm-live-preview-task-unchecked",
     );
 
+    const view = new EditorView({
+      parent: document.body,
+      state: EditorState.create({
+        doc: source,
+        selection: { anchor: source.length },
+        extensions: [engine.extension],
+      }),
+    });
+    expect(
+      [
+        ...view.contentDOM.querySelectorAll<HTMLElement>(
+          ".cm-live-preview-native-unordered-marker",
+        ),
+      ].map((marker) => marker.className),
+    ).toEqual([
+      "cm-live-preview-native-unordered-marker cm-live-preview-native-unordered-marker-depth-1",
+      "cm-live-preview-native-unordered-marker cm-live-preview-native-unordered-marker-depth-1",
+      "cm-live-preview-native-unordered-marker cm-live-preview-native-unordered-marker-depth-1",
+    ]);
+    expect(view.state.doc.toString()).toBe(source);
+
     const activeUnordered = state.update({ selection: { anchor: 0 } });
     expect(activeUnordered.docChanged).toBe(false);
     expect(activeUnordered.state.doc.toString()).toBe(source);
     expect(
-      hasMarkerClassAt(
+      hasUnorderedWidgetAt(
         activeUnordered.state,
         lists[0]?.markers[0]?.from ?? -1,
         lists[0]?.markers[0]?.to ?? -1,
@@ -234,6 +303,7 @@ describe("LivePreviewEngine", () => {
       "- 日item\n+ item\n* item\n1. ordered\n- [ ] open\nplain",
     );
 
+    view.destroy();
     engine.dispose();
   });
 
@@ -261,14 +331,7 @@ describe("LivePreviewEngine", () => {
       selection: { anchor: 0 },
       extensions: [engine.extension],
     });
-    expect(nestedList.map(({ markers }) => markerClassAt(state, markers[0]?.from ?? -1))).toEqual([
-      "cm-live-preview-list-marker cm-live-preview-list-unordered-marker",
-      "cm-live-preview-list-marker cm-live-preview-list-unordered-marker cm-live-preview-list-unordered-marker-depth-2",
-      "cm-live-preview-list-marker cm-live-preview-list-unordered-marker cm-live-preview-list-unordered-marker-depth-3",
-      "cm-live-preview-list-marker cm-live-preview-list-unordered-marker cm-live-preview-list-unordered-marker-depth-3",
-      "cm-live-preview-list-marker cm-live-preview-list-unordered-marker cm-live-preview-list-unordered-marker-depth-3",
-      "cm-live-preview-list-marker cm-live-preview-list-unordered-marker cm-live-preview-list-unordered-marker-depth-3",
-    ]);
+    expect(unorderedWidgetDepths(state)).toEqual([1, 2, 3, 3, 3, 3]);
     expect(
       hasDecorationClassAt(
         state,
@@ -278,15 +341,138 @@ describe("LivePreviewEngine", () => {
       ),
     ).toBe(true);
     expect(
-      hasDecorationClassAt(
-        state,
-        source.indexOf("- code"),
-        source.indexOf("- code") + 1,
-        "cm-live-preview-list-marker",
-      ),
+      hasUnorderedWidgetAt(state, source.indexOf("- code"), source.indexOf("- code") + 1),
     ).toBe(false);
     expect(state.doc.toString()).toBe(source);
 
+    engine.dispose();
+  });
+
+  it("presents parser-confirmed tab and four-space code without changing source or fenced/list semantics", () => {
+    const source = [
+      "\tconst tab = true;",
+      "    const spaces = true;",
+      "- parent",
+      "    - nested list item",
+      "```ts",
+      "    fenced source",
+      "```",
+      "plain",
+    ].join("\n");
+    const engine = createLivePreviewEngine();
+    const view = new EditorView({
+      parent: document.body,
+      state: EditorState.create({
+        doc: source,
+        selection: { anchor: source.length },
+        extensions: [engine.extension],
+      }),
+    });
+
+    const indentedLines = [
+      ...view.contentDOM.querySelectorAll<HTMLElement>(
+        ".cm-line.cm-live-preview-indented-code-line",
+      ),
+    ];
+    expect(indentedLines.map((line) => line.textContent)).toEqual([
+      "const tab = true;",
+      "const spaces = true;",
+    ]);
+    expect(indentedLines[0]?.className).toContain("cm-live-preview-indented-code-start");
+    expect(indentedLines[1]?.className).toContain("cm-live-preview-indented-code-end");
+    expect(view.contentDOM.querySelectorAll(".cm-live-preview-fenced-code-line")).toHaveLength(3);
+    expect(view.contentDOM.querySelectorAll(".cm-live-preview-list-line")).toHaveLength(2);
+    expect(view.state.doc.toString()).toBe(source);
+
+    view.dispatch({ selection: { anchor: 2 } });
+    expect(indentedLines[0]?.textContent).toBe("\tconst tab = true;");
+    expect(view.state.doc.toString()).toBe(source);
+
+    view.destroy();
+    engine.dispose();
+  });
+
+  it("uses parser CodeText offsets for blockquote and list-continuation code, including blank lines", () => {
+    const source = [
+      ">     quote code",
+      ">       second",
+      ">",
+      ">     after",
+      "",
+      "- parent",
+      "",
+      "      list continuation code",
+      "      second line",
+      "plain",
+    ].join("\n");
+    const engine = createLivePreviewEngine();
+    const view = new EditorView({
+      parent: document.body,
+      state: EditorState.create({
+        doc: source,
+        selection: { anchor: source.length },
+        extensions: [engine.extension],
+      }),
+    });
+
+    const indentedLines = [
+      ...view.contentDOM.querySelectorAll<HTMLElement>(
+        ".cm-line.cm-live-preview-indented-code-line",
+      ),
+    ];
+    expect(indentedLines.map((line) => line.textContent)).toEqual([
+      "quote code",
+      "  second",
+      "",
+      "after",
+      "list continuation code",
+      "second line",
+    ]);
+    expect(indentedLines[0]?.className).toContain("cm-live-preview-indented-code-start");
+    expect(indentedLines[3]?.className).toContain("cm-live-preview-indented-code-end");
+    expect(indentedLines[4]?.className).toContain("cm-live-preview-indented-code-start");
+    expect(indentedLines[5]?.className).toContain("cm-live-preview-indented-code-end");
+    expect(view.state.doc.toString()).toBe(source);
+
+    view.dispatch({ selection: { anchor: 2 } });
+    expect(indentedLines[0]?.textContent).toBe(">     quote code");
+    expect(view.state.doc.toString()).toBe(source);
+
+    view.destroy();
+    engine.dispose();
+  });
+
+  it("reveals a nested unordered marker when the caret or selection is in its source indent", () => {
+    const source = "  - nested item\nplain";
+    const engine = createLivePreviewEngine();
+    const view = new EditorView({
+      parent: document.body,
+      state: EditorState.create({
+        doc: source,
+        selection: { anchor: source.length },
+        extensions: [engine.extension],
+      }),
+    });
+
+    expect(
+      view.contentDOM.querySelector(".cm-live-preview-native-unordered-marker"),
+    ).not.toBeNull();
+    expect(view.contentDOM.querySelector<HTMLElement>(".cm-line")?.textContent).toBe("nested item");
+
+    view.dispatch({ selection: { anchor: 0 } });
+    expect(view.contentDOM.querySelector(".cm-live-preview-native-unordered-marker")).toBeNull();
+    expect(view.contentDOM.querySelector<HTMLElement>(".cm-line")?.textContent).toBe(
+      "  - nested item",
+    );
+
+    view.dispatch({ selection: { anchor: 0, head: 1 } });
+    expect(view.contentDOM.querySelector(".cm-live-preview-native-unordered-marker")).toBeNull();
+    expect(view.contentDOM.querySelector<HTMLElement>(".cm-line")?.textContent).toBe(
+      "  - nested item",
+    );
+    expect(view.state.doc.toString()).toBe(source);
+
+    view.destroy();
     engine.dispose();
   });
 
@@ -308,7 +494,7 @@ describe("LivePreviewEngine", () => {
     const h5 = view.contentDOM.querySelector<HTMLElement>(".cm-live-preview-heading-5");
     const h6 = view.contentDOM.querySelector<HTMLElement>(".cm-live-preview-heading-6");
     const unordered = view.contentDOM.querySelector<HTMLElement>(
-      ".cm-live-preview-list-unordered-marker",
+      ".cm-live-preview-native-unordered-marker",
     );
     const ordered = view.contentDOM.querySelector<HTMLElement>(
       ".cm-live-preview-list-ordered-marker",
@@ -437,9 +623,7 @@ describe("LivePreviewEngine", () => {
         .filter(({ presentation }) => presentation === undefined || presentation === "hidden")
         .map(({ from, to }) => ({ from, to })),
     );
-    expect(markClasses(state)).toContain(
-      "cm-live-preview-list-marker cm-live-preview-list-unordered-marker",
-    );
+    expect(unorderedWidgetDepths(state)).toEqual([1]);
     expect(markClasses(state)).toContain(
       "cm-live-preview-task-marker cm-live-preview-task-unchecked",
     );
@@ -509,8 +693,27 @@ function markClasses(state: EditorState): readonly string[] {
   return classes;
 }
 
-function hasMarkerClassAt(state: EditorState, from: number, to: number): boolean {
-  return hasDecorationClassAt(state, from, to, "cm-live-preview-list-unordered-marker");
+function hasUnorderedWidgetAt(state: EditorState, from: number, to: number): boolean {
+  let found = false;
+  state.field(livePreviewState).decorations.between(from, to, (rangeFrom, rangeTo, value): void => {
+    if (rangeFrom === from && rangeTo === to && hasUnorderedWidget(value)) {
+      found = true;
+    }
+  });
+  return found;
+}
+
+function unorderedWidgetDepths(state: EditorState): readonly number[] {
+  const depths: number[] = [];
+  state
+    .field(livePreviewState)
+    .decorations.between(0, state.doc.length, (_from, _to, value): void => {
+      const depth = unorderedWidgetDepth(value);
+      if (depth !== undefined) {
+        depths.push(depth);
+      }
+    });
+  return depths;
 }
 
 function hasDecorationClassAt(
@@ -532,17 +735,18 @@ function hasDecorationClassAt(
   return found;
 }
 
-function markerClassAt(state: EditorState, position: number): string | undefined {
-  let className: string | undefined;
-  state
-    .field(livePreviewState)
-    .decorations.between(position, position + 1, (_from, _to, value): void => {
-      const candidate = decorationClass(value);
-      if (candidate?.includes("cm-live-preview-list-unordered-marker") === true) {
-        className = candidate;
-      }
-    });
-  return className;
+function hasUnorderedWidget(value: Decoration): boolean {
+  return unorderedWidgetDepth(value) !== undefined;
+}
+
+function unorderedWidgetDepth(value: Decoration): number | undefined {
+  const spec = value.spec as unknown;
+  if (!isRecord(spec) || spec["markerPresentation"] !== "list-unordered") {
+    return undefined;
+  }
+  const widget = spec["widget"];
+  const candidate = widget as { readonly depth?: unknown };
+  return typeof candidate.depth === "number" ? candidate.depth : undefined;
 }
 
 function hasHiddenPresentation(value: Decoration): boolean {
