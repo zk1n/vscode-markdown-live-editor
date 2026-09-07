@@ -269,7 +269,7 @@ describe("MarkdownOutlineTreeProvider", () => {
     expect(treeView.reveal).toHaveBeenCalledTimes(1);
   });
 
-  it("refreshes on authoritative change and switches with the last-active editor", () => {
+  it("refreshes on current-panel changes and waits for VS Code to activate a fallback panel", () => {
     const firstDocument = fakeDocument("file:///a.md", 1, "# A");
     const secondDocument = fakeDocument("file:///b.md", 4, "# B");
     setTextDocuments([firstDocument, secondDocument]);
@@ -289,9 +289,34 @@ describe("MarkdownOutlineTreeProvider", () => {
     expect(listener).toHaveBeenCalled();
 
     second.dispose();
+    expect(provider.getChildren()).toEqual([]);
+    sessions.markViewState("a", true);
     expect(provider.getChildren().map((item) => item.label)).toEqual(["A"]);
     first.dispose();
     expect(provider.getChildren()).toEqual([]);
+  });
+
+  it("gates the tree to the current Live Editor tab while retaining the last-active session", () => {
+    const document = fakeDocument("file:///outline.md", 1, "# Live");
+    setTextDocuments([document]);
+    const sessions = new MarkdownEditorSessionRegistry();
+    sessions.register(fakeSession(document.uri.toString(), "live"), true);
+    const provider = new MarkdownOutlineTreeProvider(sessions);
+    const listener = vi.fn();
+    provider.onDidChangeTreeData(listener);
+
+    expect(provider.getChildren().map((item) => item.label)).toEqual(["Live"]);
+
+    // Side Bar/Chat focus does not change the active editor panel.
+    expect(provider.getChildren().map((item) => item.label)).toEqual(["Live"]);
+    expect(listener).not.toHaveBeenCalled();
+
+    // A normal Markdown editor, Preview, non-Markdown editor, or Welcome tab
+    // deactivates the Live Editor panel and empties this presentation-only view.
+    sessions.markViewState("live", false);
+    expect(sessions.activeSession?.sessionId).toBe("live");
+    expect(provider.getChildren()).toEqual([]);
+    expect(listener).toHaveBeenCalledTimes(1);
   });
 
   it("reveals and sends an identity/version-bound presentation-only navigation message", async () => {
@@ -387,6 +412,27 @@ describe("MarkdownOutlineTreeProvider", () => {
     expect(postMessage).not.toHaveBeenCalled();
     registration.dispose();
     expect(await provider.navigateTo(staleItem)).toBe(false);
+  });
+
+  it("does not reveal a stale item after the Live Editor loses the active tab", async () => {
+    const document = fakeDocument("file:///outline.md", 1, "# Old");
+    setTextDocuments([document]);
+    const reveal = vi.fn();
+    const postMessage = vi.fn(() => true);
+    const sessions = new MarkdownEditorSessionRegistry();
+    sessions.register(
+      { documentUri: document.uri.toString(), sessionId: "session-a", reveal, postMessage },
+      true,
+    );
+    const provider = new MarkdownOutlineTreeProvider(sessions);
+    const [staleItem] = provider.getChildren();
+    if (staleItem === undefined) throw new Error("Expected an Outline item.");
+
+    sessions.markViewState("session-a", false);
+
+    expect(await provider.navigateTo(staleItem)).toBe(false);
+    expect(reveal).not.toHaveBeenCalled();
+    expect(postMessage).not.toHaveBeenCalled();
   });
 
   it("rejects an item after the last-active Live Editor switches documents", async () => {

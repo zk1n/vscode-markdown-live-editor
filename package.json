@@ -148,6 +148,7 @@
     "format:check": "prettier --check \"*.{md,json,ts,mjs}\" src tests scripts docs .vscode .github",
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:browser-geometry": "node ./scripts/build-browser-geometry-harness.mjs && node ./scripts/run-browser-geometry-harness.mjs",
     "test:extension-host": "npm run build && node ./scripts/run-extension-host-tests.mjs",
     "check": "npm run typecheck && npm run lint && npm run test && npm run build && npm run format:check",
     "package:vsix": "npm run build && node ./scripts/package-vsix.mjs"

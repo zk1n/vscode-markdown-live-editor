@@ -402,6 +402,10 @@ class MarkdownWebviewController {
       this.styleElement.replaceWith(next);
     }
     this.styleElement = next;
+    // Custom CSS is replaced outside CodeMirror's transaction/theme system.
+    // Schedule its public layout pass so font and line metric changes are
+    // reflected before the next coordinate-based selection.
+    this.view.requestMeasure();
   }
 
   private isTabEditable(): boolean {

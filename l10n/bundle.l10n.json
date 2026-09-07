@@ -14,8 +14,9 @@
   "Enter positive line and column numbers separated by a comma.": "Enter positive line and column numbers separated by a comma.",
   "Indent Using Spaces": "Indent Using Spaces",
   "Indent Using Tabs": "Indent Using Tabs",
-  "Change Tab Size…": "Change Tab Size…",
-  "Change Markdown Live Editor indentation": "Change Markdown Live Editor indentation",
+  "change view": "change view",
+  "Change Tab Display Size": "Change Tab Display Size",
+  "Select Action": "Select Action",
   "Select tab size": "Select tab size",
   "Tab Size": "Tab Size"
 }

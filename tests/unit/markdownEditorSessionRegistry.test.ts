@@ -105,7 +105,38 @@ describe("MarkdownEditorSessionRegistry", () => {
 
     registry.markViewState("session-1", false);
     expect(registry.activeStatusSession).toBeUndefined();
+    expect(registry.activeCustomEditorSession).toBeUndefined();
     expect(registry.activeSession?.sessionId).toBe("session-1");
+  });
+
+  it("keeps last-active session separate from the current custom-editor tab", () => {
+    const registry = new MarkdownEditorSessionRegistry();
+    registry.register(createSession("session-1"), true);
+
+    // Switching to normal Markdown, Preview, a non-Markdown editor, or Welcome
+    // makes the current Custom Editor absent. Side Bar/Chat focus does not emit
+    // this transition, so the current panel remains available in that case.
+    expect(registry.activeCustomEditorSession?.sessionId).toBe("session-1");
+    expect(registry.activeSession?.sessionId).toBe("session-1");
+    registry.markViewState("session-1", false);
+    expect(registry.activeCustomEditorSession).toBeUndefined();
+    expect(registry.activeSession?.sessionId).toBe("session-1");
+  });
+
+  it("ignores inactive notifications from panels that are not currently active", () => {
+    const registry = new MarkdownEditorSessionRegistry();
+    registry.register(createSession("session-1"), true);
+    registry.register(createSession("session-2"), false);
+
+    // An inactive panel may report false without changing the current panel.
+    registry.markViewState("session-2", false);
+    expect(registry.activeCustomEditorSession?.sessionId).toBe("session-1");
+
+    // VS Code may deliver A=false after B=true during a split switch. The
+    // delayed notification for A must not clear B's current-panel authority.
+    registry.markViewState("session-2", true);
+    registry.markViewState("session-1", false);
+    expect(registry.activeCustomEditorSession?.sessionId).toBe("session-2");
   });
 
   it("clears state when a controller is replaced and rejects stale reports", () => {

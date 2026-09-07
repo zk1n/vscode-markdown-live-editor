@@ -4,6 +4,11 @@ export enum TreeItemCollapsibleState {
   Expanded = 2,
 }
 
+export enum QuickPickItemKind {
+  Separator = -1,
+  Default = 0,
+}
+
 export class TreeItem {
   public id: string | undefined;
   public contextValue: string | undefined;
