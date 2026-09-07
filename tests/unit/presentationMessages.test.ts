@@ -14,6 +14,27 @@ const identity = {
 } as const;
 
 describe("presentation message decoding", () => {
+  it("rejects invalid typography and separate indentation dimensions", () => {
+    expect(
+      decodeHostPresentationMessage({
+        ...identity,
+        kind: "style-snapshot",
+        revision: 1,
+        css: "",
+        typography: { fontFamily: "sans-serif", fontSize: NaN, lineHeight: 1.6 },
+      }).ok,
+    ).toBe(false);
+    expect(
+      decodeHostPresentationMessage({
+        ...identity,
+        kind: "editor-configuration",
+        revision: 1,
+        insertSpaces: true,
+        tabSize: 4,
+        indentSize: 0,
+      }).ok,
+    ).toBe(false);
+  });
   it("decodes a bounded controller state report", () => {
     expect(
       decodeEditorStateMessage({

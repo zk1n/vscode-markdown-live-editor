@@ -22,6 +22,7 @@ export interface EditorStateMessage extends EditorIdentity {
   readonly barrierActive: boolean;
   readonly insertSpaces: boolean;
   readonly tabSize: number;
+  readonly indentSize?: number;
 }
 
 /** Host-resolved effective editor configuration for exactly one controller. */
@@ -30,6 +31,7 @@ export interface EditorConfigurationMessage extends EditorIdentity {
   readonly revision: number;
   readonly insertSpaces: boolean;
   readonly tabSize: number;
+  readonly indentSize?: number;
 }
 
 /** A presentation-only cursor move requested by extension-owned status UI. */
@@ -64,6 +66,27 @@ export interface StyleSnapshotMessage extends EditorIdentity {
   readonly kind: "style-snapshot";
   readonly revision: number;
   readonly css: string;
+  readonly typography?: PreviewTypography;
+}
+
+export interface PreviewTypography {
+  readonly fontFamily: string;
+  readonly fontSize: number;
+  readonly lineHeight: number;
+}
+
+export function isPreviewTypography(value: unknown): value is PreviewTypography {
+  return (
+    isRecord(value) &&
+    typeof value["fontFamily"] === "string" &&
+    value["fontFamily"].length <= 4096 &&
+    typeof value["fontSize"] === "number" &&
+    Number.isFinite(value["fontSize"]) &&
+    value["fontSize"] > 0 &&
+    typeof value["lineHeight"] === "number" &&
+    Number.isFinite(value["lineHeight"]) &&
+    value["lineHeight"] > 0
+  );
 }
 
 export type WebviewPresentationMessage = EditorStateMessage;
@@ -88,6 +111,9 @@ export function decodeEditorStateMessage(value: unknown): ProtocolDecodeResult<E
   const line = readPositiveInteger(value["line"], "line");
   const column = readPositiveInteger(value["column"], "column");
   const tabSize = readPositiveInteger(value["tabSize"], "tabSize");
+  const indentSize = value["indentSize"];
+  if (indentSize !== undefined && !isIndentSize(indentSize))
+    return { ok: false, error: "indentSize is invalid." };
   if (!reportSequence.ok) return reportSequence;
   if (!documentVersion.ok) return documentVersion;
   if (!selectionAnchor.ok) return selectionAnchor;
@@ -122,6 +148,7 @@ export function decodeEditorStateMessage(value: unknown): ProtocolDecodeResult<E
       barrierActive: flags.value.barrierActive,
       insertSpaces: flags.value.insertSpaces,
       tabSize: tabSize.value,
+      ...(indentSize === undefined ? {} : { indentSize }),
     },
   };
 }
@@ -156,6 +183,9 @@ export function decodeHostPresentationMessage(
     case "editor-configuration": {
       const revision = readNonNegativeInteger(value["revision"], "revision");
       const tabSize = readPositiveInteger(value["tabSize"], "tabSize");
+      const indentSize = value["indentSize"];
+      if (indentSize !== undefined && !isIndentSize(indentSize))
+        return { ok: false, error: "indentSize is invalid." };
       if (!revision.ok) return revision;
       if (!tabSize.ok || tabSize.value > 32) {
         return { ok: false, error: "tabSize must be an integer from 1 through 32." };
@@ -171,6 +201,7 @@ export function decodeHostPresentationMessage(
           revision: revision.value,
           insertSpaces: value["insertSpaces"],
           tabSize: tabSize.value,
+          ...(indentSize === undefined ? {} : { indentSize }),
         },
       };
     }
@@ -240,6 +271,10 @@ export function decodeHostPresentationMessage(
       if (typeof value["css"] !== "string" || value["css"].length > 2 * 64 * 1024) {
         return { ok: false, error: "style-snapshot css is invalid or too large." };
       }
+      const typography = value["typography"];
+      if (typography !== undefined && !isPreviewTypography(typography)) {
+        return { ok: false, error: "style-snapshot typography is invalid." };
+      }
       return {
         ok: true,
         value: {
@@ -247,12 +282,17 @@ export function decodeHostPresentationMessage(
           ...identity.value,
           revision: revision.value,
           css: value["css"],
+          ...(typography === undefined ? {} : { typography }),
         },
       };
     }
     default:
       return { ok: false, error: "Presentation message kind is invalid." };
   }
+}
+
+function isIndentSize(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0 && value <= 32;
 }
 
 function decodeIdentity(value: Record<string, unknown>): ProtocolDecodeResult<EditorIdentity> {

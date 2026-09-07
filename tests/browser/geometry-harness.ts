@@ -35,6 +35,12 @@ interface DragMetadata {
 }
 
 interface GeometryPhaseResult {
+  readonly typography: {
+    readonly fontFamily: string;
+    readonly fontSize: string;
+    readonly fontWeight: string;
+    readonly lineHeight: string;
+  };
   readonly coordsMatch: boolean;
   readonly dragTests: readonly DragMetadata[];
   readonly geometryMatches: boolean;
@@ -80,6 +86,8 @@ if (parent === null) {
   throw new Error("The geometry harness root is missing.");
 }
 const engine = createLivePreviewEngine();
+// Installed Markdown Preview defaults, supplied by the host style snapshot.
+document.documentElement.style.setProperty("--markdown-line-height", "1.6");
 const view = new EditorView({
   parent,
   state: EditorState.create({
@@ -102,6 +110,13 @@ async function runGeometryHarness(editor: EditorView): Promise<void> {
   editor.requestMeasure();
   await animationFrame();
   const base = measurePhase(editor, "base");
+  if (
+    base.typography.fontFamily === "monospace" ||
+    base.typography.fontSize !== "14px" ||
+    base.typography.fontWeight !== "400"
+  ) {
+    throw new Error("Preview body typography did not override CodeMirror defaults.");
+  }
 
   const customMetrics = document.createElement("style");
   customMetrics.textContent = [
@@ -112,6 +127,12 @@ async function runGeometryHarness(editor: EditorView): Promise<void> {
   editor.requestMeasure();
   await animationFrame();
   const afterCustomMetrics = measurePhase(editor, "after-custom-metrics-requestMeasure");
+  if (
+    afterCustomMetrics.typography.fontSize !== "16px" ||
+    afterCustomMetrics.typography.lineHeight !== "29px"
+  ) {
+    throw new Error("Custom typography did not reach the measured content.");
+  }
 
   const phases = [base, afterCustomMetrics];
   const documentTop = editor.documentTop;
@@ -142,7 +163,14 @@ function measurePhase(editor: EditorView, name: string): GeometryPhaseResult {
     dragMetadata("paragraph-to-heading", "up", lineMetadata, 15, 1),
     dragMetadata("task-to-paragraph", "up", lineMetadata, 7, 3),
   ];
+  const contentStyle = getComputedStyle(editor.contentDOM);
   return {
+    typography: {
+      fontFamily: contentStyle.fontFamily,
+      fontSize: contentStyle.fontSize,
+      fontWeight: contentStyle.fontWeight,
+      lineHeight: contentStyle.lineHeight,
+    },
     coordsMatch: lineMetadata.every(
       (line) =>
         line.coords !== null &&

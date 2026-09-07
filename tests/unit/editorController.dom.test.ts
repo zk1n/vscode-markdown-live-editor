@@ -1,6 +1,7 @@
 // @vitest-environment happy-dom
 
 import { deleteCharBackward } from "@codemirror/commands";
+import { getIndentUnit } from "@codemirror/language";
 import { EditorSelection, EditorState, StateEffect, Transaction } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -379,6 +380,7 @@ describe("MarkdownWebviewController M10 presentation controls", () => {
           revision: 1,
           insertSpaces: true,
           tabSize: 8,
+          indentSize: 4,
         },
       }),
     );
@@ -392,7 +394,9 @@ describe("MarkdownWebviewController M10 presentation controls", () => {
       column: 9,
       insertSpaces: true,
       tabSize: 8,
+      indentSize: 4,
     });
+    expect(getIndentUnit(view.state)).toBe(4);
     expect(editMessages()).toHaveLength(editsBefore);
 
     const tab = new KeyboardEvent("keydown", {
@@ -403,17 +407,18 @@ describe("MarkdownWebviewController M10 presentation controls", () => {
     });
     content.dispatchEvent(tab);
     expect(tab.defaultPrevented).toBe(true);
-    expect(view.state.doc.toString()).toBe("a\t        b");
+    expect(view.state.doc.toString()).toBe("a\t    b");
+    expect(view.state.selection.main.head).toBe(6);
     expect(editMessages().at(-1)).toMatchObject({
-      changes: [expect.objectContaining({ text: "a\t        b" })],
+      changes: [expect.objectContaining({ text: "a\t    b" })],
     });
-    acknowledge("edit", 1, 2, "a\t        b");
+    acknowledge("edit", 1, 2, "a\t    b");
     expect(dispatchBarrierShortcut(content, "z").defaultPrevented).toBe(true);
     acknowledge("undo", 2, 3, "a\tb");
     expect(view.state.doc.toString()).toBe("a\tb");
     expect(dispatchBarrierShortcut(content, "y").defaultPrevented).toBe(true);
-    acknowledge("redo", 3, 4, "a\t        b");
-    expect(view.state.doc.toString()).toBe("a\t        b");
+    acknowledge("redo", 3, 4, "a\t    b");
+    expect(view.state.doc.toString()).toBe("a\t    b");
   });
 
   it("atomically replaces validated CSS without a CodeMirror transaction or source message", async () => {
@@ -434,11 +439,17 @@ describe("MarkdownWebviewController M10 presentation controls", () => {
           ...identity,
           revision: 1,
           css: ".cm-content { letter-spacing: 1px; }",
+          typography: { fontFamily: "sans-serif", fontSize: 16, lineHeight: 1.6 },
         },
       }),
     );
     const first = document.getElementById("markdown-live-editor-custom-style");
     expect(first?.textContent).toContain("letter-spacing");
+    expect(document.documentElement.style.getPropertyValue("--markdown-font-family")).toBe(
+      "sans-serif",
+    );
+    expect(document.documentElement.style.getPropertyValue("--markdown-font-size")).toBe("16px");
+    expect(document.documentElement.style.getPropertyValue("--markdown-line-height")).toBe("1.6");
 
     window.dispatchEvent(
       new MessageEvent("message", {
