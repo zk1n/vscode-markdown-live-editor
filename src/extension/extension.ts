@@ -201,16 +201,7 @@ export async function chooseIndentation(
   if (choice?.value === undefined) {
     return undefined;
   }
-  const tabSize = await vscode.window.showQuickPick(
-    Array.from({ length: 8 }, (_unused, index) => index + 1).map((value) => ({
-      label: String(value),
-      value,
-    })),
-    {
-      placeHolder: vscodeLocalizer.t("Select tab size"),
-      title: vscodeLocalizer.t("Tab Size"),
-    },
-  );
+  const tabSize = await chooseTabSize(context);
   if (tabSize === undefined) {
     return undefined;
   }
@@ -229,6 +220,15 @@ type IndentationQuickPickValue = "spaces" | "tabs" | "size";
 
 interface IndentationQuickPickItem extends vscode.QuickPickItem {
   readonly value?: IndentationQuickPickValue;
+}
+
+interface TabSizeQuickPickItem extends vscode.QuickPickItem {
+  readonly value: number;
+}
+
+interface TabSizeQuickPickOptions {
+  readonly placeHolder: string;
+  readonly activeItem: TabSizeQuickPickItem;
 }
 
 /**
@@ -260,6 +260,89 @@ export function createIndentationQuickPickOptions(
   localizer = vscodeLocalizer,
 ): vscode.QuickPickOptions {
   return { placeHolder: localizer.t("Select Action") };
+}
+
+/**
+ * Mirrors the workbench's three-way tab-size descriptions without persisting
+ * anything. `configuredTabSize` is the editor setting; `currentTabSize` is
+ * the document-local transient value reported by the active webview.
+ */
+export function createTabSizeQuickPickItems(
+  configuredTabSize: number,
+  currentTabSize: number,
+  localizer = vscodeLocalizer,
+): readonly TabSizeQuickPickItem[] {
+  return Array.from({ length: 8 }, (_unused, index) => {
+    const value = index + 1;
+    const description =
+      value === configuredTabSize && value === currentTabSize
+        ? localizer.t("Configured Tab Size")
+        : value === configuredTabSize
+          ? localizer.t("Default Tab Size")
+          : value === currentTabSize
+            ? localizer.t("Current Tab Size")
+            : undefined;
+    return { label: String(value), value, ...(description === undefined ? {} : { description }) };
+  });
+}
+
+export function createTabSizeQuickPickOptions(
+  items: readonly TabSizeQuickPickItem[],
+  currentTabSize: number,
+  localizer = vscodeLocalizer,
+): TabSizeQuickPickOptions {
+  const activeItem = items[Math.min(Math.max(currentTabSize - 1, 0), items.length - 1)] ?? items[0];
+  if (activeItem === undefined) {
+    throw new Error("Tab-size QuickPick requires at least one item.");
+  }
+  return {
+    placeHolder: localizer.t("Select Tab Size for Current File"),
+    activeItem,
+  };
+}
+
+async function chooseTabSize(
+  context: StatusActionContext,
+): Promise<TabSizeQuickPickItem | undefined> {
+  const configuredTabSize = configuredTabSizeFor(context);
+  const items = createTabSizeQuickPickItems(configuredTabSize, context.editorState.tabSize);
+  const options = createTabSizeQuickPickOptions(items, context.editorState.tabSize);
+  const picker = vscode.window.createQuickPick<TabSizeQuickPickItem>();
+  picker.items = items;
+  picker.placeholder = options.placeHolder;
+  picker.activeItems = [options.activeItem];
+  return await new Promise<TabSizeQuickPickItem | undefined>((resolve) => {
+    let accepted = false;
+    const complete = (result: TabSizeQuickPickItem | undefined): void => {
+      accept.dispose();
+      hide.dispose();
+      picker.dispose();
+      resolve(result);
+    };
+    const accept = picker.onDidAccept((): void => {
+      accepted = true;
+      complete(picker.selectedItems[0]);
+    });
+    const hide = picker.onDidHide((): void => {
+      if (!accepted) complete(undefined);
+    });
+    picker.show();
+  });
+}
+
+function configuredTabSizeFor(context: StatusActionContext): number {
+  const uri = vscode.Uri.parse(context.identity.documentUri);
+  const document = vscode.workspace.textDocuments.find(
+    (candidate) => candidate.uri.toString() === context.identity.documentUri && !candidate.isClosed,
+  );
+  const configuration = vscode.workspace.getConfiguration("editor", {
+    uri,
+    languageId: document?.languageId ?? "markdown",
+  });
+  const value = configuration.get<unknown>("tabSize");
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0 && value <= 32
+    ? value
+    : 4;
 }
 
 function createIndentationQuickPickAction(

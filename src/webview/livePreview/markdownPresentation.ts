@@ -1,3 +1,5 @@
+import { markdownLanguage } from "@codemirror/lang-markdown";
+
 import { parseAtxHeadingLine } from "../../core/markdown/atxHeadings.js";
 
 export type PresentationSyntaxKind =
@@ -44,18 +46,25 @@ export function findPresentationSyntax(text: string): readonly PresentationSynta
   const ranges: PresentationSyntaxRange[] = [];
   const lines = text.split("\n");
   let offset = 0;
-  let fencedCode = false;
+  const blockSyntax = findListAndTaskSyntax(text);
+  const codeBlocks = findCodeBlockRanges(text);
 
   for (const line of lines) {
-    if (/^\s*(```|~~~)/.test(line)) {
-      fencedCode = !fencedCode;
-    } else if (!fencedCode) {
+    if (!isInCodeBlock(offset, codeBlocks)) {
       const inlineCode = findInlineCodeRanges(line, offset);
       const heading = findHeading(line, offset);
       if (heading !== undefined) {
         ranges.push(heading);
       }
-      ranges.push(...findBlockPrefixRanges(line, offset));
+      const blockPrefix = blockSyntax.get(offset);
+      if (blockPrefix !== undefined) {
+        ranges.push(blockPrefix);
+      } else {
+        const blockquote = findBlockquote(line, offset);
+        if (blockquote !== undefined) {
+          ranges.push(blockquote);
+        }
+      }
       ranges.push(...inlineCode);
 
       const protectedRanges = inlineCode.map(({ from, to }) => ({
@@ -108,84 +117,143 @@ function findHeading(line: string, offset: number): PresentationSyntaxRange | un
   };
 }
 
-function findBlockPrefixRanges(line: string, offset: number): readonly PresentationSyntaxRange[] {
-  const task = findTask(line, offset);
-  if (task !== undefined) {
-    return [task];
-  }
-
-  const list = findList(line, offset);
-  if (list !== undefined) {
-    return [list];
-  }
-
-  const blockquote = findBlockquote(line, offset);
-  return blockquote === undefined ? [] : [blockquote];
+interface SourceRange {
+  readonly from: number;
+  readonly to: number;
 }
 
-function findTask(line: string, offset: number): PresentationSyntaxRange | undefined {
-  const match = /^( {0,3})(?:[-+*]|\d{1,9}[.)])([ \t]+)(\[[ xX]\])([ \t]+)(?=\S)/.exec(line);
-  if (match === null) {
-    return undefined;
-  }
-  const indentation = match[1];
-  const beforeCheckbox = match[2];
-  const checkbox = match[3];
-  const trailingSpace = match[4];
-  if (
-    indentation === undefined ||
-    beforeCheckbox === undefined ||
-    checkbox === undefined ||
-    trailingSpace === undefined
-  ) {
-    return undefined;
+const presentationParser = markdownLanguage.parser;
+
+/**
+ * The Markdown parser is authoritative for list context. In particular, its
+ * tree distinguishes a top-level four-space indented code block from a list
+ * nested beneath a preceding list item (including tab-based indentation).
+ */
+function findListAndTaskSyntax(text: string): ReadonlyMap<number, PresentationSyntaxRange> {
+  const listMarks: SourceRange[] = [];
+  const taskMarkers: SourceRange[] = [];
+  presentationParser.parse(text).iterate({
+    enter: ({ name, from, to }): void => {
+      if (name === "ListMark") {
+        listMarks.push({ from, to });
+      } else if (name === "TaskMarker") {
+        taskMarkers.push({ from, to });
+      }
+    },
+  });
+
+  const taskByListMark = new Map<number, SourceRange>();
+  for (const taskMarker of taskMarkers) {
+    const listMark = findListMarkForTask(text, listMarks, taskMarker);
+    if (listMark !== undefined) {
+      taskByListMark.set(listMark.from, taskMarker);
+    }
   }
 
-  const checkboxFrom = indentation.length + line.slice(indentation.length).indexOf(checkbox);
-  const checkboxTo = checkboxFrom + checkbox.length;
-  const contentFrom = checkboxTo + trailingSpace.length;
-  return {
-    kind: "task",
-    from: offset,
-    to: offset + line.length,
-    contentFrom: offset + contentFrom,
-    contentTo: offset + line.length,
-    markers: [
-      { from: offset + indentation.length, to: offset + checkboxFrom },
-      {
-        from: offset + checkboxFrom,
-        to: offset + contentFrom,
-        presentation: checkbox.toLowerCase() === "[x]" ? "task-checked" : "task-unchecked",
-      },
-    ],
-  };
+  const ranges = new Map<number, PresentationSyntaxRange>();
+  for (const listMark of listMarks) {
+    const lineEnd = text.indexOf("\n", listMark.to);
+    const contentTo = lineEnd === -1 ? text.length : lineEnd;
+    const taskMarker = taskByListMark.get(listMark.from);
+    const contentFrom = skipWhitespace(text, taskMarker?.to ?? listMark.to, contentTo);
+    if (contentFrom === contentTo) {
+      continue;
+    }
+
+    const marker = text.slice(listMark.from, listMark.to);
+    if (taskMarker === undefined) {
+      ranges.set(lineStart(text, listMark.from), {
+        kind: "list",
+        from: listMark.from,
+        to: contentTo,
+        contentFrom,
+        contentTo,
+        markers: [
+          {
+            from: listMark.from,
+            to: contentFrom,
+            presentation: /^[+*-]$/.test(marker) ? "list-unordered" : "list-ordered",
+          },
+        ],
+      });
+      continue;
+    }
+
+    ranges.set(lineStart(text, listMark.from), {
+      kind: "task",
+      from: listMark.from,
+      to: contentTo,
+      contentFrom,
+      contentTo,
+      markers: [
+        { from: listMark.from, to: taskMarker.from },
+        {
+          from: taskMarker.from,
+          to: contentFrom,
+          presentation:
+            text.slice(taskMarker.from, taskMarker.to).toLowerCase() === "[x]"
+              ? "task-checked"
+              : "task-unchecked",
+        },
+      ],
+    });
+  }
+  return ranges;
 }
 
-function findList(line: string, offset: number): PresentationSyntaxRange | undefined {
-  const match = /^( {0,3})([-+*]|\d{1,9}[.)])([ \t]+)(?=\S)/.exec(line);
-  if (match === null) {
+function findListMarkForTask(
+  text: string,
+  listMarks: readonly SourceRange[],
+  taskMarker: SourceRange,
+): SourceRange | undefined {
+  for (let index = listMarks.length - 1; index >= 0; index -= 1) {
+    const listMark = listMarks[index];
+    if (listMark === undefined || listMark.to > taskMarker.from) {
+      continue;
+    }
+    const lineEnd = text.indexOf("\n", listMark.to);
+    if (lineEnd === -1 || taskMarker.from < lineEnd) {
+      return listMark;
+    }
     return undefined;
   }
-  const indentation = match[1];
-  const marker = match[2];
-  if (indentation === undefined || marker === undefined) {
-    return undefined;
+  return undefined;
+}
+
+function findCodeBlockRanges(text: string): readonly SourceRange[] {
+  const ranges: SourceRange[] = [];
+  presentationParser.parse(text).iterate({
+    enter: ({ name, from, to }): void => {
+      if (name === "CodeBlock" || name === "FencedCode") {
+        const blockFrom = lineStart(text, from);
+        const blockTo = lineEnd(text, to);
+        ranges.push({ from: blockFrom, to: blockTo });
+      }
+    },
+  });
+  return ranges;
+}
+
+function lineEnd(text: string, position: number): number {
+  const nextNewline = text.indexOf("\n", position);
+  return nextNewline === -1 ? text.length : nextNewline;
+}
+
+function isInCodeBlock(offset: number, codeBlocks: readonly SourceRange[]): boolean {
+  return codeBlocks.some(({ from, to }) => offset >= from && offset <= to);
+}
+
+function skipWhitespace(text: string, from: number, to: number): number {
+  let position = from;
+  while (position < to && /[ \t]/.test(text[position] ?? "")) {
+    position += 1;
   }
-  const contentFrom = match[0].length;
-  return {
-    kind: "list",
-    from: offset,
-    to: offset + line.length,
-    contentFrom: offset + contentFrom,
-    contentTo: offset + line.length,
-    markers: [
-      {
-        from: offset + indentation.length,
-        to: offset + contentFrom,
-        presentation: /^[+*-]$/.test(marker) ? "list-unordered" : "list-ordered",
-      },
-    ],
-  };
+  return position;
+}
+
+function lineStart(text: string, position: number): number {
+  const previousNewline = text.lastIndexOf("\n", position - 1);
+  return previousNewline === -1 ? 0 : previousNewline + 1;
 }
 
 function findBlockquote(line: string, offset: number): PresentationSyntaxRange | undefined {

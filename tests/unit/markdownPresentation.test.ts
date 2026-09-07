@@ -69,6 +69,62 @@ describe("Markdown presentation syntax", () => {
     });
   });
 
+  it("uses the Markdown tree for nested list and task indentation without presenting code", () => {
+    const source = [
+      "    - top-level code",
+      "- parent",
+      "  - two-space child",
+      "    - four-space child",
+      "\t- tab child",
+      "",
+      "    1. ordered child",
+      "    - [ ] open task",
+      "> - quoted parent",
+      ">   - [X] quoted task",
+      "```md",
+      "    - [ ] fenced source",
+      "```",
+      "    - indented code",
+    ].join("\n");
+    const syntax = findPresentationSyntax(source);
+    const presentedLines = syntax
+      .filter(({ kind }) => kind === "list" || kind === "task")
+      .map(({ from }) => {
+        const lineFrom = source.lastIndexOf("\n", from - 1) + 1;
+        const lineTo = source.indexOf("\n", from);
+        return source.slice(lineFrom, lineTo === -1 ? source.length : lineTo);
+      });
+
+    expect(presentedLines).toEqual([
+      "- parent",
+      "  - two-space child",
+      "    - four-space child",
+      "\t- tab child",
+      "    1. ordered child",
+      "    - [ ] open task",
+      "> - quoted parent",
+      ">   - [X] quoted task",
+    ]);
+    expect(syntax.some(({ from }) => source.slice(from).startsWith("    - top-level code"))).toBe(
+      false,
+    );
+    expect(
+      syntax.some(({ from }) => source.slice(from).startsWith("    - [ ] fenced source")),
+    ).toBe(false);
+    expect(syntax.some(({ from }) => source.slice(from).startsWith("    - indented code"))).toBe(
+      false,
+    );
+
+    const tasks = syntax.filter(({ kind }) => kind === "task");
+    expect(tasks.map(({ markers }) => markers[1]?.presentation)).toEqual([
+      "task-unchecked",
+      "task-checked",
+    ]);
+
+    const indentedInline = findPresentationSyntax("    **indented code**");
+    expect(indentedInline.some(({ kind }) => kind === "strong")).toBe(false);
+  });
+
   it("reveals an enclosing syntax range for a caret or a boundary-crossing selection", () => {
     const [strong] = findPresentationSyntax("**日本語**");
     expect(strong).toBeDefined();
@@ -181,6 +237,46 @@ describe("LivePreviewEngine", () => {
     engine.dispose();
   });
 
+  it("presents parser-recognized nested markers but leaves four-space top-level code raw", () => {
+    const source = "    - code\n- parent\n    - nested\n    - [ ] nested task";
+    const syntax = findPresentationSyntax(source);
+    const nestedList = syntax.find(
+      ({ kind, from }) => kind === "list" && from === source.indexOf("- nested"),
+    );
+    const nestedTask = syntax.find(({ kind }) => kind === "task");
+    if (nestedList === undefined || nestedTask === undefined) {
+      throw new Error("Expected parser-recognized nested list and task.");
+    }
+
+    const engine = createLivePreviewEngine();
+    const state = EditorState.create({
+      doc: source,
+      selection: { anchor: 0 },
+      extensions: [engine.extension],
+    });
+    expect(
+      hasMarkerClassAt(state, nestedList.markers[0]?.from ?? -1, nestedList.markers[0]?.to ?? -1),
+    ).toBe(true);
+    expect(
+      hasDecorationClassAt(
+        state,
+        nestedTask.markers[1]?.from ?? -1,
+        nestedTask.markers[1]?.to ?? -1,
+        "cm-live-preview-task-marker",
+      ),
+    ).toBe(true);
+    expect(
+      hasDecorationClassAt(
+        state,
+        source.indexOf("- code"),
+        source.indexOf("- code") + 1,
+        "cm-live-preview-list-marker",
+      ),
+    ).toBe(false);
+
+    engine.dispose();
+  });
+
   it("keeps the Preview-inspired heading rhythm and list gutter as presentation-only CSS", () => {
     const source =
       "# one\n## two\n#### four\n##### five\n###### six\n- item\n1. ordered\n---\n- [ ] task";
@@ -231,6 +327,36 @@ describe("LivePreviewEngine", () => {
       view.contentDOM.querySelector(".cm-line.cm-live-preview-horizontal-rule"),
     ).not.toBeNull();
     expect(view.state.doc.toString()).toBe(source);
+
+    view.destroy();
+    engine.dispose();
+  });
+
+  it("presents blockquote markers and line classes without changing source coordinates", () => {
+    const source = "> first quote\n> second quote\nplain";
+    const engine = createLivePreviewEngine();
+    const view = new EditorView({
+      parent: document.body,
+      state: EditorState.create({
+        doc: source,
+        selection: { anchor: source.length },
+        extensions: [engine.extension],
+      }),
+    });
+
+    const quoteLines = [
+      ...view.contentDOM.querySelectorAll<HTMLElement>(".cm-line.cm-live-preview-blockquote-line"),
+    ];
+    expect(quoteLines).toHaveLength(2);
+    expect(quoteLines.map((line) => line.textContent)).toEqual(["first quote", "second quote"]);
+    expect(view.contentDOM.querySelectorAll(".cm-live-preview-blockquote")).toHaveLength(2);
+    expect(view.state.doc.toString()).toBe(source);
+
+    view.dispatch({ selection: { anchor: 1 } });
+    expect(view.state.doc.toString()).toBe(source);
+    expect(quoteLines[0]?.textContent).toBe("> first quote");
+    expect(quoteLines[0]?.classList.contains("cm-live-preview-blockquote-line")).toBe(true);
+    expect(quoteLines[1]?.textContent).toBe("second quote");
 
     view.destroy();
     engine.dispose();
@@ -371,12 +497,21 @@ function markClasses(state: EditorState): readonly string[] {
 }
 
 function hasMarkerClassAt(state: EditorState, from: number, to: number): boolean {
+  return hasDecorationClassAt(state, from, to, "cm-live-preview-list-unordered-marker");
+}
+
+function hasDecorationClassAt(
+  state: EditorState,
+  from: number,
+  to: number,
+  className: string,
+): boolean {
   let found = false;
   state.field(livePreviewState).decorations.between(from, to, (rangeFrom, rangeTo, value): void => {
     if (
       rangeFrom === from &&
       rangeTo === to &&
-      decorationClass(value)?.includes("cm-live-preview-list-unordered-marker") === true
+      decorationClass(value)?.includes(className) === true
     ) {
       found = true;
     }

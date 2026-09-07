@@ -18,5 +18,9 @@
   "Change Tab Display Size": "Change Tab Display Size",
   "Select Action": "Select Action",
   "Select tab size": "Select tab size",
-  "Tab Size": "Tab Size"
+  "Tab Size": "Tab Size",
+  "Select Tab Size for Current File": "Select Tab Size for Current File",
+  "Configured Tab Size": "Configured Tab Size",
+  "Default Tab Size": "Default Tab Size",
+  "Current Tab Size": "Current Tab Size"
 }

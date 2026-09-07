@@ -121,6 +121,46 @@ describe("Tab keymap", () => {
     expect(view.state.doc.toString()).toBe("alpha\nbeta");
   });
 
+  it.each([
+    { insertSpaces: true, tabSize: 2, source: "    - [ ] child", expected: "  - [ ] child" },
+    { insertSpaces: true, tabSize: 4, source: "    - [ ] child", expected: "- [ ] child" },
+    { insertSpaces: false, tabSize: 4, source: "\t- [ ] child", expected: "- [ ] child" },
+  ])(
+    "outdents an indented nested task with a caret",
+    ({ insertSpaces, tabSize, source, expected }) => {
+      const view = createView(
+        source,
+        { anchor: source.indexOf("child"), head: source.indexOf("child") },
+        {
+          insertSpaces: () => insertSpaces,
+          tabSize: () => tabSize,
+        },
+      );
+      pressTab(view, true);
+      expect(view.state.doc.toString()).toBe(expected);
+    },
+  );
+
+  it.each([
+    { insertSpaces: true, tabSize: 2, source: "    - item", expected: "  - item" },
+    { insertSpaces: true, tabSize: 4, source: "    - item", expected: "- item" },
+    { insertSpaces: false, tabSize: 4, source: "\t- item", expected: "- item" },
+  ])(
+    "outdents an indented single-line selection",
+    ({ insertSpaces, tabSize, source, expected }) => {
+      const view = createView(
+        source,
+        { anchor: 4, head: source.length },
+        {
+          insertSpaces: () => insertSpaces,
+          tabSize: () => tabSize,
+        },
+      );
+      pressTab(view, true);
+      expect(view.state.doc.toString()).toBe(expected);
+    },
+  );
+
   it("blocks edits while the gate is closed and keeps the key inside editor", () => {
     const view = createView(
       "abcdef",
