@@ -4,6 +4,7 @@ import { EditorState, type Extension, type Range, StateField } from "@codemirror
 import { Decoration, type DecorationSet, EditorView, WidgetType } from "@codemirror/view";
 
 import {
+  findFencedCodeBlockLines,
   findIndentedCodeBlockLines,
   findPresentationSyntax,
   isSyntaxActive,
@@ -111,14 +112,18 @@ const livePreviewTheme = EditorView.baseTheme({
     textDecoration: "line-through",
   },
   ".cm-live-preview-inline-code": {
-    backgroundColor: "transparent",
-    borderRadius: "0",
-    color: "inherit",
-    fontFamily: "var(--vscode-editor-font-family, inherit)",
+    backgroundColor:
+      "var(--md-inline-code-background, color-mix(in srgb, var(--vscode-textPreformat-background, #818b981f) 60%, transparent))",
+    borderRadius: "4px",
+    color: "var(--vscode-textPreformat-foreground, inherit)",
+    fontFamily:
+      'var(--vscode-editor-font-family, ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace)',
     fontSize: "1em",
-    fontWeight: "inherit",
+    fontWeight: "normal",
     lineHeight: "1.357em",
-    padding: "0",
+    margin: "0",
+    padding: "1px 3px",
+    whiteSpace: "break-spaces",
   },
   ".cm-live-preview-blockquote": {
     color: "var(--vscode-textBlockQuote-foreground, var(--vscode-editor-foreground, inherit))",
@@ -159,18 +164,6 @@ const livePreviewTheme = EditorView.baseTheme({
     listStylePosition: "outside",
     verticalAlign: "baseline",
     width: "0",
-  },
-  ".cm-live-preview-native-unordered-marker-depth-1": {
-    listStyleType: "disc",
-    marginLeft: "40px",
-  },
-  ".cm-live-preview-native-unordered-marker-depth-2": {
-    listStyleType: "circle",
-    marginLeft: "80px",
-  },
-  ".cm-live-preview-native-unordered-marker-depth-3": {
-    listStyleType: "square",
-    marginLeft: "120px",
   },
   ".cm-live-preview-native-unordered-marker::marker": {
     color: "inherit",
@@ -371,10 +364,14 @@ class UnorderedListMarkerWidget extends WidgetType {
 
   public override toDOM(): HTMLElement {
     const marker = document.createElement("span");
+    const shape = unorderedMarkerShape(this.depth);
     marker.className = [
       "cm-live-preview-native-unordered-marker",
       `cm-live-preview-native-unordered-marker-depth-${String(this.depth)}`,
+      `cm-live-preview-native-unordered-marker-${shape}`,
     ].join(" ");
+    marker.style.listStyleType = shape;
+    marker.style.marginLeft = `${String(this.depth * 40)}px`;
     marker.setAttribute("aria-hidden", "true");
     return marker;
   }
@@ -416,11 +413,21 @@ function findUnorderedMarkerDepths(documentText: string): ReadonlyMap<number, nu
         }
         node = node.parent;
       }
-      depths.set(from, Math.min(Math.max(depth, 1), 3));
+      depths.set(from, Math.max(depth, 1));
     },
   });
 
   return depths;
+}
+
+function unorderedMarkerShape(depth: number): "disc" | "circle" | "square" {
+  if (depth === 1) {
+    return "disc";
+  }
+  if (depth === 2) {
+    return "circle";
+  }
+  return "square";
 }
 
 function buildStructuralLineDecorations(
@@ -428,46 +435,37 @@ function buildStructuralLineDecorations(
   selections: readonly { readonly from: number; readonly to: number }[],
 ): Range<Decoration>[] {
   const decorations: Range<Decoration>[] = [];
-  let fence: { readonly character: "`" | "~"; readonly length: number } | undefined;
+  const fencedCodeLines = new Map(
+    findFencedCodeBlockLines(state.doc.toString()).map((line) => [line.from, line]),
+  );
   const indentedCodeLines = new Map(
     findIndentedCodeBlockLines(state.doc.toString()).map((line) => [line.from, line]),
   );
 
   for (let lineNumber = 1; lineNumber <= state.doc.lines; lineNumber += 1) {
     const line = state.doc.line(lineNumber);
-    const fenceMatch = /^ {0,3}(`{3,}|~{3,})/.exec(line.text);
-    if (fenceMatch?.[1] !== undefined) {
-      const marker = fenceMatch[1];
-      const character = marker[0];
-      if (character !== "`" && character !== "~") {
-        continue;
+    const fencedCode = fencedCodeLines.get(line.from);
+    if (fencedCode !== undefined) {
+      const lineClasses = ["cm-live-preview-fenced-code-line"];
+      if (fencedCode.isFirst) {
+        lineClasses.push("cm-live-preview-fenced-code-start");
       }
-      if (fence === undefined) {
-        fence = { character, length: marker.length };
+      if (fencedCode.isLast) {
+        lineClasses.push("cm-live-preview-fenced-code-end");
+      }
+      decorations.push(Decoration.line({ class: lineClasses.join(" ") }).range(line.from));
+      if (
+        fencedCode.markerFrom !== undefined &&
+        fencedCode.markerFrom < line.to &&
+        !isLineSelectionActive(line.from, line.to, selections)
+      ) {
         decorations.push(
-          Decoration.line({
-            class: "cm-live-preview-fenced-code-line cm-live-preview-fenced-code-start",
-          }).range(line.from),
-        );
-      } else if (fence.character === character && marker.length >= fence.length) {
-        decorations.push(
-          Decoration.line({
-            class: "cm-live-preview-fenced-code-line cm-live-preview-fenced-code-end",
-          }).range(line.from),
-        );
-        fence = undefined;
-      } else {
-        decorations.push(
-          Decoration.line({ class: "cm-live-preview-fenced-code-line" }).range(line.from),
+          Decoration.replace({
+            inclusive: false,
+            markerPresentation: "fenced-code-marker",
+          }).range(fencedCode.markerFrom, line.to),
         );
       }
-      continue;
-    }
-
-    if (fence !== undefined) {
-      decorations.push(
-        Decoration.line({ class: "cm-live-preview-fenced-code-line" }).range(line.from),
-      );
     } else {
       const indentedCode = indentedCodeLines.get(line.from);
       if (indentedCode !== undefined) {
