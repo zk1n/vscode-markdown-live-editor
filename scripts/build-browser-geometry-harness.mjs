@@ -1,9 +1,15 @@
 import * as esbuild from "esbuild";
+import { fileURLToPath } from "node:url";
+import path from "node:path";
+
+const scriptDirectory = path.dirname(fileURLToPath(import.meta.url));
+const projectRoot = path.resolve(scriptDirectory, "..");
 
 await esbuild.build({
-  entryPoints: ["tests/browser/geometry-harness.ts"],
+  absWorkingDir: projectRoot,
+  entryPoints: [path.join(projectRoot, "tests/browser/geometry-harness.ts")],
   bundle: true,
-  outfile: "dist/geometry-harness.js",
+  outfile: path.join(projectRoot, "dist/geometry-harness.js"),
   format: "iife",
   platform: "browser",
   target: "es2022",

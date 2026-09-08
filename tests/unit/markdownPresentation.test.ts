@@ -9,6 +9,7 @@ import {
   livePreviewState,
 } from "../../src/webview/livePreview/LivePreviewEngine.js";
 import {
+  findFencedCodeBlockLines,
   findIndentedCodeBlockLines,
   findPresentationSyntax,
   isSyntaxActive,
@@ -277,9 +278,9 @@ describe("LivePreviewEngine", () => {
         ),
       ].map((marker) => marker.className),
     ).toEqual([
-      "cm-live-preview-native-unordered-marker cm-live-preview-native-unordered-marker-depth-1",
-      "cm-live-preview-native-unordered-marker cm-live-preview-native-unordered-marker-depth-1",
-      "cm-live-preview-native-unordered-marker cm-live-preview-native-unordered-marker-depth-1",
+      "cm-live-preview-native-unordered-marker cm-live-preview-native-unordered-marker-depth-1 cm-live-preview-native-unordered-marker-disc",
+      "cm-live-preview-native-unordered-marker cm-live-preview-native-unordered-marker-depth-1 cm-live-preview-native-unordered-marker-disc",
+      "cm-live-preview-native-unordered-marker cm-live-preview-native-unordered-marker-depth-1 cm-live-preview-native-unordered-marker-disc",
     ]);
     expect(view.state.doc.toString()).toBe(source);
 
@@ -315,7 +316,7 @@ describe("LivePreviewEngine", () => {
       "    - four-space child",
       "      - five-space child",
       "        - six-space child",
-      "\t- tab child",
+      "          - ten-space child",
       "    - [ ] nested task",
     ].join("\n");
     const syntax = findPresentationSyntax(source);
@@ -331,7 +332,34 @@ describe("LivePreviewEngine", () => {
       selection: { anchor: 0 },
       extensions: [engine.extension],
     });
-    expect(unorderedWidgetDepths(state)).toEqual([1, 2, 3, 3, 3, 3]);
+    expect(unorderedWidgetDepths(state)).toEqual([1, 2, 3, 4, 5, 6]);
+    const view = new EditorView({
+      parent: document.body,
+      state: EditorState.create({
+        doc: source,
+        selection: { anchor: 0 },
+        extensions: [engine.extension],
+      }),
+    });
+    const markers = [
+      ...view.contentDOM.querySelectorAll<HTMLElement>(".cm-live-preview-native-unordered-marker"),
+    ];
+    expect(markers.map((marker) => marker.style.marginLeft)).toEqual([
+      "40px",
+      "80px",
+      "120px",
+      "160px",
+      "200px",
+      "240px",
+    ]);
+    expect(markers.map((marker) => marker.style.listStyleType)).toEqual([
+      "disc",
+      "circle",
+      "square",
+      "square",
+      "square",
+      "square",
+    ]);
     expect(
       hasDecorationClassAt(
         state,
@@ -345,7 +373,70 @@ describe("LivePreviewEngine", () => {
     ).toBe(false);
     expect(state.doc.toString()).toBe(source);
 
+    view.destroy();
     engine.dispose();
+  });
+
+  it("uses parser-recognized fence markers for inactive replacement and active raw source", () => {
+    const source = "```ts\nbody\n```";
+    expect(findFencedCodeBlockLines(source)).toEqual([
+      expect.objectContaining({ from: 0, isFirst: true, markerFrom: 0 }),
+      expect.objectContaining({ isFirst: false, isLast: false }),
+      expect.objectContaining({ isLast: true, markerFrom: source.lastIndexOf("```") }),
+    ]);
+
+    const engine = createLivePreviewEngine();
+    const view = new EditorView({
+      parent: document.body,
+      state: EditorState.create({
+        doc: source,
+        selection: { anchor: source.indexOf("body") },
+        extensions: [engine.extension],
+      }),
+    });
+    expect(
+      [...view.contentDOM.querySelectorAll(".cm-line")].map((line) => line.textContent),
+    ).toEqual(["", "body", ""]);
+    expect(view.contentDOM.querySelectorAll(".cm-live-preview-fenced-code-line")).toHaveLength(3);
+    expect(view.state.doc.toString()).toBe(source);
+
+    view.dispatch({ selection: { anchor: 1 } });
+    expect(view.contentDOM.querySelector<HTMLElement>(".cm-line")?.textContent).toBe("```ts");
+    expect(view.state.doc.toString()).toBe(source);
+    view.destroy();
+    engine.dispose();
+  });
+
+  it("keeps parser edge cases source-faithful for tilde, unclosed, container, empty, and short fences", () => {
+    const cases = [
+      "~~~js\nbody\n~~~",
+      "```js\nbody",
+      "> ```js\n> body\n> ```",
+      "- item\n  ```js\n  body\n  ```",
+      "```\n\n```",
+    ];
+    for (const source of cases) {
+      const lines = findFencedCodeBlockLines(source);
+      expect(lines.length).toBeGreaterThan(0);
+      const engine = createLivePreviewEngine();
+      const view = new EditorView({
+        parent: document.body,
+        state: EditorState.create({
+          doc: source,
+          selection: { anchor: source.includes("body") ? source.indexOf("body") : 4 },
+          extensions: [engine.extension],
+        }),
+      });
+      expect(view.contentDOM.querySelectorAll(".cm-live-preview-fenced-code-line").length).toBe(
+        lines.length,
+      );
+      expect(view.state.doc.toString()).toBe(source);
+      view.destroy();
+      engine.dispose();
+    }
+
+    const shortFence = "``\nbody\n``";
+    expect(findFencedCodeBlockLines(shortFence)).toEqual([]);
   });
 
   it("presents parser-confirmed tab and four-space code without changing source or fenced/list semantics", () => {

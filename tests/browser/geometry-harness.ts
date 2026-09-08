@@ -93,6 +93,11 @@ document.documentElement.style.setProperty(
   "--vscode-editor-font-family",
   "OracleEditor, monospace",
 );
+document.documentElement.style.setProperty("--vscode-textPreformat-foreground", "rgb(17, 34, 51)");
+document.documentElement.style.setProperty(
+  "--vscode-textPreformat-background",
+  "rgb(129, 139, 152)",
+);
 const view = new EditorView({
   parent,
   state: EditorState.create({
@@ -245,18 +250,20 @@ function assertVisualParity(editor: EditorView, expectedSource: string): void {
   const codeStyle = getComputedStyle(inlineCode);
   const contentStyle = getComputedStyle(editor.contentDOM);
   if (
-    codeStyle.color !== contentStyle.color ||
-    codeStyle.backgroundColor !== "rgba(0, 0, 0, 0)" ||
-    codeStyle.borderRadius !== "0px" ||
-    codeStyle.paddingLeft !== "0px" ||
-    codeStyle.paddingRight !== "0px" ||
+    codeStyle.color !== "rgb(17, 34, 51)" ||
+    codeStyle.backgroundColor !== "color(srgb 0.505882 0.545098 0.596078 / 0.6)" ||
+    codeStyle.borderRadius !== "4px" ||
+    codeStyle.paddingLeft !== "3px" ||
+    codeStyle.paddingRight !== "3px" ||
     codeStyle.fontFamily !==
       getComputedStyle(document.documentElement)
         .getPropertyValue("--vscode-editor-font-family")
         .trim() ||
     codeStyle.fontSize !== contentStyle.fontSize ||
     codeStyle.fontWeight !== contentStyle.fontWeight ||
-    codeStyle.lineHeight !== "18.998px"
+    codeStyle.lineHeight !== "18.998px" ||
+    codeStyle.margin !== "0px" ||
+    codeStyle.whiteSpace !== "break-spaces"
   ) {
     throw new Error("Inline code did not match the VS Code 1.136.1 style oracle.");
   }

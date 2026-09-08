@@ -52,6 +52,20 @@ export interface IndentedCodeBlockLine {
 }
 
 /**
+ * Parser-derived metadata for one physical line in a fenced code block. The
+ * marker range begins at a parser-recognized CodeMark and extends through the
+ * rest of that physical line, so an inactive preview can remove a fence and
+ * its info string without guessing at CommonMark container prefixes.
+ */
+export interface FencedCodeBlockLine {
+  readonly from: number;
+  readonly to: number;
+  readonly isFirst: boolean;
+  readonly isLast: boolean;
+  readonly markerFrom?: number;
+}
+
+/**
  * Deliberately conservative v0.1 recognition for presentation only. It skips
  * fenced code blocks, keeps complex/nested inline forms as source, and does
  * not attempt to normalize or rewrite Markdown.
@@ -295,6 +309,77 @@ export function findIndentedCodeBlockLines(text: string): readonly IndentedCodeB
         isFirst: index === 0,
         isLast: index === codeTexts.length - 1,
       });
+    }
+  }
+  return lines;
+}
+
+/**
+ * Returns parser-recognized fenced-code lines and their opening/closing
+ * CodeMark positions. `CodeInfo` is intentionally covered by the opening
+ * marker range through the physical line end. An unclosed fence has only its
+ * opening marker; its final source line still receives the block end style.
+ */
+export function findFencedCodeBlockLines(text: string): readonly FencedCodeBlockLine[] {
+  const lines: FencedCodeBlockLine[] = [];
+  const fences: {
+    from: number;
+    to: number;
+    codeInfos: SourceRange[];
+    codeMarks: SourceRange[];
+  }[] = [];
+  const tree = presentationParser.parse(text);
+  tree.iterate({
+    enter: ({ from, name, to }): void => {
+      if (name === "FencedCode") {
+        fences.push({ from, to, codeInfos: [], codeMarks: [] });
+        return;
+      }
+      if (name !== "CodeMark" && name !== "CodeInfo") {
+        return;
+      }
+      const fence = fences.find((candidate) => from >= candidate.from && to <= candidate.to);
+      if (fence === undefined) {
+        return;
+      }
+      const range = { from, to };
+      if (name === "CodeMark") {
+        fence.codeMarks.push(range);
+      } else {
+        fence.codeInfos.push(range);
+      }
+    },
+  });
+
+  for (const fence of fences) {
+    const blockFrom = lineStart(text, fence.from);
+    const blockTo = lineEnd(text, fence.to);
+    const firstMark = fence.codeMarks[0];
+    const lastMark =
+      fence.codeMarks.length > 1 ? fence.codeMarks[fence.codeMarks.length - 1] : undefined;
+    const openingInfo = fence.codeInfos[0];
+    for (let lineFrom = blockFrom; lineFrom <= blockTo;) {
+      const lineTo = lineEnd(text, lineFrom);
+      const markerFrom =
+        firstMark !== undefined &&
+        firstMark.from >= lineFrom &&
+        firstMark.from <= lineTo &&
+        (openingInfo === undefined || openingInfo.from >= firstMark.to)
+          ? firstMark.from
+          : lastMark !== undefined && lastMark.from >= lineFrom && lastMark.from <= lineTo
+            ? lastMark.from
+            : undefined;
+      const fenceLine = {
+        from: lineFrom,
+        to: lineTo,
+        isFirst: lineFrom === blockFrom,
+        isLast: lineTo === blockTo,
+      };
+      lines.push(markerFrom === undefined ? fenceLine : { ...fenceLine, markerFrom });
+      if (lineTo >= blockTo) {
+        break;
+      }
+      lineFrom = lineTo + 1;
     }
   }
   return lines;
