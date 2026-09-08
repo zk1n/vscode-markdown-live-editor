@@ -1,40 +1,10 @@
 # Markdown Live Editor
 
-通常のMarkdownファイルを編集する、VS Code用Live Preview Editorです。
-Markdownを唯一の保存形式とし、VS CodeのTextDocumentが文書を管理します。
+通常の Markdown ファイルをそのまま保存しながら編集できる VS Code 用 Live Preview Editor です。v0.1 では、CodeMirror 6 編集、保守的な Markdown 表示、Save / Undo / Redo、Markdown Outline、LF / CRLF と日本語 IME を含む source-preserving 操作を提供します。
 
-開発中のcandidateです。releaseの受入完了を示すものではありません。
-日本語IMEや実キーボードの動作は、自動テストとは別に実環境で検証します。
+`.md` を開き、`Reopen Editor With...` から **Markdown Live Editor** を選択してください。Live Editor 内の `Ctrl+F` 検索 UI / 検索機能は v0.2 以降へ延期しています。数式、GFM テーブル、画像、Mermaid、WikiLink / Backlink も v0.1 の対象外です。
 
-## 開発
-
-Node.js 24とnpmを使用します。
-
-```sh
-npm ci
-npm run check
-npm run test:extension-host
-```
-
-VS Codeでこのdirectoryを開き、F5でExtension Development Hostを起動できます。
-Markdownを開き、`Reopen Editor With...`からMarkdown Live Editorを選択します。
-
-## 設計
-
-- 通常のMarkdownをそのまま保存します。
-- CodeMirror 6とproject-owned Live Previewを使用します。
-- Save / Undo / Redoと日本語IMEのデータ整合性を優先します。
-- telemetryと必須network APIはありません。
-
-詳細は[製品仕様](docs/PRODUCT_SPEC.md)、[Architecture](docs/architecture/ARCHITECTURE.md)、
-[テスト方針](docs/development/TEST_STRATEGY.md)を参照してください。
-参加方法は[CONTRIBUTING.md](CONTRIBUTING.md)、security報告は[SECURITY.md](SECURITY.md)に記載します。
-
-## CIとpackage
-
-CIは依存関係をlockfileからinstallし、型・lint・test・build・formatを検証します。
-手動実行またはversion tagで検証済みVSIXをartifactとして保存できます。
-Marketplaceへの自動公開は行いません。[CIとpackageの手順](docs/development/CI_CD.md)を参照してください。
+Markdown は唯一の保存形式であり、telemetry と必須 network API はありません。
 
 ## License
 

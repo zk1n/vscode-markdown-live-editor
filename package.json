@@ -2,10 +2,10 @@
   "name": "vscode-markdown-live-editor",
   "displayName": "%displayName%",
   "description": "%description%",
-  "version": "0.0.0",
-  "private": true,
+  "version": "0.1.0",
+  "private": false,
   "license": "MIT",
-  "publisher": "local-dev",
+  "publisher": "zcw",
   "repository": {
     "type": "git",
     "url": "https://github.com/zk1n/vscode-markdown-live-editor.git"
