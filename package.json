@@ -25,7 +25,9 @@
     "README.md",
     "CHANGELOG.md",
     "LICENSE",
-    "l10n/**"
+    "l10n/**",
+    "package.nls.json",
+    "package.nls.ja.json"
   ],
   "l10n": "./l10n",
   "activationEvents": [
