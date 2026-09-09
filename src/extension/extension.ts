@@ -1,8 +1,84 @@
 import * as vscode from "vscode";
+import { randomUUID } from "node:crypto";
 
+import {
+  decodeDiagnosticMode,
+  recordsDiagnosticTrace,
+} from "../core/diagnostics/diagnosticMode.js";
+import { BoundedDiagnosticLog } from "../core/diagnostics/diagnosticLog.js";
+import { textFingerprint } from "../core/diagnostics/textFingerprint.js";
 import { PROJECT_IDENTITY } from "../core/projectIdentity.js";
+import { DocumentSyncCoordinator } from "../core/sync/documentSyncCoordinator.js";
+import { PROTOCOL_VERSION } from "../protocol/messages.js";
+import { MarkdownEditorProvider } from "./editor/MarkdownEditorProvider.js";
+import {
+  MarkdownEditorSessionRegistry,
+  type ActiveStatusSession,
+} from "./editor/MarkdownEditorSessionRegistry.js";
+import { allocatePresentationRevision } from "./editor/presentationRevision.js";
+import { shouldWarnForMarkdownTrailingWhitespace } from "./markdownTrailingWhitespace.js";
+import { vscodeLocalizer, type Localizer } from "./localization.js";
+import {
+  MARKDOWN_OUTLINE_VIEW_ID,
+  NAVIGATE_TO_OUTLINE_HEADING_COMMAND,
+  MarkdownOutlineTreeItem,
+  MarkdownOutlineTreeProvider,
+} from "./outline/MarkdownOutlineTreeProvider.js";
+import { VscodeDocumentPort } from "./sync/VscodeDocumentPort.js";
+import {
+  MarkdownEditorStatusBarManager,
+  VscodeStatusDocumentPresentationReader,
+  type StatusActionContext,
+  type StatusBarEol,
+  type StatusIndentation,
+  type StatusNavigation,
+} from "./status/MarkdownEditorStatusBarManager.js";
+
+const MARKDOWN_EDITOR_VIEW_TYPE = "vscodeMarkdownLiveEditor.editor";
+const OPEN_MARKDOWN_SETTINGS = "Open Markdown Settings";
 
 export function activate(context: vscode.ExtensionContext): void {
+  const diagnosticMode = decodeDiagnosticMode(
+    vscode.workspace
+      .getConfiguration("vscodeMarkdownLiveEditor")
+      .get<unknown>("developmentDiagnosticMode"),
+  );
+  const diagnostics = createDiagnostics(diagnosticMode, context);
+  const documentPort = new VscodeDocumentPort(diagnostics);
+  const coordinator = new DocumentSyncCoordinator(documentPort, diagnostics);
+  const warnedTrailingWhitespaceDocuments = new Set<string>();
+  const editorSessions = new MarkdownEditorSessionRegistry();
+  const outlineProvider = new MarkdownOutlineTreeProvider(editorSessions);
+  const editorProvider = new MarkdownEditorProvider(coordinator, {
+    diagnosticMode,
+    diagnostics,
+    onCustomEditorOpened: (document): void => {
+      warnForMarkdownTrailingWhitespace(document, warnedTrailingWhitespaceDocuments);
+    },
+    sessionRegistry: editorSessions,
+    viewType: MARKDOWN_EDITOR_VIEW_TYPE,
+    webviewScriptPath: vscode.Uri.joinPath(context.extensionUri, "dist", "webview.js"),
+  });
+
+  const statusBar = new MarkdownEditorStatusBarManager(
+    editorSessions,
+    new VscodeStatusDocumentPresentationReader(MARKDOWN_EDITOR_VIEW_TYPE),
+    {
+      chooseNavigation,
+      requestNavigation: (action, target): void => {
+        postEditorNavigation(editorSessions, action, target);
+      },
+      chooseEol: chooseEndOfLine,
+      requestEolChange: (action, target): void => {
+        postEditorCommand(editorSessions, action, "set-eol", target);
+      },
+      chooseIndentation,
+      requestIndentationChange: (action, target): void => {
+        postEditorConfiguration(editorSessions, action, target);
+      },
+    },
+  );
+
   const disposable = vscode.commands.registerCommand(
     "vscodeMarkdownLiveEditor.showProjectInfo",
     async (): Promise<void> => {
@@ -11,10 +87,570 @@ export function activate(context: vscode.ExtensionContext): void {
       );
     },
   );
+  const copyDiagnostics = vscode.commands.registerCommand(
+    "vscodeMarkdownLiveEditor.copyDiagnostics",
+    async (): Promise<void> => {
+      await vscode.env.clipboard.writeText(diagnostics.copyText());
+      await vscode.window.showInformationMessage(
+        "Markdown Live Editor diagnostic metadata copied.",
+      );
+    },
+  );
+  const navigateToOutlineHeading = vscode.commands.registerCommand(
+    NAVIGATE_TO_OUTLINE_HEADING_COMMAND,
+    async (value: unknown): Promise<boolean> =>
+      value instanceof MarkdownOutlineTreeItem ? await outlineProvider.navigateTo(value) : false,
+  );
+  const undo = vscode.commands.registerCommand("vscodeMarkdownLiveEditor.undo", (): void => {
+    postActiveHistoryCommand(editorSessions, "undo");
+  });
+  const redo = vscode.commands.registerCommand("vscodeMarkdownLiveEditor.redo", (): void => {
+    postActiveHistoryCommand(editorSessions, "redo");
+  });
 
-  context.subscriptions.push(disposable);
+  const outlineView = vscode.window.createTreeView(MARKDOWN_OUTLINE_VIEW_ID, {
+    showCollapseAll: true,
+    treeDataProvider: outlineProvider,
+  });
+  outlineProvider.attachTreeView(outlineView);
+
+  const customEditorRegistration = vscode.window.registerCustomEditorProvider(
+    MARKDOWN_EDITOR_VIEW_TYPE,
+    editorProvider,
+    { supportsMultipleEditorsPerDocument: true },
+  );
+
+  const handleDocumentChange = createDocumentChangeHandler(documentPort, coordinator, diagnostics);
+  const documentChangeRegistration = vscode.workspace.onDidChangeTextDocument(handleDocumentChange);
+  const statusDocumentChangeRegistration = vscode.workspace.onDidChangeTextDocument((): void => {
+    statusBar.refresh();
+  });
+  const statusConfigurationChangeRegistration = vscode.workspace.onDidChangeConfiguration(
+    (event): void => {
+      if (event.affectsConfiguration("files.encoding")) {
+        statusBar.refresh();
+      }
+    },
+  );
+  const outlineDocumentChangeRegistration = vscode.workspace.onDidChangeTextDocument(
+    (event): void => {
+      outlineProvider.handleDocumentChange(event.document);
+    },
+  );
+
+  const saveBarrierRegistration = vscode.workspace.onWillSaveTextDocument(
+    createWillSaveTextDocumentHandler(documentPort, coordinator, diagnostics),
+  );
+
+  context.subscriptions.push(
+    disposable,
+    copyDiagnostics,
+    navigateToOutlineHeading,
+    undo,
+    redo,
+    statusBar,
+    customEditorRegistration,
+    outlineView,
+    outlineProvider,
+    documentChangeRegistration,
+    statusDocumentChangeRegistration,
+    statusConfigurationChangeRegistration,
+    outlineDocumentChangeRegistration,
+    saveBarrierRegistration,
+  );
+}
+
+async function chooseEndOfLine(
+  _context: StatusActionContext,
+  current: StatusBarEol,
+): Promise<StatusBarEol | undefined> {
+  const choice = await vscode.window.showQuickPick(
+    [
+      { label: "LF", value: "lf" as const },
+      { label: "CRLF", value: "crlf" as const },
+    ],
+    {
+      placeHolder: vscodeLocalizer.t(
+        "Select line ending (current: {0})",
+        current === "crlf" ? "CRLF" : "LF",
+      ),
+    },
+  );
+  return choice?.value;
+}
+
+async function chooseNavigation(): Promise<StatusNavigation | undefined> {
+  const value = await vscode.window.showInputBox({
+    prompt: vscodeLocalizer.t("Go to line and column"),
+    placeHolder: vscodeLocalizer.t("Line, Column"),
+    validateInput: (candidate): string | undefined =>
+      parseNavigation(candidate) === undefined
+        ? vscodeLocalizer.t("Enter positive line and column numbers separated by a comma.")
+        : undefined,
+  });
+  return value === undefined ? undefined : parseNavigation(value);
+}
+
+export async function chooseIndentation(
+  context: StatusActionContext,
+): Promise<StatusIndentation | undefined> {
+  const choice = await vscode.window.showQuickPick(
+    createIndentationQuickPickItems(),
+    createIndentationQuickPickOptions(),
+  );
+  if (choice?.value === undefined) {
+    return undefined;
+  }
+  const tabSize = await chooseTabSize(context);
+  if (tabSize === undefined) {
+    return undefined;
+  }
+  return {
+    insertSpaces:
+      choice.value === "size" ? context.editorState.insertSpaces : choice.value === "spaces",
+    tabSize: tabSize.value,
+    indentSize:
+      choice.value === "size"
+        ? (context.editorState.indentSize ?? context.editorState.tabSize)
+        : tabSize.value,
+  };
+}
+
+type IndentationQuickPickValue = "spaces" | "tabs" | "size";
+
+interface IndentationQuickPickItem extends vscode.QuickPickItem {
+  readonly value?: IndentationQuickPickValue;
+}
+
+interface TabSizeQuickPickItem extends vscode.QuickPickItem {
+  readonly value: number;
+}
+
+interface TabSizeQuickPickOptions {
+  readonly placeHolder: string;
+  readonly activeItem: TabSizeQuickPickItem;
+}
+
+/**
+ * Keeps the status-bar picker on VS Code's standard indentation action
+ * surface. The separator is a public QuickPick API item and cannot be picked.
+ */
+export function createIndentationQuickPickItems(
+  localizer = vscodeLocalizer,
+): readonly IndentationQuickPickItem[] {
+  const spaces = createIndentationQuickPickAction(localizer, "Indent Using Spaces", "spaces");
+  const tabs = createIndentationQuickPickAction(localizer, "Indent Using Tabs", "tabs");
+  const tabDisplaySize = createIndentationQuickPickAction(
+    localizer,
+    "Change Tab Display Size",
+    "size",
+  );
+  return [
+    {
+      label: localizer.t("change view"),
+      kind: vscode.QuickPickItemKind.Separator,
+    },
+    spaces,
+    tabs,
+    tabDisplaySize,
+  ];
+}
+
+export function createIndentationQuickPickOptions(
+  localizer = vscodeLocalizer,
+): vscode.QuickPickOptions {
+  return { placeHolder: localizer.t("Select Action") };
+}
+
+/**
+ * Mirrors the workbench's three-way tab-size descriptions without persisting
+ * anything. `configuredTabSize` is the editor setting; `currentTabSize` is
+ * the document-local transient value reported by the active webview.
+ */
+export function createTabSizeQuickPickItems(
+  configuredTabSize: number,
+  currentTabSize: number,
+  localizer = vscodeLocalizer,
+): readonly TabSizeQuickPickItem[] {
+  return Array.from({ length: 8 }, (_unused, index) => {
+    const value = index + 1;
+    const description =
+      value === configuredTabSize && value === currentTabSize
+        ? localizer.t("Configured Tab Size")
+        : value === configuredTabSize
+          ? localizer.t("Default Tab Size")
+          : value === currentTabSize
+            ? localizer.t("Current Tab Size")
+            : undefined;
+    return { label: String(value), value, ...(description === undefined ? {} : { description }) };
+  });
+}
+
+export function createTabSizeQuickPickOptions(
+  items: readonly TabSizeQuickPickItem[],
+  currentTabSize: number,
+  localizer = vscodeLocalizer,
+): TabSizeQuickPickOptions {
+  const activeItem = items[Math.min(Math.max(currentTabSize - 1, 0), items.length - 1)] ?? items[0];
+  if (activeItem === undefined) {
+    throw new Error("Tab-size QuickPick requires at least one item.");
+  }
+  return {
+    placeHolder: localizer.t("Select Tab Size for Current File"),
+    activeItem,
+  };
+}
+
+async function chooseTabSize(
+  context: StatusActionContext,
+): Promise<TabSizeQuickPickItem | undefined> {
+  const configuredTabSize = configuredTabSizeFor(context);
+  const items = createTabSizeQuickPickItems(configuredTabSize, context.editorState.tabSize);
+  const options = createTabSizeQuickPickOptions(items, context.editorState.tabSize);
+  const picker = vscode.window.createQuickPick<TabSizeQuickPickItem>();
+  picker.items = items;
+  picker.placeholder = options.placeHolder;
+  picker.activeItems = [options.activeItem];
+  return await new Promise<TabSizeQuickPickItem | undefined>((resolve) => {
+    let accepted = false;
+    const complete = (result: TabSizeQuickPickItem | undefined): void => {
+      accept.dispose();
+      hide.dispose();
+      picker.dispose();
+      resolve(result);
+    };
+    const accept = picker.onDidAccept((): void => {
+      accepted = true;
+      complete(picker.selectedItems[0]);
+    });
+    const hide = picker.onDidHide((): void => {
+      if (!accepted) complete(undefined);
+    });
+    picker.show();
+  });
+}
+
+function configuredTabSizeFor(context: StatusActionContext): number {
+  const uri = vscode.Uri.parse(context.identity.documentUri);
+  const document = vscode.workspace.textDocuments.find(
+    (candidate) => candidate.uri.toString() === context.identity.documentUri && !candidate.isClosed,
+  );
+  const configuration = vscode.workspace.getConfiguration("editor", {
+    uri,
+    languageId: document?.languageId ?? "markdown",
+  });
+  const value = configuration.get<unknown>("tabSize");
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0 && value <= 32
+    ? value
+    : 4;
+}
+
+function createIndentationQuickPickAction(
+  localizer: Localizer,
+  alias: string,
+  value: IndentationQuickPickValue,
+): IndentationQuickPickItem {
+  const label = localizer.t(alias);
+  return label === alias ? { label, value } : { label, detail: alias, value };
+}
+
+function postActiveHistoryCommand(
+  sessions: MarkdownEditorSessionRegistry,
+  command: "undo" | "redo",
+): void {
+  const active = sessions.activeStatusSession;
+  if (active === undefined || active.editorState.recoveryActive) {
+    return;
+  }
+  postEditorCommand(
+    sessions,
+    {
+      identity: {
+        documentUri: active.handle.documentUri,
+        sessionId: active.handle.sessionId,
+        controllerId: active.controllerId,
+      },
+      documentVersion: active.editorState.documentVersion,
+      editorState: active.editorState,
+    },
+    command,
+  );
+}
+
+function postEditorCommand(
+  sessions: MarkdownEditorSessionRegistry,
+  context: StatusActionContext,
+  command: "undo" | "redo" | "set-eol",
+  eol?: StatusBarEol,
+): void {
+  const active = currentActionSession(sessions, context);
+  const post = active?.handle.postPresentationMessage;
+  if (active === undefined || post === undefined) {
+    return;
+  }
+  if (command === "set-eol" && eol === undefined) {
+    return;
+  }
+  const requestId = randomUUID();
+  void Promise.resolve(
+    post({
+      kind: "editor-command",
+      protocolVersion: PROTOCOL_VERSION,
+      ...context.identity,
+      requestId,
+      documentVersion: context.documentVersion,
+      command,
+      ...(command === "set-eol" && eol !== undefined ? { eol } : {}),
+    }),
+  );
+}
+
+function postEditorConfiguration(
+  sessions: MarkdownEditorSessionRegistry,
+  context: StatusActionContext,
+  target: StatusIndentation,
+): void {
+  const active = currentActionSession(sessions, context);
+  const post = active?.handle.postPresentationMessage;
+  if (active === undefined || post === undefined) {
+    return;
+  }
+  void Promise.resolve(
+    post({
+      kind: "editor-configuration",
+      protocolVersion: PROTOCOL_VERSION,
+      ...context.identity,
+      revision: allocatePresentationRevision(),
+      ...target,
+    }),
+  );
+}
+
+function postEditorNavigation(
+  sessions: MarkdownEditorSessionRegistry,
+  context: StatusActionContext,
+  target: StatusNavigation,
+): void {
+  const active = currentActionSession(sessions, context);
+  const post = active?.handle.postPresentationMessage;
+  if (active === undefined || post === undefined) {
+    return;
+  }
+  void Promise.resolve(
+    post({
+      kind: "editor-navigation",
+      protocolVersion: PROTOCOL_VERSION,
+      ...context.identity,
+      documentVersion: context.documentVersion,
+      ...target,
+    }),
+  );
+}
+
+function parseNavigation(value: string): StatusNavigation | undefined {
+  const match = /^\s*(\d+)\s*,\s*(\d+)\s*$/u.exec(value);
+  if (match === null) {
+    return undefined;
+  }
+  const line = Number(match[1]);
+  const column = Number(match[2]);
+  return Number.isSafeInteger(line) && line > 0 && Number.isSafeInteger(column) && column > 0
+    ? { line, column }
+    : undefined;
+}
+
+function currentActionSession(
+  sessions: MarkdownEditorSessionRegistry,
+  context: StatusActionContext,
+): ActiveStatusSession | undefined {
+  const active = sessions.activeStatusSession;
+  if (active === undefined) {
+    return undefined;
+  }
+  if (
+    active.handle.documentUri !== context.identity.documentUri ||
+    active.handle.sessionId !== context.identity.sessionId ||
+    active.controllerId !== context.identity.controllerId ||
+    active.editorState.documentVersion !== context.documentVersion ||
+    !isActiveLiveEditorTab(context.identity.documentUri)
+  ) {
+    return undefined;
+  }
+  return active;
+}
+
+function isActiveLiveEditorTab(documentUri: string): boolean {
+  const input = vscode.window.tabGroups.activeTabGroup.activeTab?.input;
+  return (
+    input instanceof vscode.TabInputCustom &&
+    input.viewType === MARKDOWN_EDITOR_VIEW_TYPE &&
+    input.uri.toString() === documentUri
+  );
+}
+
+/** The production save listener is exported solely for Extension Host regression coverage. */
+export function createWillSaveTextDocumentHandler(
+  documentPort: VscodeDocumentPort,
+  coordinator: DocumentSyncCoordinator,
+  diagnostics: BoundedDiagnosticLog,
+): (event: vscode.TextDocumentWillSaveEvent) => void {
+  return (event: vscode.TextDocumentWillSaveEvent): void => {
+    if (event.document.languageId !== "markdown") {
+      return;
+    }
+    const skippedBecausePortSave = documentPort.isSaving(event.document.uri.toString());
+    diagnostics.record("extension.will-save", {
+      ...willSaveMetadata(event),
+      skippedBecausePortSave,
+    });
+    if (skippedBecausePortSave) {
+      return;
+    }
+    event.waitUntil(coordinator.flush(event.document.uri.toString()).then(() => []));
+  };
+}
+
+function willSaveMetadata(
+  event: vscode.TextDocumentWillSaveEvent,
+): Readonly<Record<string, boolean | number | string | undefined>> {
+  const scope = { uri: event.document.uri, languageId: event.document.languageId };
+  const files = vscode.workspace.getConfiguration("files", scope);
+  const editor = vscode.workspace.getConfiguration("editor", scope);
+  return {
+    documentVersion: event.document.version,
+    dirty: event.document.isDirty,
+    saveReason: saveReasonName(event.reason),
+    "files.autoSave": diagnosticString(files.get<unknown>("autoSave")),
+    "files.autoSaveDelay": diagnosticNumber(files.get<unknown>("autoSaveDelay")),
+    "files.trimTrailingWhitespace": diagnosticBoolean(files.get<unknown>("trimTrailingWhitespace")),
+    "editor.formatOnSave": diagnosticBoolean(editor.get<unknown>("formatOnSave")),
+    hasVisibleTextEditor: vscode.window.visibleTextEditors.some(
+      (candidate) => candidate.document.uri.toString() === event.document.uri.toString(),
+    ),
+  };
+}
+
+function saveReasonName(reason: vscode.TextDocumentSaveReason): string {
+  switch (reason) {
+    case vscode.TextDocumentSaveReason.Manual:
+      return "manual";
+    case vscode.TextDocumentSaveReason.AfterDelay:
+      return "after-delay";
+    case vscode.TextDocumentSaveReason.FocusOut:
+      return "focus-out";
+    default:
+      return "unknown";
+  }
+}
+
+function diagnosticBoolean(value: unknown): boolean | undefined {
+  return typeof value === "boolean" ? value : undefined;
+}
+
+function diagnosticNumber(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function diagnosticString(value: unknown): string | undefined {
+  return typeof value === "string" ? value : undefined;
+}
+
+function warnForMarkdownTrailingWhitespace(
+  document: vscode.TextDocument,
+  warnedDocuments: Set<string>,
+): void {
+  const documentUri = document.uri.toString();
+  if (warnedDocuments.has(documentUri)) {
+    return;
+  }
+  const files = vscode.workspace.getConfiguration("files", {
+    uri: document.uri,
+    languageId: document.languageId,
+  });
+  if (!shouldWarnForMarkdownTrailingWhitespace(files.get<boolean>("trimTrailingWhitespace"))) {
+    return;
+  }
+  warnedDocuments.add(documentUri);
+  void vscode.window
+    .showWarningMessage(
+      "Markdown Live Editor: files.trimTrailingWhitespace is enabled for Markdown. Auto Save or Save can remove an in-progress trailing space such as '- ' and conflict with Japanese IME composition. Disable it for Markdown.",
+      OPEN_MARKDOWN_SETTINGS,
+    )
+    .then(
+      async (selection): Promise<void> => {
+        if (selection === OPEN_MARKDOWN_SETTINGS) {
+          await vscode.commands.executeCommand(
+            "workbench.action.openSettings",
+            "@lang:markdown files.trimTrailingWhitespace",
+          );
+        }
+      },
+      (): void => undefined,
+    );
+}
+
+function toProtocolText(text: string): string {
+  return text.replaceAll("\r\n", "\n");
 }
 
 export function deactivate(): void {
   // No global resources are retained by the scaffold.
+}
+
+/** The production listener body is exported solely for Extension Host regression coverage. */
+export function createDocumentChangeHandler(
+  documentPort: VscodeDocumentPort,
+  coordinator: DocumentSyncCoordinator,
+  diagnostics: BoundedDiagnosticLog,
+): (event: vscode.TextDocumentChangeEvent) => void {
+  let nextDocumentChangeEventId = 1;
+  return (event: vscode.TextDocumentChangeEvent): void => {
+    if (event.document.languageId !== "markdown") {
+      return;
+    }
+    const changeClassification = documentPort.classifyDocumentChange(event);
+    const eventId = `document-change-${String(nextDocumentChangeEventId)}`;
+    nextDocumentChangeEventId += 1;
+    const eventText = toProtocolText(event.document.getText());
+    const firstChange = event.contentChanges[0];
+    diagnostics.record("extension.document.changed", {
+      eventId,
+      classification: changeClassification,
+      contentChangeCount: event.contentChanges.length,
+      dirty: event.document.isDirty,
+      documentVersion: event.document.version,
+      eventTextFingerprint: textFingerprint(eventText),
+      textLength: eventText.length,
+      firstChangeTextFingerprint:
+        firstChange === undefined ? "none" : textFingerprint(toProtocolText(firstChange.text)),
+      firstChangeRange:
+        firstChange === undefined
+          ? "none"
+          : `${String(firstChange.range.start.line)}:${String(firstChange.range.start.character)}-${String(firstChange.range.end.line)}:${String(firstChange.range.end.character)}`,
+    });
+    if (changeClassification === "own") {
+      return;
+    }
+    void coordinator.publishExternalChange(event.document.uri.toString(), {
+      eventId,
+      eventDocumentVersion: event.document.version,
+      eventTextFingerprint: textFingerprint(eventText),
+      eventTextLength: eventText.length,
+      contentChangeCount: event.contentChanges.length,
+      classification: changeClassification,
+    });
+  };
+}
+
+function createDiagnostics(
+  mode: ReturnType<typeof decodeDiagnosticMode>,
+  context: vscode.ExtensionContext,
+): BoundedDiagnosticLog {
+  const output = recordsDiagnosticTrace(mode)
+    ? vscode.window.createOutputChannel("Markdown Live Editor ATOK Diagnostics")
+    : undefined;
+  if (output !== undefined) {
+    context.subscriptions.push(output);
+  }
+  return new BoundedDiagnosticLog(250, (line): void => output?.appendLine(line));
 }

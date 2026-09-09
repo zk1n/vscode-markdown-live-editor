@@ -1,0 +1,14 @@
+{
+  "displayName": "Markdown Live Editor",
+  "description": "通常の Markdown を唯一の正本として扱う、VS Code 向け Obsidian 風 Live Preview エディターです。",
+  "configuration.title": "Markdown Live Editor",
+  "configuration.developmentDiagnosticMode.markdownDescription": "開発専用の ATOK レイヤー分離モードです。`raw-cm6` はローカル CodeMirror のみ、`markdown` は Markdown 言語を追加、`sync` はプロジェクトのドキュメント同期を追加、`preview` は Live Preview と独自の Save/Undo/Redo キーマップを追加します。診断モードはリリース構成ではありません。",
+  "configuration.customCss.markdownDescription": "組み込み Live Editor スタイルの後に適用する、任意のユーザー設定のリテラル CSS です。`@import`、`url()`、外部リソース、64 KiB を超える CSS は拒否されます。信頼された所有ワークスペースでは、`.vscode/markdown-live-editor.css` も追加できます。",
+  "command.showProjectInfo": "Markdown Live Editor: プロジェクト情報を表示",
+  "command.copyDiagnostics": "Markdown Live Editor: 診断メタデータをコピー",
+  "command.undo": "Markdown Live Editor: 元に戻す",
+  "command.redo": "Markdown Live Editor: やり直す",
+  "customEditor.displayName": "Markdown Live Editor",
+  "view.markdownOutline.name": "Markdown Outline",
+  "view.markdownOutline.contextualTitle": "Outline"
+}

@@ -1,11 +1,15 @@
 {
   "name": "vscode-markdown-live-editor",
-  "displayName": "Markdown Live Editor",
-  "description": "An Obsidian-like Live Preview Markdown editor for VS Code with ordinary Markdown as the source of truth.",
-  "version": "0.0.0",
-  "private": true,
+  "displayName": "%displayName%",
+  "description": "%description%",
+  "version": "0.1.0",
+  "private": false,
   "license": "MIT",
-  "publisher": "local-dev",
+  "publisher": "zcw",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/zk1n/vscode-markdown-live-editor.git"
+  },
   "engines": {
     "vscode": "^1.120.0",
     "node": ">=24 <25"
@@ -13,17 +17,128 @@
   "categories": [
     "Other"
   ],
-  "main": "./dist/extension.js",
+  "type": "module",
+  "main": "./dist/extension.cjs",
+  "files": [
+    "dist/extension.cjs",
+    "dist/webview.js",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE",
+    "l10n/**",
+    "package.nls.json",
+    "package.nls.ja.json"
+  ],
+  "l10n": "./l10n",
   "activationEvents": [
-    "onCommand:vscodeMarkdownLiveEditor.showProjectInfo"
+    "onCommand:vscodeMarkdownLiveEditor.showProjectInfo",
+    "onCommand:vscodeMarkdownLiveEditor.undo",
+    "onCommand:vscodeMarkdownLiveEditor.redo",
+    "onCustomEditor:vscodeMarkdownLiveEditor.editor",
+    "onView:vscodeMarkdownLiveEditor.markdownOutline"
   ],
   "contributes": {
+    "configurationDefaults": {
+      "[markdown]": {
+        "files.trimTrailingWhitespace": false
+      }
+    },
+    "configuration": {
+      "title": "%configuration.title%",
+      "properties": {
+        "vscodeMarkdownLiveEditor.developmentDiagnosticMode": {
+          "type": "string",
+          "default": "off",
+          "enum": [
+            "off",
+            "raw-cm6",
+            "markdown",
+            "sync",
+            "preview"
+          ],
+          "markdownDescription": "%configuration.developmentDiagnosticMode.markdownDescription%"
+        },
+        "vscodeMarkdownLiveEditor.customCss": {
+          "type": "string",
+          "default": "",
+          "scope": "window",
+          "restricted": true,
+          "markdownDescription": "%configuration.customCss.markdownDescription%"
+        }
+      }
+    },
     "commands": [
       {
         "command": "vscodeMarkdownLiveEditor.showProjectInfo",
-        "title": "Markdown Live Editor: Show Project Info"
+        "title": "%command.showProjectInfo%"
+      },
+      {
+        "command": "vscodeMarkdownLiveEditor.copyDiagnostics",
+        "title": "%command.copyDiagnostics%"
+      },
+      {
+        "command": "vscodeMarkdownLiveEditor.undo",
+        "title": "%command.undo%"
+      },
+      {
+        "command": "vscodeMarkdownLiveEditor.redo",
+        "title": "%command.redo%"
       }
-    ]
+    ],
+    "keybindings": [
+      {
+        "command": "vscodeMarkdownLiveEditor.undo",
+        "key": "ctrl+z",
+        "mac": "cmd+z",
+        "when": "activeCustomEditorId == vscodeMarkdownLiveEditor.editor"
+      },
+      {
+        "command": "vscodeMarkdownLiveEditor.redo",
+        "key": "ctrl+y",
+        "when": "activeCustomEditorId == vscodeMarkdownLiveEditor.editor"
+      },
+      {
+        "command": "vscodeMarkdownLiveEditor.redo",
+        "key": "ctrl+shift+z",
+        "mac": "cmd+shift+z",
+        "when": "activeCustomEditorId == vscodeMarkdownLiveEditor.editor"
+      }
+    ],
+    "menus": {
+      "menubar/edit": [
+        {
+          "command": "vscodeMarkdownLiveEditor.undo",
+          "when": "activeCustomEditorId == vscodeMarkdownLiveEditor.editor",
+          "group": "1_do@1"
+        },
+        {
+          "command": "vscodeMarkdownLiveEditor.redo",
+          "when": "activeCustomEditorId == vscodeMarkdownLiveEditor.editor",
+          "group": "1_do@2"
+        }
+      ]
+    },
+    "customEditors": [
+      {
+        "viewType": "vscodeMarkdownLiveEditor.editor",
+        "displayName": "%customEditor.displayName%",
+        "selector": [
+          {
+            "filenamePattern": "*.md"
+          }
+        ],
+        "priority": "option"
+      }
+    ],
+    "views": {
+      "explorer": [
+        {
+          "id": "vscodeMarkdownLiveEditor.markdownOutline",
+          "name": "%view.markdownOutline.name%",
+          "contextualTitle": "%view.markdownOutline.contextualTitle%"
+        }
+      ]
+    }
   },
   "scripts": {
     "clean": "node ./scripts/clean.mjs",
@@ -31,27 +146,33 @@
     "watch": "node ./scripts/build.mjs --watch",
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
-    "format": "prettier --write .",
-    "format:check": "prettier --check .",
+    "format": "prettier --write \"*.{md,json,ts,mjs}\" src tests scripts docs .vscode .github",
+    "format:check": "prettier --check \"*.{md,json,ts,mjs}\" src tests scripts docs .vscode .github",
     "test": "vitest run",
     "test:watch": "vitest",
-    "check": "npm run typecheck && npm run lint && npm run test && npm run build && npm run format:check"
+    "test:browser-geometry": "node ./scripts/build-browser-geometry-harness.mjs && node ./scripts/run-browser-geometry-harness.mjs",
+    "test:extension-host": "npm run build && node ./scripts/run-extension-host-tests.mjs",
+    "check": "npm run typecheck && npm run lint && npm run test && npm run build && npm run format:check",
+    "package:vsix": "npm run build && node ./scripts/package-vsix.mjs"
   },
   "dependencies": {
     "@codemirror/commands": "6.11.0",
     "@codemirror/lang-markdown": "6.5.2",
+    "@codemirror/language": "6.12.4",
     "@codemirror/search": "6.7.1",
     "@codemirror/state": "6.7.1",
     "@codemirror/view": "6.43.10"
   },
   "devDependencies": {
     "@eslint/js": "9.39.5",
-    "@types/node": "22.20.1",
+    "@types/node": "24.13.3",
     "@types/vscode": "1.120.0",
     "@vscode/test-electron": "3.1.0",
+    "@vscode/vsce": "3.9.2",
     "esbuild": "0.28.2",
-    "eslint": "9.39.5",
+    "eslint": "10.9.1",
     "globals": "17.11.0",
+    "happy-dom": "20.13.0",
     "prettier": "3.9.6",
     "typescript": "6.0.3",
     "typescript-eslint": "8.69.0",

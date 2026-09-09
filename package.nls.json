@@ -1,0 +1,14 @@
+{
+  "displayName": "Markdown Live Editor",
+  "description": "An Obsidian-like Live Preview Markdown editor for VS Code with ordinary Markdown as the source of truth.",
+  "configuration.title": "Markdown Live Editor",
+  "configuration.developmentDiagnosticMode.markdownDescription": "Development-only ATOK layer-isolation mode. `raw-cm6` is local CodeMirror only; `markdown` adds the Markdown language; `sync` adds project document sync; `preview` adds live preview and the custom Save/Undo/Redo keymap. Diagnostic modes never constitute a release configuration.",
+  "configuration.customCss.markdownDescription": "Optional User Settings literal CSS applied after the built-in Live Editor style. `@import`, `url()`, external resources, and CSS larger than 64 KiB are rejected. A trusted owning workspace may additionally provide `.vscode/markdown-live-editor.css`.",
+  "command.showProjectInfo": "Markdown Live Editor: Show Project Info",
+  "command.copyDiagnostics": "Markdown Live Editor: Copy Diagnostic Metadata",
+  "command.undo": "Markdown Live Editor: Undo",
+  "command.redo": "Markdown Live Editor: Redo",
+  "customEditor.displayName": "Markdown Live Editor",
+  "view.markdownOutline.name": "Markdown Outline",
+  "view.markdownOutline.contextualTitle": "Outline"
+}
