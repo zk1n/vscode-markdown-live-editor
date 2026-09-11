@@ -59,8 +59,18 @@ jobs:
       - name: Package validated VSIX
         run: npm run package:vsix
 
-      - name: Upload VSIX artifact
+      - name: Upload VSIX artifact (GitHub)
+        if: github.server_url == 'https://github.com'
         uses: actions/upload-artifact@v4
+        with:
+          name: vscode-markdown-live-editor-vsix
+          path: artifacts/*.vsix
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload VSIX artifact (Forgejo)
+        if: github.server_url != 'https://github.com'
+        uses: forgejo/upload-artifact@v4
         with:
           name: vscode-markdown-live-editor-vsix
           path: artifacts/*.vsix
