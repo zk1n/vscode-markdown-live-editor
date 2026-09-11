@@ -203,7 +203,7 @@ describe("MarkdownEditorStatusBarManager", () => {
     manager.dispose();
   });
 
-  it("hides stale Webview state until it matches the authoritative TextDocument version", () => {
+  it("keeps visible caret/document chrome during edit ACK transit without admitting stale actions", () => {
     const registry = readyRegistry("session-1", "controller-1", editorState());
     const items = new RecordingStatusBarItems();
     const presentation = new RecordingPresentation(8);
@@ -215,13 +215,18 @@ describe("MarkdownEditorStatusBarManager", () => {
       new RecordingCommands(),
     );
 
-    expect(items.all.every((item) => !item.visible)).toBe(true);
+    expect(items.all.every((item) => item.visible)).toBe(true);
+    expect(items.item("lineColumn").text).toBe("Ln 4, Col 7 (3 selected)");
+    expect(items.item("lineColumn").command).toBeUndefined();
+    expect(items.item("eol").command).toBeUndefined();
     registry.reportEditorState(
       "session-1",
       "controller-1",
       editorState({ reportSequence: 2, documentVersion: 8 }),
     );
     expect(items.item("lineColumn").visible).toBe(true);
+    expect(items.all.every((item) => item.shows === 1 && item.hides === 0)).toBe(true);
+    expect(items.item("lineColumn").command).toBe("vscodeMarkdownLiveEditor.status.navigate");
     manager.dispose();
   });
 });
@@ -332,6 +337,8 @@ class RecordingStatusBarItems implements StatusBarItemFactory {
 }
 
 class RecordingStatusBarItem implements StatusBarItemLike {
+  public shows = 0;
+  public hides = 0;
   public text = "";
   public tooltip: string | undefined;
   public command: string | undefined;
@@ -344,10 +351,12 @@ class RecordingStatusBarItem implements StatusBarItemLike {
   ) {}
 
   public show(): void {
+    this.shows += 1;
     this.visible = true;
   }
 
   public hide(): void {
+    this.hides += 1;
     this.visible = false;
   }
 

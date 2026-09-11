@@ -96,6 +96,7 @@ export class MarkdownEditorStatusBarManager implements vscode.Disposable {
   private readonly eol: StatusBarItemLike;
   private readonly language: StatusBarItemLike;
   private readonly subscriptions: readonly vscode.Disposable[];
+  private visible = false;
 
   public constructor(
     private readonly sessions: MarkdownEditorSessionRegistry,
@@ -142,16 +143,18 @@ export class MarkdownEditorStatusBarManager implements vscode.Disposable {
     const identity = toIdentity(active);
     const state = active.editorState;
     const documentPresentation = this.presentation.read(identity);
-    if (documentPresentation?.documentVersion !== state.documentVersion) {
-      // A panel can outlive a closed/replaced TextDocument briefly. Do not show
-      // stale document chrome during that lifecycle window.
+    if (documentPresentation === undefined) {
+      // A closed/replaced document is a lifecycle change. An edit ACK in
+      // transit is not: the caret report still describes the visible Webview.
       this.hideAll();
       return;
     }
+    const actionsCurrent = documentPresentation.documentVersion === state.documentVersion;
 
     this.lineColumn.text = formatLineColumn(state, this.localizer);
     this.lineColumn.tooltip = this.localizer.t("Markdown Live Editor cursor position");
     this.lineColumn.command =
+      actionsCurrent &&
       this.canRequestActions(state) &&
       this.actions.chooseNavigation !== undefined &&
       this.actions.requestNavigation !== undefined
@@ -161,6 +164,7 @@ export class MarkdownEditorStatusBarManager implements vscode.Disposable {
     this.indentation.text = formatIndentation(state, this.localizer);
     this.indentation.tooltip = this.localizer.t("Change Markdown Live Editor indentation settings");
     this.indentation.command =
+      actionsCurrent &&
       this.canRequestActions(state) &&
       this.actions.chooseIndentation !== undefined &&
       this.actions.requestIndentationChange !== undefined
@@ -178,6 +182,7 @@ export class MarkdownEditorStatusBarManager implements vscode.Disposable {
       "Change line ending through the Markdown Live Editor document-action boundary",
     );
     this.eol.command =
+      actionsCurrent &&
       this.canRequestActions(state) &&
       this.actions.chooseEol !== undefined &&
       this.actions.requestEolChange !== undefined
@@ -263,7 +268,12 @@ export class MarkdownEditorStatusBarManager implements vscode.Disposable {
 
   private currentActionContext(): StatusActionContext | undefined {
     const active = this.sessions.activeStatusSession;
-    if (active === undefined || !this.canRequestActions(active.editorState)) {
+    if (
+      active === undefined ||
+      !this.canRequestActions(active.editorState) ||
+      this.presentation.read(toIdentity(active))?.documentVersion !==
+        active.editorState.documentVersion
+    ) {
       return undefined;
     }
     return {
@@ -278,6 +288,8 @@ export class MarkdownEditorStatusBarManager implements vscode.Disposable {
   }
 
   private showAll(): void {
+    if (this.visible) return;
+    this.visible = true;
     this.lineColumn.show();
     this.indentation.show();
     this.encoding.show();
@@ -286,6 +298,8 @@ export class MarkdownEditorStatusBarManager implements vscode.Disposable {
   }
 
   private hideAll(): void {
+    if (!this.visible) return;
+    this.visible = false;
     this.lineColumn.hide();
     this.indentation.hide();
     this.encoding.hide();

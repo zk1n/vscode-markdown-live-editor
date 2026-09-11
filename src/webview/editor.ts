@@ -48,6 +48,20 @@ import { createBarrierKeymap } from "./barrierKeymap.js";
 import { CompositionBuffer } from "./compositionBuffer.js";
 import { PendingEditQueue } from "./pendingEditQueue.js";
 import { createTabKeymap } from "./tabKeymap.js";
+import { headingInputAssistance } from "./inputAssistance.js";
+import { compactSpacing } from "./livePreview/compactSpacing.js";
+import { editTable, tableEditing } from "./livePreview/tableEditing.js";
+import { imageEditing, insertImage, type ImageActions } from "./livePreview/imageEditing.js";
+import { linkPreview } from "./livePreview/linkPreview.js";
+import { createFindReplace } from "./search/findReplace.js";
+import { RichClient } from "./richClient.js";
+import { v02Toolbar } from "./v02Toolbar.js";
+import {
+  decodeRichCommand,
+  decodeRichResponse,
+  type RichCommand,
+  type RichRequest,
+} from "../protocol/richMessages.js";
 import {
   outlineNavigationHighlightState,
   outlineNavigationHighlightTheme,
@@ -56,7 +70,7 @@ import {
 
 interface VsCodeApi {
   postMessage(
-    message: WebviewToHostMessage | EditorReadyMessage | WebviewPresentationMessage,
+    message: WebviewToHostMessage | EditorReadyMessage | WebviewPresentationMessage | RichRequest,
   ): void;
   getState?(): unknown;
   setState?(state: unknown): void;
@@ -148,6 +162,14 @@ class MarkdownWebviewController {
     string,
     { readonly operation: "undo" | "redo"; readonly documentVersion: number }
   >();
+  private readonly findReplace = createFindReplace({ isEditable: () => this.isTabEditable() });
+  private readonly richClient: RichClient;
+  private readonly imageActions: ImageActions;
+  private readonly synchronizedActions: {
+    readonly text: string;
+    readonly resolve: (ready: boolean) => void;
+  }[] = [];
+  private richNotice: HTMLElement | undefined;
 
   public constructor(
     private readonly vscode: VsCodeApi,
@@ -176,6 +198,25 @@ class MarkdownWebviewController {
     this.livePreview = usesLivePreview(bootstrap.diagnosticMode)
       ? createLivePreviewEngine()
       : undefined;
+    this.richClient = new RichClient((request) => {
+      this.vscode.postMessage({
+        ...request,
+        kind: "rich-request",
+        protocolVersion: PROTOCOL_VERSION,
+        documentUri: bootstrap.documentUri,
+        sessionId: bootstrap.sessionId,
+        controllerId,
+        documentVersion: this.documentVersion,
+      });
+    });
+    this.imageActions = {
+      client: this.richClient,
+      isEditable: () => this.isTabEditable(),
+      synchronize: () => this.synchronizeRichAction(),
+      notify: (note) => {
+        this.showRichNotice(note);
+      },
+    };
     const extensions: Extension[] = [
       vscodeEditorTheme,
       this.editable.of(EditorView.editable.of(this.controllerReady)),
@@ -205,7 +246,24 @@ class MarkdownWebviewController {
       extensions.unshift(markdown());
     }
     if (this.livePreview !== undefined) {
-      extensions.push(this.livePreview.extension);
+      extensions.push(
+        this.livePreview.extension,
+        compactSpacing,
+        headingInputAssistance(() => this.isTabEditable()),
+        tableEditing(() => this.isTabEditable()),
+        imageEditing(this.imageActions),
+        linkPreview(this.imageActions),
+        this.findReplace.extension,
+        v02Toolbar(
+          (command) => {
+            this.runRichCommand(command);
+          },
+          () => this.isTabEditable(),
+          (note) => {
+            this.showRichNotice(note);
+          },
+        ),
+      );
     }
     if (usesBarrierKeymap(bootstrap.diagnosticMode)) {
       extensions.push(
@@ -268,6 +326,22 @@ class MarkdownWebviewController {
     if (this.disposed) {
       return;
     }
+    if (
+      isRecord(value) &&
+      (value["kind"] === "rich-response" || value["kind"] === "rich-command")
+    ) {
+      const response = decodeRichResponse(value);
+      if (response !== undefined && this.matchesController(response))
+        this.richClient.receive(response);
+      const command = decodeRichCommand(value);
+      if (
+        command !== undefined &&
+        this.matchesController(command) &&
+        this.livePreview !== undefined
+      )
+        this.runRichCommand(command.command);
+      return;
+    }
 
     if (isHostPresentationCandidate(value)) {
       const presentation = decodeHostPresentationMessage(value);
@@ -302,6 +376,9 @@ class MarkdownWebviewController {
       return;
     }
     this.disposed = true;
+    this.richClient.dispose();
+    this.richNotice?.remove();
+    for (const action of this.synchronizedActions.splice(0)) action.resolve(false);
     this.persistState();
     if (this.outlineHighlightTimer !== undefined) {
       window.clearTimeout(this.outlineHighlightTimer);
@@ -572,6 +649,64 @@ class MarkdownWebviewController {
       indentSize: this.indentSize,
     });
     this.reportSequence += 1;
+    // Wait for the current synchronous update/ACK handler to finish changing
+    // its queue state. Readiness is an explicit predicate, never a delay.
+    if (this.synchronizedActions.length > 0)
+      queueMicrotask(() => {
+        this.finishSynchronizedActions();
+      });
+  }
+
+  private synchronizeRichAction(): Promise<boolean> {
+    if (!this.isTabEditable()) return Promise.resolve(false);
+    return new Promise((resolve) => {
+      this.synchronizedActions.push({ text: this.view.state.doc.toString(), resolve });
+      this.finishSynchronizedActions();
+    });
+  }
+
+  private finishSynchronizedActions(): void {
+    for (let index = this.synchronizedActions.length - 1; index >= 0; index -= 1) {
+      const action = this.synchronizedActions[index];
+      if (action === undefined) continue;
+      const cancelled =
+        this.disposed ||
+        this.recoveryActive ||
+        this.view.state.doc.toString() !== action.text ||
+        this.composition.isActive;
+      const ready =
+        this.isTabEditable() &&
+        this.inFlightSequence === undefined &&
+        !this.pendingEdits.hasPending &&
+        !this.pendingEdits.hasInFlight;
+      if (cancelled || ready) {
+        this.synchronizedActions.splice(index, 1);
+        action.resolve(!cancelled && ready);
+      }
+    }
+  }
+
+  private runRichCommand(command: RichCommand): void {
+    if (!this.controllerReady || this.composition.isActive || this.view.composing) return;
+    if (command === "find" || command === "replace")
+      this.findReplace.open(this.view, command === "replace");
+    else if (command === "insert-table" && this.isTabEditable()) editTable(this.view, "insert");
+    else if (command === "insert-image") void insertImage(this.view, this.imageActions);
+  }
+
+  private showRichNotice(note: string): void {
+    if (this.disposed) return;
+    if (this.richNotice === undefined) {
+      this.richNotice = document.createElement("div");
+      this.richNotice.className = "markdown-rich-notice";
+      this.richNotice.setAttribute("role", "status");
+      this.richNotice.addEventListener("click", () => {
+        this.richNotice?.remove();
+        this.richNotice = undefined;
+      });
+      document.body.append(this.richNotice);
+    }
+    this.richNotice.textContent = `${note}（クリックで閉じる）`;
   }
 
   private handleUpdate(update: ViewUpdate): void {

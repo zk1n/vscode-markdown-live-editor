@@ -46,7 +46,7 @@ Default:
 - remote images OFF
 - Raw HTML OFF
 
-A future opt-in must explain network/privacy consequences.
+v0.2の`vscodeMarkdownLiveEditor.allowRemoteImages`は既定false。信頼済みworkspaceで明示許可し、editorを開き直した場合だけHTTPS画像をCSPで許可する。画像提供元への通信が発生することを設定説明とREADMEに明示する。HTTP画像、外部ページ自動取得、iframe、command URIは許可しない。詳細は[ADR 0013](../adr/0013-v02-rich-editing-boundaries.md)。
 
 ## Markdown HTML
 

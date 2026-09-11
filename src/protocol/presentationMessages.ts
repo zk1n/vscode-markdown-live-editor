@@ -1,4 +1,5 @@
 import { PROTOCOL_VERSION, type ProtocolDecodeResult } from "./messages.js";
+import type { RichCommandMessage } from "./richMessages.js";
 
 interface EditorIdentity {
   readonly protocolVersion: typeof PROTOCOL_VERSION;
@@ -92,6 +93,7 @@ export function isPreviewTypography(value: unknown): value is PreviewTypography 
 export type WebviewPresentationMessage = EditorStateMessage;
 
 export type HostPresentationMessage =
+  | RichCommandMessage
   | EditorConfigurationMessage
   | EditorNavigationMessage
   | EditorCommandMessage

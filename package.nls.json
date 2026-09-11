@@ -10,5 +10,11 @@
   "command.redo": "Markdown Live Editor: Redo",
   "customEditor.displayName": "Markdown Live Editor",
   "view.markdownOutline.name": "Markdown Outline",
-  "view.markdownOutline.contextualTitle": "Outline"
+  "view.markdownOutline.contextualTitle": "Outline",
+  "command.find": "Markdown Live Editor: Find",
+  "command.replace": "Markdown Live Editor: Replace",
+  "command.insert-table": "Markdown Live Editor: Insert Table",
+  "command.insert-image": "Markdown Live Editor: Insert Image",
+  "configuration.allowRemoteImages.markdownDescription": "Allow HTTPS images in a trusted workspace. Disabled by default. Reopen the editor after changing this setting; images contact their remote server. Enabling or disabling takes effect when the editor is reopened.",
+  "configuration.attachmentFolder.markdownDescription": "Single attachment folder name beside the saved Markdown document. New images are copied here without overwriting existing files. Undo retains attachments."
 }

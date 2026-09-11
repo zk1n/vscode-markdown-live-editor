@@ -26,9 +26,13 @@ const webviewContext = await esbuild.context({
 });
 
 const extensionHostTestContext = await esbuild.context({
-  entryPoints: ["tests/extension-host/index.ts"],
+  entryPoints: {
+    index: "tests/extension-host/index.ts",
+    v02: "tests/extension-host/v02.ts",
+  },
   bundle: true,
-  outfile: "dist/extension-host/index.cjs",
+  outdir: "dist/extension-host",
+  outExtension: { ".js": ".cjs" },
   // Prettier loads parser plugins dynamically. Keep the already-installed
   // development dependency external so the extension-host test runs it from
   // its package boundary instead of bundling an invalid dynamic require.

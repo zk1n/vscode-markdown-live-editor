@@ -3,3 +3,6 @@ node_modules
 .vscode-test/
 coverage
 package-lock.json
+
+# Preserve literal spacing in the human review fixture.
+tests/fixtures/v02-review/*.md
