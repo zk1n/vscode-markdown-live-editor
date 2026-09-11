@@ -2,14 +2,14 @@
 
 ## 検証パイプライン
 
-Development repository は GitLab とする。GitLab CI は branch push、Merge Request、`v*` tag に対して `npm ci` と正式 gate の `npm run check` を実行する。MR が開いている branch の push pipeline は抑制し、MR pipeline を唯一の検証とする。Web からの手動pipelineはMRの有無にかかわらず実行できる。`package_vsix` は Web から開始した pipeline では手動 job、`v*` tag では自動 job であり、生成した VSIX を 30 日間保存する。
+Development repository は Forgejo とする。Forgejo Actions は `.github/workflows/ci.yml` を共通workflow正本として読み込み、branch push、Pull Request、`v*` tag、`workflow_dispatch` に対して `npm ci` と正式 gate の `npm run check` を実行する。Forgejo固有workflow directoryは追加せず、GitHub / Forgejoで同じ定義を検証する。`package-vsix` は手動実行または `v*` tag で起動し、生成した VSIX artifact を 30 日間保存する。
 
 公開 GitHub repository は `develop` / `main` への push と、それらを対象にした Pull Request で同じ `npm ci` と `npm run check` を実行する。VSIX job は `v*` tag または明示的な `workflow_dispatch` でだけ起動し、build artifact を upload する。workflow permission は `contents: read` のみであり、checkout credential は保持しない。
 
-どちらの pipeline も Visual Studio Marketplace への publish、GitHub / GitLab release の作成、tag / branch の push、publish credential の読取りを行わない。publish と release acceptance は Human Gate のままとする。
+どちらの pipeline も Visual Studio Marketplace への publish、GitHub / Forgejo release の作成、tag / branch の push、publish credential の読取りを行わない。publish と release acceptance は Human Gate のままとする。
 
-GitHub Dependabot PRはCI evidenceを提供するinboxであり、Development sourceへ直接mergeしない。採用品はGitLab / Developmentの
-最新`develop`から独立branchで再実装し、同じlocal gateとGitLab pipelineを通す。Development統合後に通常のpublic projectionで
+GitHub Dependabot PRはCI evidenceを提供するinboxであり、Development sourceへ直接mergeしない。採用品はForgejo / Developmentの
+最新`develop`から独立branchで再実装し、同じlocal gateとForgejo Actions workflowを通す。Development統合後に通常のpublic projectionで
 GitHub `develop`を更新し、同等以上のversionを確認してから元PRをcloseする。詳細は
 [`DEPENDENCY_POLICY.md`](DEPENDENCY_POLICY.md)と[`DEPENDABOT_INTAKE.md`](DEPENDABOT_INTAKE.md)を参照する。
 
