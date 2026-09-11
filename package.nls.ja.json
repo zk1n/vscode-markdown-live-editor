@@ -10,5 +10,11 @@
   "command.redo": "Markdown Live Editor: やり直す",
   "customEditor.displayName": "Markdown Live Editor",
   "view.markdownOutline.name": "Markdown Outline",
-  "view.markdownOutline.contextualTitle": "Outline"
+  "view.markdownOutline.contextualTitle": "Outline",
+  "command.find": "Markdown Live Editor: 検索",
+  "command.replace": "Markdown Live Editor: 置換",
+  "command.insert-table": "Markdown Live Editor: 表を挿入",
+  "command.insert-image": "Markdown Live Editor: 画像を挿入",
+  "configuration.allowRemoteImages.markdownDescription": "信頼されたワークスペースでHTTPS画像を許可します。既定は無効です。変更後はエディターを開き直してください。画像の読み込み時に外部サーバーへ接続します。 設定の有効化・無効化は、エディターを開き直したときに反映します。",
+  "configuration.attachmentFolder.markdownDescription": "保存済みMarkdown文書に隣接する添付フォルダー名です。新規画像は既存ファイルを上書きせずコピーします。Undoでも添付ファイルを保持します。"
 }

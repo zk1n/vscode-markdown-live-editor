@@ -491,7 +491,11 @@ function findLinkRanges(
     }
     const from = match.index;
     const to = from + fullText.length;
-    if (isEscaped(line, from) || overlapsProtectedRange(from, to, protectedRanges)) {
+    if (
+      isEscaped(line, from) ||
+      (line[from - 1] === "!" && !isEscaped(line, from - 1)) ||
+      overlapsProtectedRange(from, to, protectedRanges)
+    ) {
       continue;
     }
 

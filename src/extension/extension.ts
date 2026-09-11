@@ -10,6 +10,7 @@ import { textFingerprint } from "../core/diagnostics/textFingerprint.js";
 import { PROJECT_IDENTITY } from "../core/projectIdentity.js";
 import { DocumentSyncCoordinator } from "../core/sync/documentSyncCoordinator.js";
 import { PROTOCOL_VERSION } from "../protocol/messages.js";
+import type { RichCommand } from "../protocol/richMessages.js";
 import { MarkdownEditorProvider } from "./editor/MarkdownEditorProvider.js";
 import {
   MarkdownEditorSessionRegistry,
@@ -107,6 +108,21 @@ export function activate(context: vscode.ExtensionContext): void {
   const redo = vscode.commands.registerCommand("vscodeMarkdownLiveEditor.redo", (): void => {
     postActiveHistoryCommand(editorSessions, "redo");
   });
+  const richCommands = (["find", "replace", "insert-table", "insert-image"] as const).map(
+    (command: RichCommand) =>
+      vscode.commands.registerCommand(`vscodeMarkdownLiveEditor.${command}`, () => {
+        const active = editorSessions.activeStatusSession;
+        if (active === undefined) return;
+        void active.handle.postPresentationMessage?.({
+          kind: "rich-command",
+          protocolVersion: PROTOCOL_VERSION,
+          documentUri: active.handle.documentUri,
+          sessionId: active.handle.sessionId,
+          controllerId: active.controllerId,
+          command,
+        });
+      }),
+  );
 
   const outlineView = vscode.window.createTreeView(MARKDOWN_OUTLINE_VIEW_ID, {
     showCollapseAll: true,
@@ -148,6 +164,7 @@ export function activate(context: vscode.ExtensionContext): void {
     navigateToOutlineHeading,
     undo,
     redo,
+    ...richCommands,
     statusBar,
     customEditorRegistration,
     outlineView,

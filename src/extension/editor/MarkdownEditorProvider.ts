@@ -32,6 +32,8 @@ import { VscodeCustomCssHost } from "../styles/vscodeCustomCssHost.js";
 import type { MarkdownEditorSessionRegistry } from "./MarkdownEditorSessionRegistry.js";
 import { allocatePresentationRevision } from "./presentationRevision.js";
 import { DocumentIndentation } from "./DocumentIndentation.js";
+import { decodeRichRequest } from "../../protocol/richMessages.js";
+import { MarkdownResourceSession } from "./markdownResources.js";
 
 interface MarkdownEditorBootstrap {
   readonly diagnosticMode: DiagnosticMode;
@@ -148,6 +150,23 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
     let trackingReady = false;
     let controllerActivationOrdinal = 0;
     let currentControllerId: string | undefined;
+    // The resolver and CSP share one permission snapshot for this webview.
+    // Changes to the remote-image setting take effect when the editor is reopened.
+    const allowRemoteImages =
+      vscode.workspace.isTrusted &&
+      vscode.workspace
+        .getConfiguration("vscodeMarkdownLiveEditor", document.uri)
+        .get<boolean>("allowRemoteImages", false);
+    const resources = new MarkdownResourceSession(
+      document,
+      webview,
+      (request) =>
+        request.documentUri === documentUri &&
+        request.sessionId === sessionId &&
+        request.controllerId === currentControllerId &&
+        !lifecycle.disposed,
+      allowRemoteImages,
+    );
     let styleRevision = 1;
     let latestStyle: CustomCssSnapshot | undefined;
     let customCssSession: CustomCssSession | undefined;
@@ -255,6 +274,7 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
       trustDisposable.dispose();
       customCssSession?.dispose();
       acknowledgements.clear();
+      resources.dispose();
       this.coordinator.closeSession(documentUri, sessionId);
       panelDispose.dispose();
       cancellationDispose.dispose();
@@ -285,6 +305,11 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
       text: opened.snapshot.text,
     };
     receiveDisposable = webview.onDidReceiveMessage((value: unknown) => {
+      const richRequest = decodeRichRequest(value);
+      if (richRequest !== undefined) {
+        void resources.receive(richRequest);
+        return;
+      }
       if (isEditorReadyCandidate(value)) {
         const ready = decodeEditorReadyMessage(value);
         if (
@@ -414,6 +439,7 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
       webview,
       webview.asWebviewUri(this.options.webviewScriptPath),
       bootstrap,
+      allowRemoteImages,
     );
     diagnostics.record("provider.session.webview-ready", {
       documentUri,
@@ -480,6 +506,7 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
       webview,
       webview.asWebviewUri(this.options.webviewScriptPath),
       bootstrap,
+      false,
     );
     return Promise.resolve();
   }
@@ -570,11 +597,12 @@ function createWebviewHtml(
   webview: vscode.Webview,
   scriptUri: vscode.Uri,
   bootstrap: MarkdownEditorBootstrap,
+  allowRemoteImages: boolean,
 ): string {
   const nonce = randomUUID().replaceAll("-", "");
   const contentSecurityPolicy = [
     "default-src 'none'",
-    `img-src ${webview.cspSource} data:`,
+    `img-src ${webview.cspSource} data:${allowRemoteImages ? " https:" : ""}`,
     `style-src ${webview.cspSource} 'unsafe-inline'`,
     `script-src 'nonce-${nonce}'`,
     `font-src ${webview.cspSource}`,
@@ -586,7 +614,7 @@ function createWebviewHtml(
     : "";
 
   return `<!DOCTYPE html>
-<html lang="en">
+<html lang="ja">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -596,6 +624,7 @@ function createWebviewHtml(
     html, body, #editor-root { height: 100%; margin: 0; }
     body { color: var(--vscode-editor-foreground); background: var(--vscode-editor-background); }
     #editor-root { min-height: 0; }
+    .markdown-rich-notice { position: fixed; bottom: 12px; left: 12px; max-width: min(600px, 85vw); padding: 8px 12px; z-index: 30; font: 12px var(--vscode-font-family); color: var(--vscode-notifications-foreground); background: var(--vscode-notifications-background); border: 1px solid var(--vscode-notifications-border); cursor: pointer; }
      #editor-status { position: fixed; right: 0.75rem; bottom: 0.5rem; max-width: min(34rem, 90vw); color: var(--vscode-editorWarning-foreground); background: var(--vscode-editorWarning-background); padding: 0.35rem 0.5rem; border-radius: 3px; font: 12px var(--vscode-font-family); }
      #editor-status[hidden] { display: none; }
      #editor-diagnostics { position: fixed; left: 0.75rem; bottom: 0.5rem; width: min(64rem, calc(100vw - 1.5rem)); max-height: 35vh; overflow: auto; margin: 0; padding: 0.5rem; color: var(--vscode-editor-foreground); background: var(--vscode-editor-background); border: 1px solid var(--vscode-editorWidget-border); font: 11px var(--vscode-editor-font-family); white-space: pre-wrap; user-select: text; }

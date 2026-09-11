@@ -2,7 +2,7 @@
   "name": "vscode-markdown-live-editor",
   "displayName": "%displayName%",
   "description": "%description%",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": false,
   "license": "MIT",
   "publisher": "zcw",
@@ -64,6 +64,21 @@
           "scope": "window",
           "restricted": true,
           "markdownDescription": "%configuration.customCss.markdownDescription%"
+        },
+        "vscodeMarkdownLiveEditor.allowRemoteImages": {
+          "type": "boolean",
+          "default": false,
+          "scope": "window",
+          "restricted": true,
+          "markdownDescription": "%configuration.allowRemoteImages.markdownDescription%"
+        },
+        "vscodeMarkdownLiveEditor.attachmentFolder": {
+          "type": "string",
+          "default": "attachments",
+          "scope": "resource",
+          "restricted": true,
+          "pattern": "^[^/\\\\:]{1,80}$",
+          "markdownDescription": "%configuration.attachmentFolder.markdownDescription%"
         }
       }
     },
@@ -83,6 +98,22 @@
       {
         "command": "vscodeMarkdownLiveEditor.redo",
         "title": "%command.redo%"
+      },
+      {
+        "command": "vscodeMarkdownLiveEditor.find",
+        "title": "%command.find%"
+      },
+      {
+        "command": "vscodeMarkdownLiveEditor.replace",
+        "title": "%command.replace%"
+      },
+      {
+        "command": "vscodeMarkdownLiveEditor.insert-table",
+        "title": "%command.insert-table%"
+      },
+      {
+        "command": "vscodeMarkdownLiveEditor.insert-image",
+        "title": "%command.insert-image%"
       }
     ],
     "keybindings": [
@@ -101,6 +132,18 @@
         "command": "vscodeMarkdownLiveEditor.redo",
         "key": "ctrl+shift+z",
         "mac": "cmd+shift+z",
+        "when": "activeCustomEditorId == vscodeMarkdownLiveEditor.editor"
+      },
+      {
+        "command": "vscodeMarkdownLiveEditor.find",
+        "key": "ctrl+f",
+        "mac": "cmd+f",
+        "when": "activeCustomEditorId == vscodeMarkdownLiveEditor.editor"
+      },
+      {
+        "command": "vscodeMarkdownLiveEditor.replace",
+        "key": "ctrl+h",
+        "mac": "cmd+alt+f",
         "when": "activeCustomEditorId == vscodeMarkdownLiveEditor.editor"
       }
     ],
@@ -151,9 +194,11 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:browser-geometry": "node ./scripts/build-browser-geometry-harness.mjs && node ./scripts/run-browser-geometry-harness.mjs",
+    "test:extension-host:v02": "npm run build && node ./scripts/run-extension-host-tests.mjs --v02",
     "test:extension-host": "npm run build && node ./scripts/run-extension-host-tests.mjs",
     "check": "npm run typecheck && npm run lint && npm run test && npm run build && npm run format:check",
-    "package:vsix": "npm run build && node ./scripts/package-vsix.mjs"
+    "package:vsix": "npm run build && node ./scripts/package-vsix.mjs",
+    "package:vsix:review": "npm run build && node ./scripts/package-vsix.mjs --review"
   },
   "dependencies": {
     "@codemirror/commands": "6.11.0",

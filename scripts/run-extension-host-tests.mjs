@@ -9,6 +9,7 @@ const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "
 const fixtureWorkspace = path.join(projectRoot, "tests", "extension-host", "fixtures");
 const executablePath = process.env.VSCODE_TEST_EXECUTABLE;
 const version = process.env.VSCODE_TEST_VERSION ?? "1.120.0";
+const testBundle = process.argv.includes("--v02") ? "v02.cjs" : "index.cjs";
 
 const userDataDirectory = await mkdtemp(
   path.join(os.tmpdir(), "markdown-live-editor-vscode-test-"),
@@ -17,7 +18,7 @@ const userDataDirectory = await mkdtemp(
 try {
   const exitCode = await runTests({
     extensionDevelopmentPath: projectRoot,
-    extensionTestsPath: path.join(projectRoot, "dist", "extension-host", "index.cjs"),
+    extensionTestsPath: path.join(projectRoot, "dist", "extension-host", testBundle),
     version,
     ...(executablePath === undefined ? {} : { vscodeExecutablePath: executablePath }),
     launchArgs: ["--disable-extensions", "--user-data-dir", userDataDirectory, fixtureWorkspace],

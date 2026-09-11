@@ -7,9 +7,10 @@ import { fileURLToPath } from "node:url";
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const packageJson = JSON.parse(readFileSync(path.join(repositoryRoot, "package.json"), "utf8"));
 const artifactDirectory = path.join(repositoryRoot, "artifacts");
+const reviewBuild = process.argv.includes("--review");
 const artifactPath = path.join(
   artifactDirectory,
-  `${packageJson.name}-${packageJson.version}.vsix`,
+  `${packageJson.name}-${packageJson.version}${reviewBuild ? "-initial-review" : ""}.vsix`,
 );
 const stagingDirectory = path.join(artifactDirectory, ".vsix-staging");
 const curatedReadme = "docs/public/README.md";
@@ -163,7 +164,14 @@ function packageVsix() {
     const vsceEntrypoint = path.join(repositoryRoot, "node_modules", "@vscode", "vsce", "vsce");
     const result = spawnSync(
       process.execPath,
-      [vsceEntrypoint, "package", "--no-dependencies", "--out", artifactPath],
+      [
+        vsceEntrypoint,
+        "package",
+        "--no-dependencies",
+        ...(reviewBuild ? ["--pre-release"] : []),
+        "--out",
+        artifactPath,
+      ],
       {
         cwd: stagingDirectory,
         stdio: "inherit",

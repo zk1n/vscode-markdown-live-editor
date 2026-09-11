@@ -18,6 +18,7 @@ import {
 import { shouldWarnForMarkdownTrailingWhitespace } from "../../src/extension/markdownTrailingWhitespace.js";
 import { PROTOCOL_VERSION, type HostToWebviewMessage } from "../../src/protocol/messages.js";
 import { VscodeDocumentPort } from "../../src/extension/sync/VscodeDocumentPort.js";
+import { verifyV02TextDocumentBoundary } from "./v02.js";
 
 const COMMAND_ID = "vscodeMarkdownLiveEditor.showProjectInfo";
 const OUTLINE_COMMAND_ID = "vscodeMarkdownLiveEditor.navigateToOutlineHeading";
@@ -114,6 +115,7 @@ export async function run(): Promise<void> {
   await verifySetEndOfLineOperation(workspaceFolder.uri);
   await verifyProductionDocumentChangeListener(workspaceFolder.uri);
   await verifyAutosaveTrailingWhitespaceProtection(workspaceFolder.uri);
+  await verifyV02TextDocumentBoundary(workspaceFolder.uri);
 }
 
 async function verifySequenceLifecycleIntegrity(workspaceUri: vscode.Uri): Promise<void> {
