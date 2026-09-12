@@ -164,7 +164,7 @@
     "@codemirror/view": "6.43.10"
   },
   "devDependencies": {
-    "@eslint/js": "9.39.5",
+    "@eslint/js": "10.0.1",
     "@types/node": "24.13.3",
     "@types/vscode": "1.120.0",
     "@vscode/test-electron": "3.1.0",
