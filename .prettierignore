@@ -6,3 +6,4 @@ package-lock.json
 
 # Preserve literal spacing in the human review fixture.
 tests/fixtures/v02-review/*.md
+tests/fixtures/v02-ux-review/*.md

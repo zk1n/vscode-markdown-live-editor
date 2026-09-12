@@ -68,12 +68,12 @@ Before enabling:
 
 ## Attachments
 
-Clipboard paste writes only into configured workspace-bounded directories.
+画像のpaste / drop / pickerは、信頼済みかつ書込可能な文書の隣接添付folderへ限定する。workspace内は対応するroot、保存済み単体文書は親directoryを資源scopeとする。drive / UNC共有root直下では全rootを許可せず、画像・hover自動読込と添付作成を拒否する。untitledは明示的な画像操作時に標準Save Asを使い、取消では本文・添付を変更しない。remote / virtual URIをlocal fsPathへ変換しない。詳細は[ADR 0014](../adr/0014-v02-ux-revision.md)。
 
 Reject:
 
-- absolute destinations outside workspace
-- `..` traversal escaping workspace
+- absolute destinations outside the document's resource scope
+- `..` traversal escaping that scope
 - unsafe filename injection
 
 ## Network

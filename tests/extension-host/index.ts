@@ -1951,7 +1951,10 @@ async function probeIndentationPicker(): Promise<void> {
     }
     await vscode.commands.executeCommand("workbench.action.acceptSelectedQuickOpenItem");
     await new Promise<void>((resolve) => setTimeout(resolve, 150));
-    await vscode.commands.executeCommand("workbench.action.quickOpenSelectNext");
+    // The size picker starts at the supplied current size (4), not item 1.
+    // Move deliberately to 2; keep the assertion about the selected value.
+    await vscode.commands.executeCommand("workbench.action.quickOpenSelectPrevious");
+    await vscode.commands.executeCommand("workbench.action.quickOpenSelectPrevious");
     await vscode.commands.executeCommand("workbench.action.acceptSelectedQuickOpenItem");
     assert.deepEqual(
       await result,

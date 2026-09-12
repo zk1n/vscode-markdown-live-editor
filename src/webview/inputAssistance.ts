@@ -1,6 +1,7 @@
 import { Prec, type Extension } from "@codemirror/state";
 import { type EditorView, keymap } from "@codemirror/view";
 import { sourceNodes } from "../core/markdown/markdownSource.js";
+import { addManagedSeparator } from "./structuralSpacing.js";
 
 /** An explicit Enter command. No open/save/formatter/update observer edits text. */
 export function insertHeadingParagraph(view: EditorView): boolean {
@@ -17,7 +18,12 @@ export function insertHeadingParagraph(view: EditorView): boolean {
     "ATXHeading4",
     "ATXHeading5",
     "ATXHeading6",
-  ]).find((node) => node.from === line.from && node.to === line.to && node.parent === "Document");
+  ]).find(
+    (node) =>
+      view.state.doc.lineAt(node.from).number === line.number &&
+      node.to === line.to &&
+      node.parent === "Document",
+  );
   if (heading === undefined) return false;
   const next =
     line.number < view.state.doc.lines ? view.state.doc.line(line.number + 1) : undefined;
@@ -30,6 +36,7 @@ export function insertHeadingParagraph(view: EditorView): boolean {
       view.dispatch({
         changes: { from: next.to, insert: "\n" },
         selection: { anchor: next.to + 1 },
+        effects: addManagedSeparator.of({ heading: heading.from, blank: next.to }),
         userEvent: "input.type",
         scrollIntoView: true,
       });
@@ -38,6 +45,7 @@ export function insertHeadingParagraph(view: EditorView): boolean {
     view.dispatch({
       changes: { from: caret, insert: "\n\n" },
       selection: { anchor: caret + 2 },
+      effects: addManagedSeparator.of({ heading: heading.from, blank: caret + 1 }),
       userEvent: "input.type",
       scrollIntoView: true,
     });

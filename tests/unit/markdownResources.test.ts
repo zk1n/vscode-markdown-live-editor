@@ -28,6 +28,7 @@ import {
   storeAttachment,
 } from "../../src/extension/editor/markdownResources.js";
 import {
+  decodeRichCommand,
   decodeRichRequest,
   decodeRichResponse,
   MAX_IMAGE_BYTES,
@@ -205,6 +206,29 @@ describe("rich protocol validation", () => {
         ok: true,
         offset: -1,
       }),
+    ).toBeUndefined();
+  });
+  it("keeps contextless commands compatible while requiring a versioned valid token", () => {
+    const command = { ...identity, kind: "rich-command", command: "insert-table" };
+    expect(decodeRichCommand(command)).toEqual(command);
+    expect(
+      decodeRichCommand({ ...command, command: "table-row-add", contextToken: "context-1" }),
+    ).toBeUndefined();
+    expect(
+      decodeRichCommand({
+        ...command,
+        command: "table-row-add",
+        contextToken: "context-1",
+        documentVersion: 3,
+      }),
+    ).toEqual({
+      ...command,
+      command: "table-row-add",
+      contextToken: "context-1",
+      documentVersion: 3,
+    });
+    expect(
+      decodeRichCommand({ ...command, contextToken: "not a valid token", documentVersion: 3 }),
     ).toBeUndefined();
   });
 });

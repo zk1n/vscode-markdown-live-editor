@@ -30,10 +30,25 @@ export interface RichResponse extends RichIdentity {
   readonly title?: string;
   readonly offset?: number;
 }
-export type RichCommand = "find" | "replace" | "insert-table" | "insert-image";
+export type RichCommand =
+  | "find"
+  | "replace"
+  | "insert-table"
+  | "insert-image"
+  | "table-row-add"
+  | "table-row-delete"
+  | "table-column-add"
+  | "table-column-delete"
+  | "table-align-left"
+  | "table-align-center"
+  | "table-align-right"
+  | "table-source"
+  | "image-source";
 export interface RichCommandMessage extends RichIdentity {
   readonly kind: "rich-command";
+  readonly documentVersion?: number;
   readonly command: RichCommand;
+  readonly contextToken?: string;
 }
 
 export function isRichIdentity(value: unknown): value is RichIdentity & Record<string, unknown> {
@@ -49,6 +64,9 @@ export function isRichIdentity(value: unknown): value is RichIdentity & Record<s
 }
 function integer(value: unknown): value is number {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+function contextToken(value: unknown): value is string {
+  return typeof value === "string" && /^[A-Za-z\d_-]{1,80}$/u.test(value);
 }
 export function decodeRichRequest(value: unknown): RichRequest | undefined {
   if (
@@ -134,8 +152,22 @@ export function decodeRichCommand(value: unknown): RichCommandMessage | undefine
     command !== "find" &&
     command !== "replace" &&
     command !== "insert-table" &&
-    command !== "insert-image"
+    command !== "insert-image" &&
+    command !== "table-row-add" &&
+    command !== "table-row-delete" &&
+    command !== "table-column-add" &&
+    command !== "table-column-delete" &&
+    command !== "table-align-left" &&
+    command !== "table-align-center" &&
+    command !== "table-align-right" &&
+    command !== "table-source" &&
+    command !== "image-source"
   )
+    return undefined;
+  const token = value["contextToken"];
+  if (token !== undefined && !contextToken(token)) return undefined;
+  const version = value["documentVersion"];
+  if ((token !== undefined && !integer(version)) || (version !== undefined && !integer(version)))
     return undefined;
   return {
     kind: "rich-command",
@@ -144,5 +176,7 @@ export function decodeRichCommand(value: unknown): RichCommandMessage | undefine
     sessionId: value.sessionId,
     controllerId: value.controllerId,
     command,
+    ...(typeof token === "string" ? { contextToken: token } : {}),
+    ...(typeof version === "number" ? { documentVersion: version } : {}),
   };
 }

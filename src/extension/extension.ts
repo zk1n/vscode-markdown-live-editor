@@ -12,6 +12,7 @@ import { DocumentSyncCoordinator } from "../core/sync/documentSyncCoordinator.js
 import { PROTOCOL_VERSION } from "../protocol/messages.js";
 import type { RichCommand } from "../protocol/richMessages.js";
 import { MarkdownEditorProvider } from "./editor/MarkdownEditorProvider.js";
+import { NativeSearchBridge } from "./editor/NativeSearchBridge.js";
 import {
   MarkdownEditorSessionRegistry,
   type ActiveStatusSession,
@@ -49,6 +50,7 @@ export function activate(context: vscode.ExtensionContext): void {
   const coordinator = new DocumentSyncCoordinator(documentPort, diagnostics);
   const warnedTrailingWhitespaceDocuments = new Set<string>();
   const editorSessions = new MarkdownEditorSessionRegistry();
+  const nativeSearch = new NativeSearchBridge();
   const outlineProvider = new MarkdownOutlineTreeProvider(editorSessions);
   const editorProvider = new MarkdownEditorProvider(coordinator, {
     diagnosticMode,
@@ -57,6 +59,7 @@ export function activate(context: vscode.ExtensionContext): void {
       warnForMarkdownTrailingWhitespace(document, warnedTrailingWhitespaceDocuments);
     },
     sessionRegistry: editorSessions,
+    nativeSearch,
     viewType: MARKDOWN_EDITOR_VIEW_TYPE,
     webviewScriptPath: vscode.Uri.joinPath(context.extensionUri, "dist", "webview.js"),
   });
@@ -108,20 +111,54 @@ export function activate(context: vscode.ExtensionContext): void {
   const redo = vscode.commands.registerCommand("vscodeMarkdownLiveEditor.redo", (): void => {
     postActiveHistoryCommand(editorSessions, "redo");
   });
-  const richCommands = (["find", "replace", "insert-table", "insert-image"] as const).map(
-    (command: RichCommand) =>
-      vscode.commands.registerCommand(`vscodeMarkdownLiveEditor.${command}`, () => {
-        const active = editorSessions.activeStatusSession;
-        if (active === undefined) return;
-        void active.handle.postPresentationMessage?.({
-          kind: "rich-command",
-          protocolVersion: PROTOCOL_VERSION,
-          documentUri: active.handle.documentUri,
-          sessionId: active.handle.sessionId,
-          controllerId: active.controllerId,
-          command,
-        });
-      }),
+  const richCommands = (
+    [
+      "find",
+      "replace",
+      "insert-table",
+      "insert-image",
+      "table-row-add",
+      "table-row-delete",
+      "table-column-add",
+      "table-column-delete",
+      "table-align-left",
+      "table-align-center",
+      "table-align-right",
+      "table-source",
+      "image-source",
+    ] as const
+  ).map((command: RichCommand) =>
+    vscode.commands.registerCommand(`vscodeMarkdownLiveEditor.${command}`, (context: unknown) => {
+      const active = editorSessions.activeStatusSession;
+      if (active === undefined) return;
+      let contextToken: string | undefined;
+      if (
+        typeof context === "object" &&
+        context !== null &&
+        Reflect.get(context, "markdownContextToken") !== undefined
+      ) {
+        if (
+          Reflect.get(context, "markdownDocumentUri") !== active.handle.documentUri ||
+          Reflect.get(context, "markdownSessionId") !== active.handle.sessionId ||
+          Reflect.get(context, "markdownControllerId") !== active.controllerId ||
+          Reflect.get(context, "markdownDocumentVersion") !== active.editorState.documentVersion
+        )
+          return;
+        const token: unknown = Reflect.get(context, "markdownContextToken");
+        if (typeof token !== "string" || !/^[A-Za-z\d_-]{1,80}$/u.test(token)) return;
+        contextToken = token;
+      }
+      void active.handle.postPresentationMessage?.({
+        kind: "rich-command",
+        protocolVersion: PROTOCOL_VERSION,
+        documentUri: active.handle.documentUri,
+        sessionId: active.handle.sessionId,
+        controllerId: active.controllerId,
+        documentVersion: active.editorState.documentVersion,
+        ...(contextToken === undefined ? {} : { contextToken }),
+        command,
+      });
+    }),
   );
 
   const outlineView = vscode.window.createTreeView(MARKDOWN_OUTLINE_VIEW_ID, {
@@ -159,6 +196,10 @@ export function activate(context: vscode.ExtensionContext): void {
   );
 
   context.subscriptions.push(
+    nativeSearch,
+    vscode.commands.registerCommand("vscodeMarkdownLiveEditor.returnToLive", () =>
+      nativeSearch.returnToLive(),
+    ),
     disposable,
     copyDiagnostics,
     navigateToOutlineHeading,

@@ -148,8 +148,10 @@ export type TableAction =
   | "align-right"
   | "source";
 
-export function editTable(view: EditorView, action: TableAction): boolean {
-  if (view.composing || view.compositionStarted || view.state.readOnly) return false;
+/** A context action may target a cell other than the visible caret. */
+export function editTable(view: EditorView, action: TableAction, targetPosition?: number): boolean {
+  if (view.composing || view.compositionStarted || (view.state.readOnly && action !== "source"))
+    return false;
   const text = view.state.doc.toString();
   const selected = view.state.selection.main;
   if (action === "insert") {
@@ -165,7 +167,9 @@ export function editTable(view: EditorView, action: TableAction): boolean {
     return true;
   }
   const table = findTables(text).find(
-    (candidate) => candidate.from <= selected.head && candidate.to >= selected.head,
+    (candidate) =>
+      candidate.from <= (targetPosition ?? selected.head) &&
+      candidate.to >= (targetPosition ?? selected.head),
   );
   if (table === undefined) return false;
   if (action === "source") {
@@ -175,7 +179,7 @@ export function editTable(view: EditorView, action: TableAction): boolean {
     view.focus();
     return true;
   }
-  const current = tableCellAt(table, selected.head) ?? { row: 0, column: 0 };
+  const current = tableCellAt(table, targetPosition ?? selected.head) ?? { row: 0, column: 0 };
   let changes: ChangeSpec = [];
   if (action === "row-add") {
     const row = current.row === 0 ? table.delimiter : table.rows[current.row];

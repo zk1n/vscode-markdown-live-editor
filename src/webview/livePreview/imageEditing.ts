@@ -9,6 +9,36 @@ export interface ImageActions {
   readonly isEditable: () => boolean;
   readonly synchronize: () => Promise<boolean>;
   readonly notify: (note: string) => void;
+  readonly prepareImport?: (
+    fields: { readonly name?: string; readonly data?: string },
+    anchor: number,
+    head: number,
+  ) => boolean;
+}
+
+function supportsImageFile(file: File, declaredType = file.type): boolean {
+  return declaredType.startsWith("image/") || /\.(?:png|jpe?g|gif|webp)$/iu.test(file.name);
+}
+
+function imageFile(transfer: DataTransfer | null): File | undefined {
+  if (transfer === null) return undefined;
+  const fromFiles = [...transfer.files].find((file) => supportsImageFile(file));
+  if (fromFiles !== undefined) return fromFiles;
+  for (const item of transfer.items) {
+    if (item.kind !== "file" || !item.type.startsWith("image/")) continue;
+    const file = item.getAsFile();
+    if (file !== null && supportsImageFile(file, item.type)) return file;
+  }
+  return undefined;
+}
+
+function hasImageTransfer(transfer: DataTransfer | null): boolean {
+  return (
+    imageFile(transfer) !== undefined ||
+    [...(transfer?.items ?? [])].some(
+      (item) => item.kind === "file" && item.type.startsWith("image/"),
+    )
+  );
 }
 
 export function imageEditing(actions: ImageActions): Extension {
@@ -41,32 +71,28 @@ export function imageEditing(actions: ImageActions): Extension {
     images,
     EditorView.domEventHandlers({
       paste(event, view) {
-        const file = [...(event.clipboardData?.files ?? [])].find((candidate) =>
-          candidate.type.startsWith("image/"),
-        );
+        const file = imageFile(event.clipboardData);
         if (file === undefined) return false;
         event.preventDefault();
         void insertImage(view, actions, file);
         return true;
       },
       drop(event, view) {
-        const file = [...(event.dataTransfer?.files ?? [])].find((candidate) =>
-          candidate.type.startsWith("image/"),
-        );
+        const file = imageFile(event.dataTransfer);
         if (file === undefined) return false;
         event.preventDefault();
         if (!actions.isEditable()) return true;
         const position = view.posAtCoords({ x: event.clientX, y: event.clientY });
-        if (position !== null) view.dispatch({ selection: { anchor: position } });
+        if (position === null) {
+          actions.notify("画像をドロップした位置を特定できなかったため挿入しませんでした。");
+          return true;
+        }
+        view.dispatch({ selection: { anchor: position } });
         void insertImage(view, actions, file);
         return true;
       },
       dragover(event) {
-        if (
-          [...(event.dataTransfer?.items ?? [])].some(
-            (item) => item.kind === "file" && item.type.startsWith("image/"),
-          )
-        ) {
+        if (hasImageTransfer(event.dataTransfer)) {
           event.preventDefault();
           return true;
         }
@@ -114,6 +140,12 @@ class ImageWidget extends WidgetType {
   public override toDOM(view: EditorView): HTMLElement {
     const container = document.createElement("span");
     container.className = "cm-image-preview";
+    // U1's context menu identifies the source range; selecting the preview
+    // itself never changes Markdown merely to expose that context.
+    container.dataset["imageSource"] = "markdown";
+    container.dataset["imageFrom"] = String(this.link.from);
+    container.dataset["imageTo"] = String(this.link.to);
+    container.dataset["imageTarget"] = this.link.target;
     const image = document.createElement("img");
     image.alt = this.link.label;
     image.title = this.link.title ?? this.link.label;
@@ -191,6 +223,14 @@ export async function insertImage(
       actions.notify("文書または選択位置が変わったため画像挿入を取り消しました。");
       return;
     }
+    if (
+      actions.prepareImport?.(
+        file === undefined ? {} : { name: file.name, ...(data === undefined ? {} : { data }) },
+        selection.anchor,
+        selection.head,
+      ) === true
+    )
+      return;
     const response = await actions.client.request(
       file === undefined ? "image-pick" : "image-import",
       file === undefined ? {} : { name: file.name, ...(data === undefined ? {} : { data }) },
@@ -219,7 +259,7 @@ export async function insertImage(
     view.focus();
     actions.notify("画像を挿入しました。Undoでは添付ファイルを削除しません。");
   } catch {
-    actions.notify("画像の取り込みに失敗しました。ファイル選択から再度試してください。");
+    actions.notify("画像の取り込みに失敗しました。画像データまたは対応形式を確認してください。");
   }
 }
 function fileBase64(file: File): Promise<string> {
