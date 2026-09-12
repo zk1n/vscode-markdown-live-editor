@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { mkdtemp, mkdir, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -25,6 +26,8 @@ const fake = vi.hoisted(() => {
   const state = {
     root: undefined as FakeUri | undefined,
     trusted: true,
+    fileSystemWritable: true,
+    filePermissions: undefined as number | undefined,
     configuration: new Map<string, unknown>(),
     documents: new Map<string, unknown>(),
     openExternal: vi.fn((): Promise<boolean> => Promise.resolve(true)),
@@ -43,6 +46,14 @@ const fake = vi.hoisted(() => {
     },
     getWorkspaceFolder: (): { readonly uri: FakeUri } | undefined =>
       state.root === undefined ? undefined : { uri: state.root },
+    fs: {
+      isWritableFileSystem: (): boolean => state.fileSystemWritable,
+      stat: vi.fn((): Promise<{ readonly permissions?: number }> =>
+        Promise.resolve(
+          state.filePermissions === undefined ? {} : { permissions: state.filePermissions },
+        ),
+      ),
+    },
     getConfiguration: (): { readonly get: <T>(key: string, fallback: T) => T } => ({
       get: <T>(key: string, fallback: T): T =>
         (state.configuration.get(key) as T | undefined) ?? fallback,
@@ -63,6 +74,7 @@ const fake = vi.hoisted(() => {
     webviewUris,
     vscode: {
       Uri: { file, parse },
+      FilePermission: { Readonly: 1 },
       Range: FakeRange,
       workspace,
       window: { showTextDocument: state.showTextDocument, showOpenDialog: state.showOpenDialog },
@@ -73,7 +85,10 @@ const fake = vi.hoisted(() => {
 
 vi.mock("vscode", () => fake.vscode);
 
-import { MarkdownResourceSession } from "../../src/extension/editor/markdownResources.js";
+import {
+  MarkdownResourceSession,
+  resourceRootsForDocument,
+} from "../../src/extension/editor/markdownResources.js";
 
 const temporary: string[] = [];
 afterEach(async () => {
@@ -83,6 +98,8 @@ afterEach(async () => {
 beforeEach(() => {
   fake.state.root = undefined;
   fake.state.trusted = true;
+  fake.state.fileSystemWritable = true;
+  fake.state.filePermissions = undefined;
   fake.state.configuration.clear();
   fake.state.documents.clear();
   fake.state.openExternal.mockClear();
@@ -92,9 +109,39 @@ beforeEach(() => {
   fake.state.showOpenDialog.mockResolvedValue(undefined);
   fake.workspace.openTextDocument.mockClear();
   fake.webviewUris.mockClear();
+  fake.workspace.fs.stat.mockClear();
 });
 
 describe("MarkdownResourceSession", () => {
+  it("reserves image import before the asynchronous capability check", async () => {
+    const fixture = await createFixture();
+    const session = new MarkdownResourceSession(
+      fixture.document as unknown as VSCode.TextDocument,
+      fixture.webview,
+      () => true,
+    );
+    let release: (() => void) | undefined;
+    fake.workspace.fs.stat.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          release = () => {
+            resolve({});
+          };
+        }),
+    );
+    const first = session.receive({
+      ...request("image-import", undefined, 1, 20),
+      data: "iVBORw0KGgoB",
+    });
+    await session.receive({ ...request("image-import", undefined, 1, 21), data: "iVBORw0KGgoB" });
+    expect(lastMessage(fixture.postMessage)).toMatchObject({
+      ok: false,
+      note: "画像の取り込み中です。",
+    });
+    release?.();
+    await first;
+    expect(lastMessage(fixture.postMessage)["ok"]).toBe(true);
+  });
   it("suppresses stale and disposed responses, including a completion that became stale", async () => {
     const fixture = await createFixture();
     const current = vi.fn<(request: RichRequest) => boolean>().mockReturnValue(false);
@@ -232,6 +279,108 @@ describe("MarkdownResourceSession", () => {
     expect(fake.workspace.openTextDocument).not.toHaveBeenCalled();
   });
 
+  it("uses a saved standalone document directory as its narrow local resource scope", async () => {
+    const folder = await mkdtemp(path.join(os.tmpdir(), "markdown-standalone-resource-"));
+    temporary.push(folder);
+    const documentPath = path.join(folder, "source.md");
+    const imagePath = path.join(folder, "image.png");
+    await writeFile(documentPath, "![image](image.png)");
+    await writeFile(imagePath, Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, 1]));
+    const source = document(documentPath, "![image](image.png)", 1);
+    const postMessage = vi.fn((): Promise<boolean> => Promise.resolve(true));
+    const webview = {
+      options: {},
+      postMessage,
+      asWebviewUri: fake.webviewUris,
+    } as unknown as VSCode.Webview;
+    fake.state.root = undefined;
+    const session = new MarkdownResourceSession(
+      source as unknown as VSCode.TextDocument,
+      webview,
+      (): boolean => true,
+    );
+
+    expect(resourceRootsForDocument(source as unknown as VSCode.TextDocument)[0]?.fsPath).toBe(
+      folder,
+    );
+    await session.receive(request("image-resolve", "image.png"));
+    const response = lastMessage(postMessage);
+    expect(response["ok"]).toBe(true);
+    expect(typeof response["url"]).toBe("string");
+    expect(webview.options.localResourceRoots).toEqual([fake.file(imagePath)]);
+
+    await session.receive(request("link-preview", "../outside.md", 1, 12));
+    expect(lastMessage(postMessage)).toMatchObject({ ok: false });
+  });
+
+  it("requires a Save As destination only when an untitled document imports an attachment", async () => {
+    const fixture = await createFixture();
+    fixture.document.isUntitled = true;
+    const session = new MarkdownResourceSession(
+      fixture.document as unknown as VSCode.TextDocument,
+      fixture.webview,
+      (): boolean => true,
+    );
+
+    await session.receive({
+      ...request("image-import", undefined, 1, 13),
+      data: "iVBORw0KGgoB",
+    });
+
+    expect(lastMessage(fixture.postMessage)).toMatchObject({
+      ok: false,
+      note: "画像やローカル参照を使う前に、文書の保存先を指定してください。",
+    });
+  });
+
+  it("rejects automatic resources and attachments for a standalone document at a filesystem root", async () => {
+    const filesystemRoot = path.parse(process.cwd()).root;
+    const source = document(path.join(filesystemRoot, "source.md"), "![image](image.png)", 1);
+    const postMessage = vi.fn((): Promise<boolean> => Promise.resolve(true));
+    const webview = {
+      options: {},
+      postMessage,
+      asWebviewUri: fake.webviewUris,
+    } as unknown as VSCode.Webview;
+    fake.state.root = undefined;
+    const session = new MarkdownResourceSession(
+      source as unknown as VSCode.TextDocument,
+      webview,
+      (): boolean => true,
+    );
+
+    expect(resourceRootsForDocument(source as unknown as VSCode.TextDocument)).toEqual([
+      source.uri,
+    ]);
+    await session.receive(request("image-resolve", "image.png"));
+    expect(lastMessage(postMessage)["ok"]).toBe(false);
+    expect(String(lastMessage(postMessage)["note"])).toContain("自動読込");
+
+    await session.receive({ ...request("image-import", undefined, 1, 14), data: "iVBORw0KGgoB" });
+    expect(lastMessage(postMessage)["ok"]).toBe(false);
+    expect(String(lastMessage(postMessage)["note"])).toContain("添付画像を作成できません");
+  });
+
+  it("rejects image imports before attachment creation when the document is readonly", async () => {
+    const fixture = await createFixture();
+    fake.state.filePermissions = 1;
+    const session = new MarkdownResourceSession(
+      fixture.document as unknown as VSCode.TextDocument,
+      fixture.webview,
+      (): boolean => true,
+    );
+
+    await session.receive({ ...request("image-import", undefined, 1, 15), data: "iVBORw0KGgoB" });
+
+    expect(lastMessage(fixture.postMessage)).toMatchObject({
+      ok: false,
+      note: "この文書は読み取り専用です。",
+    });
+    await expect(stat(path.join(fixture.root, "notes", "attachments"))).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+  });
+
   it("does not write after cancellation or mid-picker drift, and never returns Markdown after an attachment-time drift", async () => {
     const fixture = await createFixture();
     const session = new MarkdownResourceSession(
@@ -261,13 +410,9 @@ describe("MarkdownResourceSession", () => {
     });
 
     fixture.document.version = 1;
-    let versionReads = 0;
     Object.defineProperty(fixture.document, "version", {
       configurable: true,
-      get: (): number => {
-        versionReads += 1;
-        return versionReads === 3 ? 2 : 1;
-      },
+      get: (): number => (existsSync(path.join(fixture.root, "notes", "attachments")) ? 2 : 1),
     });
     fake.state.showOpenDialog.mockResolvedValueOnce([fake.file(selected)]);
     await session.receive(request("image-pick", undefined, 1, 11));

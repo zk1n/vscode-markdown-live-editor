@@ -33,7 +33,12 @@ import type { MarkdownEditorSessionRegistry } from "./MarkdownEditorSessionRegis
 import { allocatePresentationRevision } from "./presentationRevision.js";
 import { DocumentIndentation } from "./DocumentIndentation.js";
 import { decodeRichRequest } from "../../protocol/richMessages.js";
-import { MarkdownResourceSession } from "./markdownResources.js";
+import { MarkdownResourceSession, resourceRootsForDocument } from "./markdownResources.js";
+import { type NativeSearchBridge } from "./NativeSearchBridge.js";
+import { decodeNativeSearchRequest } from "../../protocol/nativeSearchMessages.js";
+import { SaveAsImageBridge } from "./SaveAsImageBridge.js";
+import { decodeSaveAsImage } from "../../protocol/saveAsImageMessages.js";
+import { getDocumentWriteCapability } from "./documentCapabilities.js";
 
 interface MarkdownEditorBootstrap {
   readonly diagnosticMode: DiagnosticMode;
@@ -42,6 +47,8 @@ interface MarkdownEditorBootstrap {
   readonly sessionId: string;
   readonly nextSequence: number;
   readonly text: string;
+  readonly canEdit?: boolean;
+  readonly readOnlyReason?: string;
 }
 
 export interface MarkdownEditorProviderOptions {
@@ -52,6 +59,7 @@ export interface MarkdownEditorProviderOptions {
   readonly customCssHost?: CustomCssHost;
   readonly viewType?: string;
   readonly webviewScriptPath: vscode.Uri;
+  readonly nativeSearch?: NativeSearchBridge;
 }
 
 /**
@@ -61,6 +69,7 @@ export interface MarkdownEditorProviderOptions {
  */
 export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
   private readonly indentation = new DocumentIndentation();
+  private readonly saveAsImages = new SaveAsImageBridge();
   public constructor(
     private readonly coordinator: DocumentSyncCoordinator,
     private readonly options: MarkdownEditorProviderOptions,
@@ -75,7 +84,10 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
     const { webview } = webviewPanel;
     webview.options = {
       enableScripts: true,
-      localResourceRoots: [vscode.Uri.joinPath(this.options.webviewScriptPath, "..")],
+      localResourceRoots: [
+        vscode.Uri.joinPath(this.options.webviewScriptPath, ".."),
+        ...resourceRootsForDocument(document),
+      ],
     };
 
     const documentUri = document.uri.toString();
@@ -145,6 +157,8 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
     acknowledgements: Map<number, OperationAcknowledgement>,
   ): Promise<void> {
     const lifecycle = { disposed: false };
+    const nativeSearch = this.options.nativeSearch?.register(document, webviewPanel, sessionId);
+    const saveAsImages = this.saveAsImages.register(document, webviewPanel, sessionId);
     let receiveDisposable: vscode.Disposable = vscode.Disposable.from();
     let trackingDisposable: vscode.Disposable = vscode.Disposable.from();
     let trackingReady = false;
@@ -275,6 +289,8 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
       customCssSession?.dispose();
       acknowledgements.clear();
       resources.dispose();
+      nativeSearch?.dispose();
+      saveAsImages.dispose();
       this.coordinator.closeSession(documentUri, sessionId);
       panelDispose.dispose();
       cancellationDispose.dispose();
@@ -283,7 +299,10 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
     const cancellationDispose = cancellationToken.onCancellationRequested(disposeSession);
 
     diagnostics.record("provider.session.opening", { documentUri, sessionId });
-    const opened = await this.coordinator.openSession(documentUri, sessionId, endpoint);
+    const [opened, capability] = await Promise.all([
+      this.coordinator.openSession(documentUri, sessionId, endpoint),
+      getDocumentWriteCapability(document),
+    ]);
     if (lifecycle.disposed) {
       this.coordinator.closeSession(documentUri, sessionId);
       panelDispose.dispose();
@@ -303,8 +322,20 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
       sessionId,
       nextSequence: 1,
       text: opened.snapshot.text,
+      canEdit: capability.writable,
+      ...(capability.reason === undefined ? {} : { readOnlyReason: capability.reason }),
     };
     receiveDisposable = webview.onDidReceiveMessage((value: unknown) => {
+      const saveAsImage = decodeSaveAsImage(value);
+      if (saveAsImage !== undefined) {
+        void saveAsImages.receive(saveAsImage);
+        return;
+      }
+      const searchRequest = decodeNativeSearchRequest(value);
+      if (searchRequest !== undefined) {
+        void nativeSearch?.search(searchRequest);
+        return;
+      }
       const richRequest = decodeRichRequest(value);
       if (richRequest !== undefined) {
         void resources.receive(richRequest);
@@ -340,6 +371,8 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
               trackingDisposable = this.registerSession(document, sessionId, webviewPanel);
             }
             currentControllerId = controllerId;
+            nativeSearch?.ready(controllerId);
+            saveAsImages.ready(controllerId);
             this.options.sessionRegistry?.replaceController(sessionId, controllerId);
             endpoint.postMessage({
               kind: "controller-ready",
@@ -381,6 +414,8 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
             report.value.controllerId,
             report.value,
           );
+          nativeSearch?.report(report.value);
+          saveAsImages.report(report.value);
         }
         return;
       }

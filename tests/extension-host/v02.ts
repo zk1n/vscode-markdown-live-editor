@@ -13,6 +13,7 @@ import {
 } from "../../src/core/sync/documentSyncCoordinator.js";
 import { PROTOCOL_VERSION, type HostToWebviewMessage } from "../../src/protocol/messages.js";
 import { VscodeDocumentPort } from "../../src/extension/sync/VscodeDocumentPort.js";
+import { verifyV02NativeSearch } from "./v02NativeSearch.js";
 
 const VIEW_TYPE = "vscodeMarkdownLiveEditor.editor";
 const EXTENSION_ID = "zcw.vscode-markdown-live-editor";
@@ -30,6 +31,7 @@ export async function run(): Promise<void> {
   assert.ok(extension, `Extension '${EXTENSION_ID}' was not found.`);
   await extension.activate();
   await verifyV02TextDocumentBoundary(workspaceFolder.uri);
+  await verifyV02NativeSearch(workspaceFolder.uri);
 }
 
 export async function verifyV02TextDocumentBoundary(workspaceUri: vscode.Uri): Promise<void> {

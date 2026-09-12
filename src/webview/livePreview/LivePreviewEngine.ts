@@ -55,7 +55,7 @@ const livePreviewTheme = EditorView.baseTheme({
   },
   ".cm-scroller": {
     fontFamily: "inherit",
-    lineHeight: "var(--markdown-line-height, 22px)",
+    lineHeight: "var(--markdown-line-height, 1.6)",
     overflow: "auto",
   },
   ".cm-content": {
@@ -67,7 +67,7 @@ const livePreviewTheme = EditorView.baseTheme({
     padding: "1em 26px 2rem",
   },
   ".cm-line": {
-    lineHeight: "var(--markdown-line-height, 22px)",
+    lineHeight: "var(--markdown-line-height, 1.6)",
     minHeight: "1em",
     paddingLeft: "0",
     paddingRight: "0",

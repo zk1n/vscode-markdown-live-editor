@@ -3,6 +3,7 @@ import { mkdir, open, readFile, realpath, stat } from "node:fs/promises";
 import path from "node:path";
 import * as vscode from "vscode";
 import { headingOffset } from "../../core/markdown/markdownLinks.js";
+import { getDocumentWriteCapability } from "./documentCapabilities.js";
 import {
   MAX_IMAGE_BYTES,
   type RichRequest,
@@ -15,6 +16,27 @@ export function isWithin(root: string, target: string): boolean {
     relative === "" ||
     (!relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative))
   );
+}
+
+/**
+ * Returns only the initial webview roots that are safe for this document.
+ * Individual resolved image files are added by the session after realpath
+ * validation.  A document directly under a filesystem root must not turn that
+ * whole drive into a webview resource root.
+ */
+export function resourceRootsForDocument(document: vscode.TextDocument): readonly vscode.Uri[] {
+  if (document.isUntitled || document.uri.scheme !== "file") return [];
+  const workspace = vscode.workspace.getWorkspaceFolder(document.uri)?.uri;
+  if (workspace?.scheme === "file" && isWithin(workspace.fsPath, document.uri.fsPath))
+    return [workspace];
+  const parent = path.dirname(document.uri.fsPath);
+  return path.parse(parent).root === parent ? [document.uri] : [vscode.Uri.file(parent)];
+}
+
+interface LocalResourceScope {
+  readonly documentPath: string;
+  readonly rootPath: string;
+  readonly standaloneFilesystemRoot: boolean;
 }
 function hasControlCharacters(value: string): boolean {
   return /\p{Cc}/u.test(value);
@@ -118,6 +140,11 @@ export async function storeAttachment(
   return [directory, fileName].map((part) => encodeURIComponent(part)).join("/");
 }
 
+function requireTrustedWorkspace(): void {
+  if (!vscode.workspace.isTrusted)
+    throw new Error("画像の取り込みにはワークスペースの信頼が必要です。");
+}
+
 export class MarkdownResourceSession {
   private disposed = false;
   private importBusy = false;
@@ -188,9 +215,16 @@ export class MarkdownResourceSession {
         text: "外部ページは自動取得しません。Ctrl+クリックでブラウザーを開きます。",
       };
     }
-    const root = this.workspaceRoot();
-    const resolved = localMarkdownTarget(this.document.uri.fsPath, root.fsPath, target);
-    const rootReal = await realpath(root.fsPath);
+    const scope = this.localResourceScope();
+    if (
+      scope.standaloneFilesystemRoot &&
+      (request.operation === "image-resolve" || request.operation === "link-preview")
+    )
+      throw new Error(
+        "ドライブまたは共有ルート直下の単体文書では、ローカル資源の自動読込は利用できません。対象を明示的に開いてください。",
+      );
+    const resolved = localMarkdownTarget(scope.documentPath, scope.rootPath, target);
+    const rootReal = await realpath(scope.rootPath);
     const fileReal = await realpath(resolved.path);
     if (!isWithin(rootReal, fileReal))
       throw new Error("リンク先がワークスペース外を参照しています。");
@@ -229,11 +263,21 @@ export class MarkdownResourceSession {
     return {};
   }
 
-  private workspaceRoot(): vscode.Uri {
-    const root = vscode.workspace.getWorkspaceFolder(this.document.uri)?.uri;
-    if (this.document.isUntitled || this.document.uri.scheme !== "file" || root?.scheme !== "file")
-      throw new Error("ワークスペース内に保存済みのMarkdown文書で利用してください。");
-    return root;
+  private localResourceScope(): LocalResourceScope {
+    if (this.document.isUntitled)
+      throw new Error("画像やローカル参照を使う前に、文書の保存先を指定してください。");
+    if (this.document.uri.scheme !== "file")
+      throw new Error("この種類の文書ではローカル資源を利用できません。");
+    const workspace = vscode.workspace.getWorkspaceFolder(this.document.uri)?.uri;
+    const documentPath = this.document.uri.fsPath;
+    const standalone = workspace?.scheme !== "file" || !isWithin(workspace.fsPath, documentPath);
+    const documentDirectory = path.dirname(documentPath);
+    return {
+      documentPath,
+      rootPath: standalone ? documentDirectory : workspace.fsPath,
+      standaloneFilesystemRoot:
+        standalone && path.parse(documentDirectory).root === documentDirectory,
+    };
   }
   private requireVersion(request: RichRequest): void {
     if (
@@ -247,11 +291,15 @@ export class MarkdownResourceSession {
   private async importImage(request: RichRequest): Promise<Partial<RichResponse>> {
     if (this.importBusy) throw new Error("画像の取り込み中です。");
     this.requireVersion(request);
-    const root = this.workspaceRoot();
-    if (!vscode.workspace.isTrusted)
-      throw new Error("画像の取り込みにはワークスペースの信頼が必要です。");
+    const scope = this.localResourceScope();
+    if (scope.standaloneFilesystemRoot)
+      throw new Error("ドライブまたは共有ルート直下の単体文書では、添付画像を作成できません。");
+    requireTrustedWorkspace();
     this.importBusy = true;
     try {
+      const capability = await getDocumentWriteCapability(this.document);
+      if (!capability.writable) throw new Error(capability.reason ?? "この文書へ書き込めません。");
+      this.requireVersion(request);
       let bytes: Uint8Array;
       let name = request.name ?? "image";
       if (request.operation === "image-pick") {
@@ -278,13 +326,17 @@ export class MarkdownResourceSession {
           throw new Error("画像データが不正です。");
         bytes = Buffer.from(request.data, "base64");
       }
+      const currentCapability = await getDocumentWriteCapability(this.document);
+      if (!currentCapability.writable)
+        throw new Error(currentCapability.reason ?? "この文書へ書き込めません。");
+      requireTrustedWorkspace();
       this.requireVersion(request);
       const directory = vscode.workspace
         .getConfiguration("vscodeMarkdownLiveEditor", this.document.uri)
         .get<string>("attachmentFolder", "attachments");
       const relative = await storeAttachment(
-        this.document.uri.fsPath,
-        root.fsPath,
+        scope.documentPath,
+        scope.rootPath,
         directory,
         name,
         bytes,

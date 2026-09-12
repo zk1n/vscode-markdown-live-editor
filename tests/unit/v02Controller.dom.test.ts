@@ -8,8 +8,14 @@ import {
 } from "../../src/protocol/messages.js";
 import type { WebviewPresentationMessage } from "../../src/protocol/presentationMessages.js";
 import type { RichCommand, RichRequest } from "../../src/protocol/richMessages.js";
+import type { NativeSearchRequest } from "../../src/protocol/nativeSearchMessages.js";
 
-type Posted = WebviewToHostMessage | EditorReadyMessage | WebviewPresentationMessage | RichRequest;
+type Posted =
+  | WebviewToHostMessage
+  | EditorReadyMessage
+  | WebviewPresentationMessage
+  | RichRequest
+  | NativeSearchRequest;
 const messages: Posted[] = [];
 let identity: {
   protocolVersion: typeof PROTOCOL_VERSION;
@@ -20,11 +26,11 @@ let identity: {
 function receive(data: unknown): void {
   window.dispatchEvent(new MessageEvent("message", { data }));
 }
-async function create(text: string): Promise<EditorView> {
+async function create(text: string, canEdit = true): Promise<EditorView> {
   vi.stubGlobal("acquireVsCodeApi", () => ({
     postMessage: (message: Posted) => messages.push(message),
   }));
-  document.body.innerHTML = `<main id="editor-root"></main><div id="editor-status" hidden></div><script id="markdown-live-editor-bootstrap" type="application/json">${JSON.stringify({ diagnosticMode: "off", documentUri: "file:///v02.md", documentVersion: 1, sessionId: "v02", nextSequence: 1, text })}</script>`;
+  document.body.innerHTML = `<main id="editor-root"></main><div id="editor-status" hidden></div><script id="markdown-live-editor-bootstrap" type="application/json">${JSON.stringify({ diagnosticMode: "off", documentUri: "file:///v02.md", documentVersion: 1, sessionId: "v02", nextSequence: 1, text, canEdit })}</script>`;
   await import("../../src/webview/editor.js");
   const ready = messages.find((message) => message.kind === "editor-ready");
   if (ready?.kind !== "editor-ready") throw new Error("controller missing");
@@ -78,16 +84,6 @@ function request(operation: RichRequest["operation"]): RichRequest | undefined {
       message.kind === "rich-request" && message.operation === operation,
   );
 }
-function field(view: EditorView, name: string): HTMLInputElement {
-  const input = view.dom.querySelector<HTMLInputElement>(`[data-find-replace=${name}]`);
-  if (input === null) throw new Error(`missing ${name}`);
-  return input;
-}
-function input(view: EditorView, name: string, value: string): void {
-  const item = field(view, name);
-  item.value = value;
-  item.dispatchEvent(new InputEvent("input", { bubbles: true }));
-}
 afterEach(() => {
   window.dispatchEvent(new Event("unload"));
   document.body.replaceChildren();
@@ -97,6 +93,22 @@ afterEach(() => {
 });
 
 describe("v0.2 through the actual webview controller", () => {
+  it("allows native Find for a readonly source while refusing text and attachment edits", async () => {
+    const view = await create("readonly", false);
+    expect(view.state.readOnly).toBe(true);
+    expect(view.contentDOM.contentEditable).toBe("false");
+    command("insert-table");
+    command("insert-image");
+    view.dispatch({ changes: { from: 0, insert: "bad" } });
+    expect(view.state.doc.toString()).toBe("readonly");
+    expect(edits()).toHaveLength(0);
+    expect(request("image-pick")).toBeUndefined();
+    command("find");
+    await Promise.resolve();
+    expect(messages.find((message) => message.kind === "native-search")).toMatchObject({
+      mode: "find",
+    });
+  });
   it("uses heading Enter before the default Markdown keymap and saves exactly that source", async () => {
     const view = await create("# 見出し");
     view.dispatch({ selection: { anchor: view.state.doc.length } });
@@ -122,20 +134,48 @@ describe("v0.2 through the actual webview controller", () => {
     expect(edits()).toHaveLength(0);
     expect(request("image-pick")).toBeUndefined();
   });
-  it("replaces hidden image/table/link source once and routes Undo through the host", async () => {
+  it("adds the heading separator to the final composition target before queued Save", async () => {
+    const view = await create("見出し\n本文");
+    view.contentDOM.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
+    view.dispatch({ changes: { from: 0, insert: "## " }, userEvent: "input.type.compose" });
+    expect(view.state.doc.toString()).toBe("## 見出し\n本文");
+    expect(edits()).toHaveLength(0);
+    press(view, "s", { ctrlKey: true });
+    view.contentDOM.dispatchEvent(new CompositionEvent("compositionend", { bubbles: true }));
+    await Promise.resolve();
+    expect(view.state.doc.toString()).toBe("## 見出し\n\n本文");
+    expect(edits()).toHaveLength(1);
+    expect(view.dom.querySelectorAll(".cm-structural-gap")).toHaveLength(1);
+    acknowledge(view.state.doc.toString(), 1, 2);
+    expect(messages.filter((message) => message.kind === "save")).toHaveLength(1);
+  });
+  it("hands the acknowledged whole document to native Replace and restores its selection", async () => {
     const text =
       "# heading\n\n| needle | b |\n| --- | --- |\n| needle | c |\n\n![needle](needle.png)\n[needle](needle.md)";
     const view = await create(text);
+    view.dispatch({
+      changes: { from: text.length, insert: "!" },
+      selection: { anchor: text.length + 1 },
+    });
     command("replace");
-    input(view, "search", "needle");
-    input(view, "replace", "changed");
-    view.dom.querySelector<HTMLButtonElement>("[data-find-replace=replace-all]")?.click();
-    expect(view.state.doc.toString()).toBe(text.replaceAll("needle", "changed"));
-    expect(edits()).toHaveLength(1);
-    acknowledge(view.state.doc.toString(), 1, 2);
-    field(view, "search").dispatchEvent(
-      new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }),
-    );
+    await Promise.resolve();
+    expect(messages.some((message) => message.kind === "native-search")).toBe(false);
+    acknowledge(`${text}!`, 1, 2);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(messages.find((message) => message.kind === "native-search")).toMatchObject({
+      ...identity,
+      kind: "native-search",
+      mode: "replace",
+      documentVersion: 2,
+      anchor: text.length + 1,
+    });
+    expect(view.dom.querySelector("[data-find-replace]")).toBeNull();
+    view.dispatch({ changes: { from: 0, insert: "blocked" } });
+    expect(view.state.doc.toString()).toBe(`${text}!`);
+    receive({ ...identity, kind: "native-search-return", documentVersion: 2, anchor: 2, head: 7 });
+    expect(view.state.selection.main.from).toBe(2);
+    expect(view.state.selection.main.to).toBe(7);
     press(view, "z", { ctrlKey: true });
     expect(messages.filter((message) => message.kind === "undo")).toHaveLength(1);
     acknowledge(text, 2, 3, "undo");
@@ -207,7 +247,7 @@ describe("v0.2 through the actual webview controller", () => {
       "挿入を取り消しました",
     );
   });
-  it("keeps source unchanged during image reveal, empty-line selection and ordinary source search", async () => {
+  it("keeps source unchanged during image reveal, structural selection and native Find", async () => {
     const text = "# heading\n\n![alt](image.png)\n\nbody";
     const view = await create(text);
     view.dispatch({ selection: { anchor: text.length } });
@@ -217,13 +257,16 @@ describe("v0.2 through the actual webview controller", () => {
     expect(view.state.sliceDoc(view.state.selection.main.from, view.state.selection.main.to)).toBe(
       "![alt](image.png)",
     );
+    await Promise.resolve();
     view.dispatch({ selection: { anchor: 10 } });
     command("find");
-    input(view, "search", "image.png");
-    view.dom.querySelector<HTMLButtonElement>("[data-find-replace=next]")?.click();
-    expect(view.state.sliceDoc(view.state.selection.main.from, view.state.selection.main.to)).toBe(
-      "image.png",
-    );
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(messages.find((message) => message.kind === "native-search")).toMatchObject({
+      mode: "find",
+      anchor: 9,
+      head: 9,
+    });
     expect(view.state.doc.toString()).toBe(text);
     expect(edits()).toHaveLength(0);
   });

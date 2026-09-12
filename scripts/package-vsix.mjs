@@ -7,10 +7,11 @@ import { fileURLToPath } from "node:url";
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const packageJson = JSON.parse(readFileSync(path.join(repositoryRoot, "package.json"), "utf8"));
 const artifactDirectory = path.join(repositoryRoot, "artifacts");
-const reviewBuild = process.argv.includes("--review");
+const reviewBuild = process.argv.includes("--review") || process.argv.includes("--ux-review");
+const reviewSuffix = process.argv.includes("--ux-review") ? "-ux-review" : "-initial-review";
 const artifactPath = path.join(
   artifactDirectory,
-  `${packageJson.name}-${packageJson.version}${reviewBuild ? "-initial-review" : ""}.vsix`,
+  `${packageJson.name}-${packageJson.version}${reviewBuild ? reviewSuffix : ""}.vsix`,
 );
 const stagingDirectory = path.join(artifactDirectory, ".vsix-staging");
 const curatedReadme = "docs/public/README.md";

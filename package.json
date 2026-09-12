@@ -114,6 +114,46 @@
       {
         "command": "vscodeMarkdownLiveEditor.insert-image",
         "title": "%command.insert-image%"
+      },
+      {
+        "command": "vscodeMarkdownLiveEditor.returnToLive",
+        "title": "%command.returnToLive%"
+      },
+      {
+        "command": "vscodeMarkdownLiveEditor.table-row-add",
+        "title": "%command.table-row-add%"
+      },
+      {
+        "command": "vscodeMarkdownLiveEditor.table-row-delete",
+        "title": "%command.table-row-delete%"
+      },
+      {
+        "command": "vscodeMarkdownLiveEditor.table-column-add",
+        "title": "%command.table-column-add%"
+      },
+      {
+        "command": "vscodeMarkdownLiveEditor.table-column-delete",
+        "title": "%command.table-column-delete%"
+      },
+      {
+        "command": "vscodeMarkdownLiveEditor.table-align-left",
+        "title": "%command.table-align-left%"
+      },
+      {
+        "command": "vscodeMarkdownLiveEditor.table-align-center",
+        "title": "%command.table-align-center%"
+      },
+      {
+        "command": "vscodeMarkdownLiveEditor.table-align-right",
+        "title": "%command.table-align-right%"
+      },
+      {
+        "command": "vscodeMarkdownLiveEditor.table-source",
+        "title": "%command.table-source%"
+      },
+      {
+        "command": "vscodeMarkdownLiveEditor.image-source",
+        "title": "%command.image-source%"
       }
     ],
     "keybindings": [
@@ -148,6 +188,13 @@
       }
     ],
     "menus": {
+      "editor/title": [
+        {
+          "command": "vscodeMarkdownLiveEditor.returnToLive",
+          "when": "editorLangId == markdown && activeCustomEditorId != vscodeMarkdownLiveEditor.editor",
+          "group": "navigation@10"
+        }
+      ],
       "menubar/edit": [
         {
           "command": "vscodeMarkdownLiveEditor.undo",
@@ -158,6 +205,63 @@
           "command": "vscodeMarkdownLiveEditor.redo",
           "when": "activeCustomEditorId == vscodeMarkdownLiveEditor.editor",
           "group": "1_do@2"
+        }
+      ],
+      "webview/context": [
+        {
+          "command": "vscodeMarkdownLiveEditor.table-row-add",
+          "when": "webviewId == vscodeMarkdownLiveEditor.editor && webviewSection == markdown-table && markdownContextEditable",
+          "group": "markdown@0"
+        },
+        {
+          "command": "vscodeMarkdownLiveEditor.table-row-delete",
+          "when": "webviewId == vscodeMarkdownLiveEditor.editor && webviewSection == markdown-table && markdownContextEditable && markdownCanDeleteRow",
+          "group": "markdown@1"
+        },
+        {
+          "command": "vscodeMarkdownLiveEditor.table-column-add",
+          "when": "webviewId == vscodeMarkdownLiveEditor.editor && webviewSection == markdown-table && markdownContextEditable",
+          "group": "markdown@2"
+        },
+        {
+          "command": "vscodeMarkdownLiveEditor.table-column-delete",
+          "when": "webviewId == vscodeMarkdownLiveEditor.editor && webviewSection == markdown-table && markdownContextEditable && markdownCanDeleteColumn",
+          "group": "markdown@3"
+        },
+        {
+          "command": "vscodeMarkdownLiveEditor.table-align-left",
+          "when": "webviewId == vscodeMarkdownLiveEditor.editor && webviewSection == markdown-table && markdownContextEditable",
+          "group": "markdown@4"
+        },
+        {
+          "command": "vscodeMarkdownLiveEditor.table-align-center",
+          "when": "webviewId == vscodeMarkdownLiveEditor.editor && webviewSection == markdown-table && markdownContextEditable",
+          "group": "markdown@5"
+        },
+        {
+          "command": "vscodeMarkdownLiveEditor.table-align-right",
+          "when": "webviewId == vscodeMarkdownLiveEditor.editor && webviewSection == markdown-table && markdownContextEditable",
+          "group": "markdown@6"
+        },
+        {
+          "command": "vscodeMarkdownLiveEditor.table-source",
+          "when": "webviewId == vscodeMarkdownLiveEditor.editor && webviewSection == markdown-table",
+          "group": "markdown@7"
+        },
+        {
+          "command": "vscodeMarkdownLiveEditor.image-source",
+          "when": "webviewId == vscodeMarkdownLiveEditor.editor && webviewSection == markdown-image",
+          "group": "markdown@8"
+        },
+        {
+          "command": "vscodeMarkdownLiveEditor.insert-table",
+          "when": "webviewId == vscodeMarkdownLiveEditor.editor && webviewSection != markdown-table && webviewSection != markdown-image",
+          "group": "markdown-insert"
+        },
+        {
+          "command": "vscodeMarkdownLiveEditor.insert-image",
+          "when": "webviewId == vscodeMarkdownLiveEditor.editor && webviewSection != markdown-table && (webviewSection != markdown-image || markdownContextEditable)",
+          "group": "markdown-insert"
         }
       ]
     },
@@ -198,7 +302,8 @@
     "test:extension-host": "npm run build && node ./scripts/run-extension-host-tests.mjs",
     "check": "npm run typecheck && npm run lint && npm run test && npm run build && npm run format:check",
     "package:vsix": "npm run build && node ./scripts/package-vsix.mjs",
-    "package:vsix:review": "npm run build && node ./scripts/package-vsix.mjs --review"
+    "package:vsix:review": "npm run build && node ./scripts/package-vsix.mjs --review",
+    "package:vsix:ux-review": "npm run build && node ./scripts/package-vsix.mjs --ux-review"
   },
   "dependencies": {
     "@codemirror/commands": "6.11.0",

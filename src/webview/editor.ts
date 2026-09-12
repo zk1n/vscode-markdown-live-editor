@@ -49,13 +49,21 @@ import { CompositionBuffer } from "./compositionBuffer.js";
 import { PendingEditQueue } from "./pendingEditQueue.js";
 import { createTabKeymap } from "./tabKeymap.js";
 import { headingInputAssistance } from "./inputAssistance.js";
+import {
+  structuralInputAssistance,
+  restoreStructuralHistory,
+  settleStructuralComposition,
+} from "./structuralSpacing.js";
+import { RichNotice } from "./richNotice.js";
 import { compactSpacing } from "./livePreview/compactSpacing.js";
 import { editTable, tableEditing } from "./livePreview/tableEditing.js";
 import { imageEditing, insertImage, type ImageActions } from "./livePreview/imageEditing.js";
 import { linkPreview } from "./livePreview/linkPreview.js";
-import { createFindReplace } from "./search/findReplace.js";
+import type { NativeSearchRequest } from "../protocol/nativeSearchMessages.js";
+import { decodeSaveAsImage, type SaveAsImageRequest } from "../protocol/saveAsImageMessages.js";
+import { isRichIdentity } from "../protocol/richMessages.js";
 import { RichClient } from "./richClient.js";
-import { v02Toolbar } from "./v02Toolbar.js";
+import { createContextActions, type ContextActions } from "./contextActions.js";
 import {
   decodeRichCommand,
   decodeRichResponse,
@@ -70,7 +78,13 @@ import {
 
 interface VsCodeApi {
   postMessage(
-    message: WebviewToHostMessage | EditorReadyMessage | WebviewPresentationMessage | RichRequest,
+    message:
+      | WebviewToHostMessage
+      | EditorReadyMessage
+      | WebviewPresentationMessage
+      | RichRequest
+      | NativeSearchRequest
+      | SaveAsImageRequest,
   ): void;
   getState?(): unknown;
   setState?(state: unknown): void;
@@ -83,6 +97,8 @@ interface WebviewBootstrap {
   readonly sessionId: string;
   readonly nextSequence: number;
   readonly text: string;
+  readonly canEdit?: boolean;
+  readonly readOnlyReason?: string;
 }
 
 interface PersistedWebviewState {
@@ -162,14 +178,16 @@ class MarkdownWebviewController {
     string,
     { readonly operation: "undo" | "redo"; readonly documentVersion: number }
   >();
-  private readonly findReplace = createFindReplace({ isEditable: () => this.isTabEditable() });
+  private nativeSearchPending = false;
   private readonly richClient: RichClient;
   private readonly imageActions: ImageActions;
+  private readonly contextActions: ContextActions;
   private readonly synchronizedActions: {
     readonly text: string;
+    readonly allowReadOnly: boolean;
     readonly resolve: (ready: boolean) => void;
   }[] = [];
-  private richNotice: HTMLElement | undefined;
+  private readonly richNotice = new RichNotice();
 
   public constructor(
     private readonly vscode: VsCodeApi,
@@ -216,10 +234,39 @@ class MarkdownWebviewController {
       notify: (note) => {
         this.showRichNotice(note);
       },
+      prepareImport: (fields, anchor, head) => {
+        if (!bootstrap.documentUri.startsWith("untitled:")) return false;
+        this.nativeSearchPending = true;
+        this.view.dispatch({ effects: this.editable.reconfigure(EditorView.editable.of(false)) });
+        this.vscode.postMessage({
+          kind: "save-as-image",
+          protocolVersion: PROTOCOL_VERSION,
+          documentUri: bootstrap.documentUri,
+          sessionId: bootstrap.sessionId,
+          controllerId,
+          documentVersion: this.documentVersion,
+          anchor,
+          head,
+          ...fields,
+        });
+        return true;
+      },
     };
+    this.contextActions = createContextActions({
+      identity: () => ({
+        protocolVersion: PROTOCOL_VERSION,
+        documentUri: bootstrap.documentUri,
+        sessionId: bootstrap.sessionId,
+        controllerId,
+        documentVersion: this.documentVersion,
+      }),
+      isEditable: () => this.isTabEditable(),
+      isReady: () => this.isSourceReady(),
+    });
     const extensions: Extension[] = [
       vscodeEditorTheme,
-      this.editable.of(EditorView.editable.of(this.controllerReady)),
+      ...(bootstrap.canEdit === false ? [EditorState.readOnly.of(true)] : []),
+      this.editable.of(EditorView.editable.of(this.controllerReady && bootstrap.canEdit !== false)),
       this.tabSizeConfiguration.of([
         EditorState.tabSize.of(this.tabSize),
         indentUnit.of(" ".repeat(this.tabSize)),
@@ -249,20 +296,35 @@ class MarkdownWebviewController {
       extensions.push(
         this.livePreview.extension,
         compactSpacing,
+        structuralInputAssistance(() => this.composition.isActive || this.view.composing),
         headingInputAssistance(() => this.isTabEditable()),
         tableEditing(() => this.isTabEditable()),
         imageEditing(this.imageActions),
         linkPreview(this.imageActions),
-        this.findReplace.extension,
-        v02Toolbar(
-          (command) => {
-            this.runRichCommand(command);
-          },
-          () => this.isTabEditable(),
-          (note) => {
-            this.showRichNotice(note);
-          },
+        Prec.highest(
+          keymap.of([
+            {
+              key: "Mod-f",
+              run: () => {
+                this.runRichCommand("find");
+                return true;
+              },
+              preventDefault: true,
+              stopPropagation: true,
+            },
+            {
+              key: "Mod-h",
+              mac: "Mod-Alt-f",
+              run: () => {
+                this.runRichCommand("replace");
+                return true;
+              },
+              preventDefault: true,
+              stopPropagation: true,
+            },
+          ]),
         ),
+        this.contextActions.extension,
       );
     }
     if (usesBarrierKeymap(bootstrap.diagnosticMode)) {
@@ -327,6 +389,81 @@ class MarkdownWebviewController {
       return;
     }
     if (
+      isRichIdentity(value) &&
+      this.matchesController(value) &&
+      (value["kind"] === "native-search-finished" ||
+        value["kind"] === "native-search-return" ||
+        value["kind"] === "image-save-as-finished")
+    ) {
+      this.nativeSearchPending = false;
+      this.view.dispatch({
+        effects: this.editable.reconfigure(
+          EditorView.editable.of(
+            !this.recoveryActive && this.controllerReady && this.bootstrap.canEdit !== false,
+          ),
+        ),
+      });
+      if (typeof value["note"] === "string") this.showRichNotice(value["note"]);
+      if (
+        value["kind"] === "native-search-return" &&
+        value["documentVersion"] === this.documentVersion &&
+        this.isSourceReady() &&
+        !this.pendingEdits.hasPending &&
+        !this.pendingEdits.hasInFlight &&
+        typeof value["anchor"] === "number" &&
+        Number.isSafeInteger(value["anchor"]) &&
+        value["anchor"] >= 0 &&
+        value["anchor"] <= this.view.state.doc.length &&
+        typeof value["head"] === "number" &&
+        Number.isSafeInteger(value["head"]) &&
+        value["head"] >= 0 &&
+        value["head"] <= this.view.state.doc.length
+      ) {
+        this.view.dispatch({
+          selection: { anchor: value["anchor"], head: value["head"] },
+          scrollIntoView: true,
+        });
+        this.view.focus();
+      }
+      return;
+    }
+    if (
+      isRichIdentity(value) &&
+      this.matchesController(value) &&
+      value["kind"] === "saved-image-continuation"
+    ) {
+      const saved = decodeSaveAsImage({ ...value, kind: "save-as-image" });
+      if (this.bootstrap.canEdit === false) {
+        this.showRichNotice(
+          this.bootstrap.readOnlyReason ?? "保存先が読み取り専用のため画像を挿入できません。",
+        );
+        return;
+      }
+      if (
+        saved?.documentVersion !== this.documentVersion ||
+        !this.isTabEditable() ||
+        saved.anchor > this.view.state.doc.length ||
+        saved.head > this.view.state.doc.length
+      )
+        return;
+      try {
+        const file =
+          saved.data === undefined
+            ? undefined
+            : new File(
+                [Uint8Array.from(atob(saved.data), (letter) => letter.charCodeAt(0))],
+                saved.name ?? "image.png",
+              );
+        this.view.dispatch({ selection: { anchor: saved.anchor, head: saved.head } });
+        void insertImage(this.view, this.imageActions, file);
+      } catch {
+        this.showRichNotice(
+          "保存後の画像データを読み取れませんでした。画像をもう一度貼り付けてください。",
+        );
+      }
+      return;
+    }
+    if (
       isRecord(value) &&
       (value["kind"] === "rich-response" || value["kind"] === "rich-command")
     ) {
@@ -339,7 +476,7 @@ class MarkdownWebviewController {
         this.matchesController(command) &&
         this.livePreview !== undefined
       )
-        this.runRichCommand(command.command);
+        this.runRichCommand(command.command, command.contextToken, command.documentVersion);
       return;
     }
 
@@ -377,7 +514,7 @@ class MarkdownWebviewController {
     }
     this.disposed = true;
     this.richClient.dispose();
-    this.richNotice?.remove();
+    this.richNotice.dispose();
     for (const action of this.synchronizedActions.splice(0)) action.resolve(false);
     this.persistState();
     if (this.outlineHighlightTimer !== undefined) {
@@ -502,7 +639,12 @@ class MarkdownWebviewController {
   }
 
   private isTabEditable(): boolean {
+    return this.bootstrap.canEdit !== false && this.isSourceReady();
+  }
+
+  private isSourceReady(): boolean {
     return (
+      !this.nativeSearchPending &&
       this.controllerReady &&
       !this.disposed &&
       !this.recoveryActive &&
@@ -657,10 +799,15 @@ class MarkdownWebviewController {
       });
   }
 
-  private synchronizeRichAction(): Promise<boolean> {
-    if (!this.isTabEditable()) return Promise.resolve(false);
+  private synchronizeRichAction(allowReadOnly = false): Promise<boolean> {
+    if (!(allowReadOnly ? this.isSourceReady() : this.isTabEditable()))
+      return Promise.resolve(false);
     return new Promise((resolve) => {
-      this.synchronizedActions.push({ text: this.view.state.doc.toString(), resolve });
+      this.synchronizedActions.push({
+        text: this.view.state.doc.toString(),
+        allowReadOnly,
+        resolve,
+      });
       this.finishSynchronizedActions();
     });
   }
@@ -675,7 +822,7 @@ class MarkdownWebviewController {
         this.view.state.doc.toString() !== action.text ||
         this.composition.isActive;
       const ready =
-        this.isTabEditable() &&
+        (action.allowReadOnly ? this.isSourceReady() : this.isTabEditable()) &&
         this.inFlightSequence === undefined &&
         !this.pendingEdits.hasPending &&
         !this.pendingEdits.hasInFlight;
@@ -686,27 +833,65 @@ class MarkdownWebviewController {
     }
   }
 
-  private runRichCommand(command: RichCommand): void {
-    if (!this.controllerReady || this.composition.isActive || this.view.composing) return;
-    if (command === "find" || command === "replace")
-      this.findReplace.open(this.view, command === "replace");
-    else if (command === "insert-table" && this.isTabEditable()) editTable(this.view, "insert");
-    else if (command === "insert-image") void insertImage(this.view, this.imageActions);
+  private runRichCommand(
+    command: RichCommand,
+    contextToken?: string,
+    documentVersion?: number,
+  ): void {
+    if (
+      this.bootstrap.canEdit === false &&
+      command !== "find" &&
+      command !== "replace" &&
+      command !== "image-source" &&
+      command !== "table-source"
+    ) {
+      this.showRichNotice(this.bootstrap.readOnlyReason ?? "この文書は読み取り専用です。");
+      return;
+    }
+    if (!this.controllerReady || this.composition.isActive || this.view.composing) {
+      if (command === "find" || command === "replace")
+        this.showRichNotice("入力の変換を確定してから標準検索を開いてください。");
+      return;
+    }
+    if (command === "find" || command === "replace") void this.openNativeSearch(command);
+    else if (command === "insert-table" && contextToken === undefined && this.isTabEditable())
+      editTable(this.view, "insert");
+    else if (command === "insert-image") {
+      if (
+        contextToken !== undefined &&
+        !this.contextActions.run("image-source", contextToken, documentVersion)
+      ) {
+        this.showRichNotice("対象の画像が変わったため取り消しました。画像を選び直してください。");
+        return;
+      }
+      void insertImage(this.view, this.imageActions);
+    } else if (!this.contextActions.run(command, contextToken, documentVersion))
+      this.showRichNotice(
+        "対象のセル・画像を選び直してください。文書や対象が変わった場合は操作を取り消します。",
+      );
+  }
+
+  private async openNativeSearch(mode: "find" | "replace"): Promise<void> {
+    const selection = this.view.state.selection.main;
+    if (!(await this.synchronizeRichAction(true)) || !this.view.state.selection.main.eq(selection))
+      return;
+    this.nativeSearchPending = true;
+    this.view.dispatch({ effects: this.editable.reconfigure(EditorView.editable.of(false)) });
+    this.vscode.postMessage({
+      kind: "native-search",
+      protocolVersion: PROTOCOL_VERSION,
+      documentUri: this.bootstrap.documentUri,
+      sessionId: this.bootstrap.sessionId,
+      controllerId: this.controllerId,
+      documentVersion: this.documentVersion,
+      mode,
+      anchor: selection.anchor,
+      head: selection.head,
+    });
   }
 
   private showRichNotice(note: string): void {
-    if (this.disposed) return;
-    if (this.richNotice === undefined) {
-      this.richNotice = document.createElement("div");
-      this.richNotice.className = "markdown-rich-notice";
-      this.richNotice.setAttribute("role", "status");
-      this.richNotice.addEventListener("click", () => {
-        this.richNotice?.remove();
-        this.richNotice = undefined;
-      });
-      document.body.append(this.richNotice);
-    }
-    this.richNotice.textContent = `${note}（クリックで閉じる）`;
+    this.richNotice.show(note);
   }
 
   private handleUpdate(update: ViewUpdate): void {
@@ -749,6 +934,18 @@ class MarkdownWebviewController {
   }
 
   private filterBarrierInput(transaction: Transaction): Transaction | readonly Transaction[] {
+    if (
+      this.bootstrap.canEdit === false &&
+      transaction.docChanged &&
+      transaction.annotation(remoteUpdate) !== true
+    )
+      return [];
+    if (
+      this.nativeSearchPending &&
+      transaction.docChanged &&
+      transaction.annotation(remoteUpdate) !== true
+    )
+      return [];
     if (
       !transaction.docChanged ||
       transaction.annotation(remoteUpdate) === true ||
@@ -830,6 +1027,19 @@ class MarkdownWebviewController {
       return;
     }
 
+    const compositionEdit = minimalTextReplacement(
+      this.pendingEdits.authority,
+      this.view.state.doc.toString(),
+    );
+    if (compositionEdit !== undefined && this.livePreview !== undefined) {
+      this.view.dispatch({
+        effects: settleStructuralComposition.of({
+          from: compositionEdit.from,
+          to: compositionEdit.from + compositionEdit.insert.length,
+        }),
+        userEvent: "input.structural.settle",
+      });
+    }
     const commit = this.composition.finish(this.view.state.doc.toString());
     this.compositionEndObserved = false;
     if (commit === undefined) {
@@ -978,7 +1188,11 @@ class MarkdownWebviewController {
         if (this.view.state.doc.toString() === this.pendingEdits.authority) {
           this.applyAuthoritativeSnapshot(message);
           this.recoveryActive = false;
-          this.view.dispatch({ effects: this.editable.reconfigure(EditorView.editable.of(true)) });
+          this.view.dispatch({
+            effects: this.editable.reconfigure(
+              EditorView.editable.of(this.bootstrap.canEdit !== false),
+            ),
+          });
           this.showStatus(`Resynchronized after ${message.reason}: ${message.note}`);
         } else {
           this.enterRecovery(
@@ -1045,7 +1259,9 @@ class MarkdownWebviewController {
 
     this.applyAuthoritativeSnapshot(message);
     this.recoveryActive = false;
-    this.view.dispatch({ effects: this.editable.reconfigure(EditorView.editable.of(true)) });
+    this.view.dispatch({
+      effects: this.editable.reconfigure(EditorView.editable.of(this.bootstrap.canEdit !== false)),
+    });
     this.statusElement.hidden = true;
     this.diagnostics.record("sync.controller.ready", {
       controllerId: this.controllerId,
@@ -1357,6 +1573,7 @@ class MarkdownWebviewController {
         ? {}
         : { selection: { anchor: historyInsertionCaret } }),
       annotations: remoteUpdate.of(true),
+      effects: restoreStructuralHistory.of(historyOperation !== undefined),
     });
     this.persistState();
   }
@@ -1648,6 +1865,8 @@ function isBootstrap(value: unknown): value is WebviewBootstrap {
     typeof value["documentUri"] === "string" &&
     typeof value["sessionId"] === "string" &&
     typeof value["text"] === "string" &&
+    (value["canEdit"] === undefined || typeof value["canEdit"] === "boolean") &&
+    (value["readOnlyReason"] === undefined || typeof value["readOnlyReason"] === "string") &&
     Number.isSafeInteger(value["documentVersion"]) &&
     typeof value["documentVersion"] === "number" &&
     value["documentVersion"] >= 0 &&

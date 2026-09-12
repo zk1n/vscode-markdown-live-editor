@@ -13,8 +13,18 @@
   "view.markdownOutline.contextualTitle": "Outline",
   "command.find": "Markdown Live Editor: Find",
   "command.replace": "Markdown Live Editor: Replace",
+  "command.returnToLive": "Markdown Live Editor: Return to Live Editor",
   "command.insert-table": "Markdown Live Editor: Insert Table",
-  "command.insert-image": "Markdown Live Editor: Insert Image",
+  "command.insert-image": "Insert or Replace Image File",
   "configuration.allowRemoteImages.markdownDescription": "Allow HTTPS images in a trusted workspace. Disabled by default. Reopen the editor after changing this setting; images contact their remote server. Enabling or disabling takes effect when the editor is reopened.",
-  "configuration.attachmentFolder.markdownDescription": "Single attachment folder name beside the saved Markdown document. New images are copied here without overwriting existing files. Undo retains attachments."
+  "configuration.attachmentFolder.markdownDescription": "Single attachment folder name beside the saved Markdown document. New images are copied here without overwriting existing files. Undo retains attachments.",
+  "command.table-row-add": "Markdown Live Editor: Add Table Row",
+  "command.table-row-delete": "Markdown Live Editor: Delete Table Row",
+  "command.table-column-add": "Markdown Live Editor: Add Table Column",
+  "command.table-column-delete": "Markdown Live Editor: Delete Table Column",
+  "command.table-align-left": "Markdown Live Editor: Align Table Left",
+  "command.table-align-center": "Markdown Live Editor: Align Table Center",
+  "command.table-align-right": "Markdown Live Editor: Align Table Right",
+  "command.table-source": "Markdown Live Editor: Toggle Table Source",
+  "command.image-source": "Markdown Live Editor: Edit Image Source"
 }
