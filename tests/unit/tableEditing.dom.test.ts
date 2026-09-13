@@ -69,6 +69,21 @@ function press(
 }
 
 describe("table editing in the main CodeMirror content DOM", () => {
+  it("crosses cell boundaries with arrows without selecting cells or adding rows", () => {
+    const source = "before\n\n| aa | bb |\n| --- | --- |\n| xx | yy |\n\nafter";
+    const view = createView(source, source.indexOf("aa") + 2);
+    press(view, "ArrowRight");
+    expect(view.state.selection.main.head).toBe(source.indexOf("bb"));
+    expect(view.state.selection.main.empty).toBe(true);
+    press(view, "ArrowLeft");
+    expect(view.state.selection.main.head).toBe(source.indexOf("aa") + 2);
+    press(view, "ArrowDown");
+    expect(view.state.selection.main.head).toBeGreaterThanOrEqual(source.indexOf("xx"));
+    expect(view.state.selection.main.head).toBeLessThanOrEqual(source.indexOf("xx") + 2);
+    press(view, "ArrowDown");
+    expect(view.state.selection.main.head).toBeGreaterThan(table(source).to);
+    expect(view.state.doc.toString()).toBe(source);
+  });
   it("protects multiple cell carets and composition input without changing table shape", () => {
     const source = "| h | v |\n| --- | --- |\n| a | b |";
     const view = createView(source);

@@ -9,9 +9,40 @@ import {
 import { Decoration, EditorView, ViewPlugin, keymap, type ViewUpdate } from "@codemirror/view";
 import { executeSearch, type SearchExecutor } from "./searchExecutor.js";
 import type { SearchMatch, SearchOptions, SearchResult } from "./searchPlan.js";
-import { revealSearchMatch, searchReveal } from "../livePreview/searchReveal.js";
+import {
+  revealSearchMatch,
+  searchReveal,
+  searchPresentation,
+  setSearchPresentation,
+} from "../livePreview/searchReveal.js";
 
 const setMatches = StateEffect.define<readonly SearchMatch[]>();
+export const searchMatches = StateField.define<readonly SearchMatch[]>({
+  create: () => [],
+  update(value, transaction) {
+    let next = transaction.docChanged ? [] : value;
+    for (const effect of transaction.effects) if (effect.is(setMatches)) next = effect.value;
+    return next;
+  },
+});
+const currentHighlight = StateField.define({
+  create: () => Decoration.none,
+  update(value, transaction) {
+    let next = transaction.docChanged ? Decoration.none : value;
+    for (const effect of transaction.effects)
+      if (effect.is(revealSearchMatch)) {
+        const match = effect.value;
+        next =
+          match && match.from < match.to
+            ? Decoration.set([
+                Decoration.mark({ class: "cm-source-search-current" }).range(match.from, match.to),
+              ])
+            : Decoration.none;
+      }
+    return next;
+  },
+  provide: (field) => EditorView.decorations.from(field),
+});
 const highlights = StateField.define({
   create: () => Decoration.none,
   update(value, transaction) {
@@ -87,9 +118,10 @@ export function createFloatingSearch(options: {
     private readonly query = document.createElement("input");
     private readonly replacement = document.createElement("input");
     private readonly replaceRow = document.createElement("div");
-    private readonly status = document.createElement("div");
+    private readonly status = document.createElement("span");
     private readonly toggles = new Map<keyof SearchOptions | "scope", HTMLButtonElement>();
     private readonly replaceButtons: HTMLButtonElement[] = [];
+    private readonly expand: HTMLButtonElement;
     private readonly text = document.documentElement.lang.startsWith("ja") ? labels.ja : labels.en;
     private abort: AbortController | undefined;
     private snapshot: Text | undefined;
@@ -115,7 +147,12 @@ export function createFloatingSearch(options: {
       this.replacement.dataset["searchInput"] = "replacement";
       const row = document.createElement("div");
       row.className = "cm-floating-search-row";
+      this.expand = this.button("", `${this.text.replace} / ${this.text.find}`, () => {
+        this.setExpanded(this.replaceRow.hidden !== false);
+      });
+      this.expand.className = "cm-search-expand";
       row.append(
+        this.expand,
         this.query,
         this.button("↑", this.text.previous, () => this.navigate(-1)),
         this.button("↓", this.text.next, () => this.navigate(1)),
@@ -134,11 +171,6 @@ export function createFloatingSearch(options: {
       this.replaceRow.append(this.replacement, one, all);
       const controls = document.createElement("div");
       controls.className = "cm-floating-search-options";
-      controls.append(
-        this.button("↔", this.text.replace, () => {
-          this.replaceRow.hidden = !this.replaceRow.hidden;
-        }),
-      );
       for (const [key, display, label] of [
         ["caseSensitive", "Aa", this.text.case],
         ["wholeWord", "ab", this.text.word],
@@ -158,7 +190,26 @@ export function createFloatingSearch(options: {
       }
       this.status.setAttribute("role", "status");
       this.status.setAttribute("aria-live", "polite");
-      this.dom.append(row, this.replaceRow, controls, this.status);
+      const queryBox = document.createElement("div");
+      queryBox.className = "cm-search-query-box";
+      this.query.replaceWith(queryBox);
+      queryBox.append(this.query);
+      for (const option of ["caseSensitive", "wholeWord", "regexp"] as const) {
+        const button = this.toggles.get(option);
+        if (button) queryBox.append(button);
+      }
+      const scopeButton = this.toggles.get("scope");
+      if (scopeButton) {
+        scopeButton.textContent = "";
+        scopeButton.className = "cm-search-scope";
+        row.insertBefore(scopeButton, row.lastChild);
+      }
+      row.insertBefore(this.status, queryBox.nextSibling);
+      this.dom.append(row, this.replaceRow);
+      this.dom.addEventListener("focusin", () => {
+        if (!this.view.state.field(searchPresentation))
+          this.view.dispatch({ effects: setSearchPresentation.of(true) });
+      });
       this.query.addEventListener("input", () => {
         this.refresh();
       });
@@ -198,6 +249,10 @@ export function createFloatingSearch(options: {
         }
       });
     }
+    private setExpanded(expanded: boolean): void {
+      this.replaceRow.hidden = !expanded;
+      this.expand.setAttribute("aria-expanded", String(expanded));
+    }
     private button(display: string, label: string, run: () => void): HTMLButtonElement {
       const button = document.createElement("button");
       button.type = "button";
@@ -209,6 +264,7 @@ export function createFloatingSearch(options: {
     }
     open(replace: boolean): void {
       if (!options.isReady() || this.view.composing || this.view.compositionStarted) return;
+      const alreadyOpened = this.opened;
       if (!this.opened) {
         this.saved = this.view.state.selection.main;
         this.scope = this.saved.empty ? undefined : { from: this.saved.from, to: this.saved.to };
@@ -220,7 +276,7 @@ export function createFloatingSearch(options: {
       }
       const scope = this.toggles.get("scope");
       if (scope) scope.disabled = this.scope === undefined;
-      this.replaceRow.hidden = !replace;
+      if (replace || !alreadyOpened) this.setExpanded(replace);
       this.query.focus();
       this.query.select();
       this.refresh();
@@ -238,7 +294,11 @@ export function createFloatingSearch(options: {
       this.dom.remove();
       this.view.dispatch({
         selection,
-        effects: [setMatches.of([]), revealSearchMatch.of(undefined)],
+        effects: [
+          setMatches.of([]),
+          revealSearchMatch.of(undefined),
+          setSearchPresentation.of(false),
+        ],
         scrollIntoView: owned,
       });
       if (owned) this.view.focus();
@@ -252,6 +312,7 @@ export function createFloatingSearch(options: {
       const generation = ++this.generation;
       const snapshot = this.view.state.doc;
       const selection = this.view.state.selection.main;
+      const previous = this.result.matches[this.current];
       this.snapshot = undefined;
       this.result = { matches: [] };
       this.current = -1;
@@ -293,9 +354,10 @@ export function createFloatingSearch(options: {
             this.select(index < 0 ? 0 : index);
           } else {
             this.current = result.matches.findIndex(
-              (match) => match.from === selection.from && match.to === selection.to,
+              (match) => match.from === previous?.from && match.to === previous.to,
             );
-            this.showStatus();
+            if (this.current >= 0) this.select(this.current);
+            else this.showStatus();
           }
         })
         .catch(() => {
@@ -330,9 +392,10 @@ export function createFloatingSearch(options: {
       if (!match || !options.isReady()) return;
       this.current = index;
       this.view.dispatch({
-        selection: EditorSelection.single(match.from, match.to),
-        effects: revealSearchMatch.of(match),
-        scrollIntoView: true,
+        effects: [
+          revealSearchMatch.of(match),
+          EditorView.scrollIntoView(match.from, { y: "nearest" }),
+        ],
       });
       this.showStatus();
     }
@@ -371,6 +434,16 @@ export function createFloatingSearch(options: {
     }
     update(update: ViewUpdate): void {
       if (!this.opened) return;
+      if (update.focusChanged && update.view.hasFocus) {
+        queueMicrotask(() => {
+          if (!this.destroyed && this.opened && this.view.hasFocus) {
+            this.saved = this.view.state.selection.main;
+            this.view.dispatch({ effects: setSearchPresentation.of(false) });
+          }
+        });
+      }
+      if (update.selectionSet && !update.docChanged && this.view.hasFocus)
+        this.saved = this.view.state.selection.main;
       if (update.docChanged) {
         this.saved = this.saved.map(update.changes);
         if (this.scope)
@@ -398,7 +471,10 @@ export function createFloatingSearch(options: {
     open: (view, replace) => instances.get(view)?.open(replace),
     extension: [
       searchReveal,
+      searchPresentation,
+      searchMatches,
       highlights,
+      currentHighlight,
       ViewPlugin.fromClass(FloatingSearch),
       keymap.of([
         {
@@ -419,7 +495,7 @@ export function createFloatingSearch(options: {
           position: "absolute",
           top: "4px",
           right: "8px",
-          width: "min(410px, calc(100% - 16px))",
+          width: "min(460px, calc(100% - 16px))",
           boxSizing: "border-box",
           padding: "6px",
           zIndex: "25",
@@ -434,9 +510,51 @@ export function createFloatingSearch(options: {
           gap: "4px",
           marginBottom: "4px",
           alignItems: "center",
-          flexWrap: "wrap",
+          flexWrap: "nowrap",
         },
         ".cm-floating-search [hidden]": { display: "none" },
+        ".cm-search-expand::before": {
+          content: "''",
+          display: "block",
+          width: "6px",
+          height: "6px",
+          borderRight: "1.5px solid currentColor",
+          borderBottom: "1.5px solid currentColor",
+          transform: "rotate(-45deg)",
+          margin: "0 3px",
+        },
+        ".cm-search-expand[aria-expanded=true]::before": { transform: "rotate(45deg)" },
+        ".cm-search-query-box": {
+          display: "flex",
+          flex: "1 1 160px",
+          minWidth: "65px",
+          alignItems: "center",
+          border: "1px solid var(--vscode-input-border, transparent)",
+          background: "var(--vscode-input-background, #80808022)",
+        },
+        ".cm-search-query-box:focus-within": { borderColor: "var(--vscode-focusBorder, #168bdd)" },
+        ".cm-search-query-box input": {
+          width: "40px",
+          minWidth: "20px",
+          border: "none",
+          outline: "none",
+          background: "transparent",
+        },
+        ".cm-floating-search [role=status]": {
+          whiteSpace: "nowrap",
+          minWidth: "30px",
+          fontSize: "11px",
+        },
+        ".cm-search-scope::before": {
+          content: "''",
+          display: "block",
+          width: "12px",
+          height: "10px",
+          borderLeft: "1px solid currentColor",
+          borderRight: "1px solid currentColor",
+          background:
+            "repeating-linear-gradient(to bottom, transparent 0 2px, currentColor 2px 3px, transparent 3px 4px)",
+        },
         ".cm-floating-search input": {
           flex: "1 1 100px",
           minWidth: "50px",
@@ -453,6 +571,8 @@ export function createFloatingSearch(options: {
           border: "1px solid transparent",
           borderRadius: "2px",
           padding: "3px 5px",
+          margin: "0",
+          flexShrink: "0",
           minHeight: "24px",
         },
         ".cm-floating-search button:hover, .cm-floating-search button[aria-pressed=true]": {
@@ -469,6 +589,11 @@ export function createFloatingSearch(options: {
         ".cm-source-search-match": {
           background: "var(--vscode-editor-findMatchHighlightBackground, #ea5c004d)",
           outline: "1px solid var(--vscode-editor-findMatchHighlightBorder, transparent)",
+        },
+        ".cm-source-search-current": {
+          background: "var(--vscode-editor-findMatchBackground, #9e6a03)",
+          outline:
+            "1px solid var(--vscode-editor-findMatchBorder, var(--vscode-contrastActiveBorder, transparent))",
         },
       }),
     ],

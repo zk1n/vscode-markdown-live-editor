@@ -38,6 +38,16 @@ const interactionProbeContext = await esbuild.context({
   define: await searchWorkerDefine(),
 });
 
+const u4LinkProbeContext = await esbuild.context({
+  entryPoints: ["tests/browser/u4-link-probe.ts"],
+  bundle: true,
+  outfile: "dist/u4-link-probe.js",
+  format: "iife",
+  platform: "browser",
+  target: "es2022",
+  define: await searchWorkerDefine(),
+});
+
 const extensionHostTestContext = await esbuild.context({
   entryPoints: {
     index: "tests/extension-host/index.ts",
@@ -62,6 +72,7 @@ if (watch) {
     extensionContext.watch(),
     webviewContext.watch(),
     interactionProbeContext.watch(),
+    u4LinkProbeContext.watch(),
     extensionHostTestContext.watch(),
   ]);
   console.log("Watching extension bundle...");
@@ -70,12 +81,14 @@ if (watch) {
     extensionContext.rebuild(),
     webviewContext.rebuild(),
     interactionProbeContext.rebuild(),
+    u4LinkProbeContext.rebuild(),
     extensionHostTestContext.rebuild(),
   ]);
   await Promise.all([
     extensionContext.dispose(),
     webviewContext.dispose(),
     interactionProbeContext.dispose(),
+    u4LinkProbeContext.dispose(),
     extensionHostTestContext.dispose(),
   ]);
 }

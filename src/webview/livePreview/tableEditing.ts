@@ -93,7 +93,7 @@ function build(state: EditorState): DecorationSet {
       if (sourceRows(state).includes(row.from)) continue;
       ranges.push(
         Decoration.line({
-          class: "cm-table-row",
+          class: `cm-table-row${rowIndex === table.rows.length - 1 ? " cm-table-last-row" : ""}`,
           attributes: { "data-table-from": String(table.from) },
         }).range(row.from),
       );
@@ -286,7 +286,8 @@ export function editTable(view: EditorView, action: TableAction, targetPosition?
 }
 
 function moveCell(view: EditorView, backwards: boolean, vertical = false): boolean {
-  if (view.state.selection.ranges.length !== 1) return false;
+  if (view.composing || view.compositionStarted || view.state.selection.ranges.length !== 1)
+    return false;
   const table = findTables(view.state.doc.toString()).find(
     (candidate) => tableCellAt(candidate, view.state.selection.main.head) !== undefined,
   );
@@ -318,6 +319,101 @@ function moveCell(view: EditorView, backwards: boolean, vertical = false): boole
   return true;
 }
 
+/** Arrow motion never adds source or selects whole cells. Geometry is measured only on a key. */
+function arrowCell(view: EditorView, forward: boolean, vertical: boolean): boolean {
+  if (view.composing || view.compositionStarted || view.state.selection.ranges.length !== 1)
+    return false;
+  const selection = view.state.selection.main;
+  if (!selection.empty) return false;
+  const table = findTables(view.state.doc.toString()).find((item) =>
+    tableCellAt(item, selection.head),
+  );
+  if (!table || isTableSourceActive(view.state, table)) return false;
+  const current = tableCellAt(table, selection.head);
+  if (!current) return false;
+  let anchor: number | undefined;
+  let goalColumn = selection.goalColumn;
+  if (!vertical) {
+    if (
+      forward ? selection.head < current.cell.contentTo : selection.head > current.cell.contentFrom
+    )
+      return false; // CM's grapheme/bidi motion inside the content.
+    const index = current.row * table.columns + current.column + (forward ? 1 : -1);
+    const target =
+      table.rows[Math.floor(index / table.columns)]?.cells[(index + table.columns) % table.columns];
+    anchor = target ? (forward ? target.contentFrom : target.contentTo) : undefined;
+  } else {
+    const coords = view.coordsAtPos(selection.head);
+    const edge = view.coordsAtPos(forward ? current.cell.contentTo : current.cell.contentFrom);
+    const contentLeft = view.contentDOM.getBoundingClientRect().left;
+    const x = goalColumn === undefined ? coords?.left : contentLeft + goalColumn;
+    if (goalColumn === undefined && x !== undefined) goalColumn = x - contentLeft;
+    if (coords && edge && (forward ? coords.bottom < edge.top : coords.top > edge.bottom)) {
+      const element = view.contentDOM.querySelector<HTMLElement>(
+        `[data-table-cell="${String(current.cell.contentFrom)}"]`,
+      );
+      const lineHeight = element
+        ? Number.parseFloat(getComputedStyle(element).lineHeight)
+        : view.defaultLineHeight;
+      const y = (coords.top + coords.bottom) / 2 + (forward ? 1 : -1) * lineHeight;
+      const moved = cellPositionAtCoords(view, x ?? coords.left, y);
+      if (
+        moved !== null &&
+        moved >= current.cell.contentFrom &&
+        moved <= current.cell.contentTo &&
+        moved !== selection.head
+      ) {
+        view.dispatch({
+          selection: EditorSelection.create([
+            EditorSelection.cursor(moved, 0, undefined, goalColumn),
+          ]),
+          scrollIntoView: true,
+          userEvent: "select",
+        });
+        return true;
+      }
+    }
+    const target = table.rows[current.row + (forward ? 1 : -1)]?.cells[current.column];
+    if (target) {
+      const targetCoords = view.coordsAtPos(forward ? target.contentFrom : target.contentTo);
+      const hit =
+        x !== undefined && targetCoords
+          ? cellPositionAtCoords(view, x, (targetCoords.top + targetCoords.bottom) / 2)
+          : null;
+      anchor = Math.max(target.contentFrom, Math.min(target.contentTo, hit ?? target.contentFrom));
+    }
+  }
+  // At a document boundary retain a visible end cell; adding a paragraph is an explicit Enter action.
+  anchor ??= forward
+    ? table.to < view.state.doc.length
+      ? table.to + 1
+      : table.rows.at(-1)?.cells.at(-1)?.contentTo
+    : table.from > 0
+      ? table.from - 1
+      : table.rows[0]?.cells[0]?.contentFrom;
+  if (anchor === undefined) return false;
+  view.dispatch({
+    selection: EditorSelection.create([
+      EditorSelection.cursor(anchor, 0, undefined, vertical ? goalColumn : undefined),
+    ]),
+    scrollIntoView: true,
+    userEvent: "select",
+  });
+  return true;
+}
+
+function cellPositionAtCoords(view: EditorView, x: number, y: number): number | null {
+  // CSS table cells wrap independently inside one CM source line. The standard
+  // CSSOM caret hit test follows those rendered text fragments before mapping
+  // back to the *same* EditorView source (no alternate editor/selection owner).
+  const owner = view.dom.ownerDocument;
+  const position =
+    typeof owner.caretPositionFromPoint === "function" ? owner.caretPositionFromPoint(x, y) : null;
+  if (position && view.contentDOM.contains(position.offsetNode))
+    return view.posAtDOM(position.offsetNode, position.offset);
+  return view.posAtCoords({ x, y });
+}
+
 function leaveTable(view: EditorView): boolean {
   if (view.state.selection.ranges.length !== 1) return false;
   const table = findTables(view.state.doc.toString()).find(
@@ -345,7 +441,8 @@ function leaveTable(view: EditorView): boolean {
 }
 
 function cellBoundary(view: EditorView, end: boolean, extend = false): boolean {
-  if (view.state.selection.ranges.length !== 1) return false;
+  if (view.composing || view.compositionStarted || view.state.selection.ranges.length !== 1)
+    return false;
   const table = findTables(view.state.doc.toString()).find(
     (candidate) => tableCellAt(candidate, view.state.selection.main.head) !== undefined,
   );
@@ -361,7 +458,14 @@ function cellBoundary(view: EditorView, end: boolean, extend = false): boolean {
 }
 
 function clickCell(event: MouseEvent, view: EditorView): boolean {
-  if (event.button !== 0 || event.shiftKey || view.composing || view.compositionStarted)
+  if (
+    event.button !== 0 ||
+    event.shiftKey ||
+    event.ctrlKey ||
+    event.metaKey ||
+    view.composing ||
+    view.compositionStarted
+  )
     return false;
   const element =
     event.target instanceof Element ? event.target.closest<HTMLElement>("[data-table-cell]") : null;
@@ -371,6 +475,9 @@ function clickCell(event: MouseEvent, view: EditorView): boolean {
   const cell = table === undefined ? undefined : tableCellAt(table, position)?.cell;
   if (cell === undefined) return false;
   const hit = view.posAtCoords({ x: event.clientX, y: event.clientY });
+  // Let CodeMirror start native dragging whenever its hit belongs to this cell.
+  // The selection filter clamps a collapsed padding hit, while ranges retain source semantics.
+  if (hit !== null && hit >= cell.from && hit <= cell.to) return false;
   const anchor = Math.max(cell.contentFrom, Math.min(cell.contentTo, hit ?? cell.contentFrom));
   event.preventDefault();
   view.dispatch({ selection: { anchor } });
@@ -422,7 +529,8 @@ function protectCells(transaction: Transaction): Transaction | readonly Transact
       ? transaction
       : [transaction, { changes: corrections, sequential: true }];
   }
-  if (state.selection.ranges.length !== 1) return transaction;
+  if (state.selection.ranges.length !== 1 || transaction.isUserEvent("input.type.compose"))
+    return transaction;
   if (
     transaction.selection === undefined ||
     transaction.effects.some(
@@ -496,11 +604,10 @@ function tableControls(isEditable: () => boolean): Extension {
         this.view.requestMeasure({
           key: this,
           read: (view) => {
-            const table = findTables(view.state.doc.toString()).find(
-              (table) =>
-                this.hovered === table.from ||
-                tableCellAt(table, view.state.selection.main.head) !== undefined,
-            );
+            const tables = findTables(view.state.doc.toString());
+            const table =
+              tables.find((table) => this.hovered === table.from) ??
+              tables.find((table) => tableCellAt(table, view.state.selection.main.head));
             if (table === undefined || isTableSourceActive(view.state, table)) return undefined;
             const rows = view.contentDOM.querySelectorAll<HTMLElement>(
               `[data-table-from="${String(table.from)}"]`,
@@ -532,10 +639,20 @@ function tableControls(isEditable: () => boolean): Extension {
             }
             if (bounds === undefined) return;
             const { first, last, root } = bounds;
-            this.column.style.left = `${String(Math.max(0, Math.min(first.right - root.left, root.width - 28)))}px`;
-            this.column.style.top = `${String(Math.max(0, first.top - root.top))}px`;
-            this.row.style.left = `${String(Math.max(0, Math.min(first.left - root.left + 8, root.width - 28)))}px`;
-            this.row.style.top = `${String(Math.max(0, Math.min(last.bottom - root.top - 1, root.height - 26)))}px`;
+            const scroll = this.view.scrollDOM.getBoundingClientRect();
+            const left = Math.max(first.left, scroll.left);
+            const right = Math.min(first.right, scroll.right - 22);
+            const top = Math.max(first.top, scroll.top);
+            const bottom = Math.min(last.bottom, scroll.bottom);
+            this.column.style.left = `${String(right - root.left)}px`;
+            this.column.style.top = `${String(top - root.top)}px`;
+            this.column.style.height = `${String(Math.max(0, bottom - top))}px`;
+            this.row.style.left = `${String(left - root.left)}px`;
+            this.row.style.width = `${String(Math.max(0, right - left))}px`;
+            this.row.style.top = `${String(last.bottom - root.top)}px`;
+            this.row.hidden = last.bottom > scroll.bottom || last.bottom < scroll.top;
+            this.column.hidden =
+              first.right + 22 > scroll.right || first.right < scroll.left || bottom <= top;
           },
         });
       };
@@ -566,6 +683,10 @@ export function tableEditing(isEditable: () => boolean): Extension {
     tableDecorations,
     Prec.highest(
       keymap.of([
+        { key: "ArrowLeft", run: (view) => arrowCell(view, false, false) },
+        { key: "ArrowRight", run: (view) => arrowCell(view, true, false) },
+        { key: "ArrowUp", run: (view) => arrowCell(view, false, true) },
+        { key: "ArrowDown", run: (view) => arrowCell(view, true, true) },
         { key: "Tab", stopPropagation: true, run: (view) => isEditable() && moveCell(view, false) },
         {
           key: "Shift-Tab",
@@ -586,16 +707,22 @@ export function tableEditing(isEditable: () => boolean): Extension {
       ".cm-table-add": {
         position: "absolute",
         zIndex: "5",
-        width: "26px",
-        height: "26px",
+        width: "22px",
+        height: "22px",
         padding: "0",
         cursor: "pointer",
-        color: "var(--vscode-button-foreground, white)",
-        background: "var(--vscode-button-background, #1675b9)",
-        border: "1px solid var(--vscode-focusBorder, #888)",
+        margin: "0",
+        color: "transparent",
+        background: "transparent",
+        border: "1px solid transparent",
         borderRadius: "3px",
       },
       ".cm-table-add[hidden]": { display: "none" },
+      ".cm-table-add:hover, .cm-table-add:focus-visible": {
+        color: "var(--vscode-editor-foreground, currentColor)",
+        background: "var(--vscode-toolbar-hoverBackground, #80808044)",
+        borderColor: "var(--vscode-contrastBorder, transparent)",
+      },
       ".cm-table-add:focus-visible": { outline: "2px solid var(--vscode-focusBorder)" },
       ".cm-line.cm-table-row": {
         display: "table",
@@ -606,6 +733,9 @@ export function tableEditing(isEditable: () => boolean): Extension {
         lineHeight: "1.6",
         padding: "0",
       },
+      // Always reserve the append band's space. It must never cover the
+      // next source line, and hovering must not change the height map.
+      ".cm-line.cm-table-last-row": { marginBottom: "22px" },
       ".cm-table-cell": {
         display: "table-cell",
         boxSizing: "border-box",

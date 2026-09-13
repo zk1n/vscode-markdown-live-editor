@@ -2,7 +2,7 @@ import { deleteCharBackward, deleteCharForward } from "@codemirror/commands";
 import { markdownLanguage } from "@codemirror/lang-markdown";
 import { EditorState, type Extension, type Range, StateField } from "@codemirror/state";
 import { Decoration, type DecorationSet, EditorView, WidgetType } from "@codemirror/view";
-import { searchReveal } from "./searchReveal.js";
+import { searchReveal, searchPresentation } from "./searchReveal.js";
 import { tableSourceSelectionRanges } from "./tableEditing.js";
 
 import {
@@ -301,15 +301,17 @@ function buildDecorations(state: EditorState): DecorationSet {
   const documentText = state.doc.toString();
   const match = state.field(searchReveal, false);
   const selections = [
-    ...state.selection.ranges.map(({ from, to }) => ({ from, to })),
+    ...(state.field(searchPresentation, false) ? [] : state.selection.ranges),
     ...tableSourceSelectionRanges(state),
-    ...(match === undefined ? [] : [match]),
   ];
   const unorderedMarkerDepths = findUnorderedMarkerDepths(documentText);
   const decorations = buildStructuralLineDecorations(state, selections);
 
   for (const syntax of findPresentationSyntax(documentText)) {
-    if (!isSyntaxActive(syntax, selections)) {
+    const hiddenMatch =
+      match !== undefined &&
+      syntax.markers.some((marker) => match.from < marker.to && match.to > marker.from);
+    if (!isSyntaxActive(syntax, selections) && !hiddenMatch) {
       for (const marker of syntax.markers) {
         if (marker.presentation === "list-unordered") {
           const depth =
@@ -442,6 +444,9 @@ function buildStructuralLineDecorations(
   selections: readonly { readonly from: number; readonly to: number }[],
 ): Range<Decoration>[] {
   const decorations: Range<Decoration>[] = [];
+  const match = state.field(searchReveal, false);
+  const matched = (from: number, to: number): boolean =>
+    match !== undefined && match.from < to && match.to > from;
   const fencedCodeLines = new Map(
     findFencedCodeBlockLines(state.doc.toString()).map((line) => [line.from, line]),
   );
@@ -464,6 +469,7 @@ function buildStructuralLineDecorations(
       if (
         fencedCode.markerFrom !== undefined &&
         fencedCode.markerFrom < line.to &&
+        !matched(fencedCode.markerFrom, line.to) &&
         !isLineSelectionActive(line.from, line.to, selections)
       ) {
         decorations.push(
@@ -486,6 +492,7 @@ function buildStructuralLineDecorations(
         decorations.push(Decoration.line({ class: lineClasses.join(" ") }).range(line.from));
         if (
           indentedCode.indentationTo > line.from &&
+          !matched(line.from, indentedCode.indentationTo) &&
           !isLineSelectionActive(line.from, line.to, selections)
         ) {
           decorations.push(
@@ -497,6 +504,7 @@ function buildStructuralLineDecorations(
         }
       } else if (
         isHorizontalRule(line.text) &&
+        !matched(line.from, line.to) &&
         !isLineSelectionActive(line.from, line.to, selections)
       ) {
         decorations.push(

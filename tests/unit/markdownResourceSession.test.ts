@@ -5,6 +5,10 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type * as VSCode from "vscode";
 import type { RichRequest } from "../../src/protocol/richMessages.js";
+import {
+  MarkdownEditorSessionRegistry,
+  type MarkdownEditorSessionHandle,
+} from "../../src/extension/editor/MarkdownEditorSessionRegistry.js";
 
 const fake = vi.hoisted(() => {
   class FakeUri {
@@ -29,6 +33,12 @@ const fake = vi.hoisted(() => {
       public readonly pattern: string,
     ) {}
   }
+  class FakeTabInputText {
+    public constructor(public readonly uri: FakeUri) {}
+  }
+  class FakeTabInputCustom {
+    public constructor(public readonly uri: FakeUri) {}
+  }
   const watchers: {
     change: (uri: FakeUri) => void;
     dispose: ReturnType<typeof vi.fn>;
@@ -41,7 +51,9 @@ const fake = vi.hoisted(() => {
     filePermissions: undefined as number | undefined,
     configuration: new Map<string, unknown>(),
     documents: new Map<string, unknown>(),
+    activeTab: undefined as { readonly input: FakeTabInputText | FakeTabInputCustom } | undefined,
     openExternal: vi.fn((): Promise<boolean> => Promise.resolve(true)),
+    open: vi.fn((): Promise<void> => Promise.resolve()),
     showTextDocument: vi.fn((): Promise<void> => Promise.resolve()),
     showOpenDialog: vi.fn((): Promise<readonly FakeUri[] | undefined> =>
       Promise.resolve(undefined),
@@ -52,6 +64,7 @@ const fake = vi.hoisted(() => {
   const parse = (value: string): FakeUri =>
     new FakeUri(new URL(value).protocol.slice(0, -1), "", value);
   const workspace = {
+    textDocuments: [],
     createFileSystemWatcher: () => {
       const listeners = new Set<(uri: FakeUri) => void>();
       const subscribe = (listener: (uri: FakeUri) => void): { dispose: () => boolean } => {
@@ -98,6 +111,7 @@ const fake = vi.hoisted(() => {
     watchers,
     FakeUri,
     FakeRange,
+    FakeTabInputCustom,
     file,
     state,
     workspace,
@@ -108,7 +122,22 @@ const fake = vi.hoisted(() => {
       Range: FakeRange,
       RelativePattern: FakeRelativePattern,
       workspace,
-      window: { showTextDocument: state.showTextDocument, showOpenDialog: state.showOpenDialog },
+      window: {
+        showTextDocument: state.showTextDocument,
+        showOpenDialog: state.showOpenDialog,
+        tabGroups: {
+          activeTabGroup: {
+            get activeTab(): { readonly input: FakeTabInputText | FakeTabInputCustom } | undefined {
+              return state.activeTab;
+            },
+          },
+          onDidChangeTabs: (): { dispose: () => void } => ({ dispose: (): void => undefined }),
+        },
+      },
+      TabInputText: FakeTabInputText,
+      TabInputCustom: FakeTabInputCustom,
+      Disposable: { from: (): { dispose: () => void } => ({ dispose: (): void => undefined }) },
+      commands: { executeCommand: state.open },
       env: { openExternal: state.openExternal },
     },
   };
@@ -117,6 +146,7 @@ const fake = vi.hoisted(() => {
 vi.mock("vscode", () => fake.vscode);
 
 import {
+  MarkdownLinkNavigator,
   MarkdownResourceSession,
   resourceRootsForDocument,
 } from "../../src/extension/editor/markdownResources.js";
@@ -134,8 +164,10 @@ beforeEach(() => {
   fake.state.filePermissions = undefined;
   fake.state.configuration.clear();
   fake.state.documents.clear();
+  fake.state.activeTab = undefined;
   fake.state.openExternal.mockClear();
   fake.state.openExternal.mockResolvedValue(true);
+  fake.state.open.mockClear();
   fake.state.showTextDocument.mockClear();
   fake.state.showOpenDialog.mockClear();
   fake.state.showOpenDialog.mockResolvedValue(undefined);
@@ -268,7 +300,7 @@ describe("MarkdownResourceSession", () => {
     expect(fixture.postMessage).not.toHaveBeenCalled();
   });
 
-  it("uses an already-open dirty document for previews and opens another document at its heading", async () => {
+  it("uses an already-open dirty document for previews and opens another document through its default editor", async () => {
     const fixture = await createFixture();
     const otherPath = path.join(fixture.root, "notes", "other.md");
     await writeFile(otherPath, "# Disk heading\nold");
@@ -290,9 +322,10 @@ describe("MarkdownResourceSession", () => {
     );
 
     await session.receive(request("link-open", "other.md#current-heading", 1, 4));
-    const call = fake.state.showTextDocument.mock.calls[0] as readonly unknown[] | undefined;
-    expect(call?.[0]).toBe(other);
-    const options = call?.[1] as
+    const call = fake.state.open.mock.calls[0] as readonly unknown[] | undefined;
+    expect(call?.[0]).toBe("vscode.open");
+    expect(call?.[1]).toBe(other.uri);
+    const options = call?.[2] as
       | {
           readonly preview: boolean;
           readonly selection: { readonly start: { readonly offset: number } };
@@ -314,6 +347,241 @@ describe("MarkdownResourceSession", () => {
       expect.objectContaining({ ok: true, offset: 7 }),
     );
     expect(fake.state.showTextDocument).not.toHaveBeenCalled();
+  });
+
+  it("opens a Japanese, space-containing non-Markdown target through the default editor", async () => {
+    const fixture = await createFixture();
+    const targetPath = path.join(fixture.root, "notes", "日本語 note.txt");
+    await writeFile(targetPath, "target");
+    const session = new MarkdownResourceSession(
+      fixture.document as unknown as VSCode.TextDocument,
+      fixture.webview,
+      (): boolean => true,
+    );
+
+    await session.receive(request("link-open", "%E6%97%A5%E6%9C%AC%E8%AA%9E%20note.txt", 1, 20));
+
+    expect(fake.state.open).toHaveBeenCalledWith("vscode.open", fake.file(targetPath), {
+      preview: true,
+    });
+    expect(lastMessage(fixture.postMessage)).toMatchObject({ ok: true });
+  });
+
+  it("delivers a pending heading only after the active target Live Editor reports ready", async () => {
+    const fixture = await createFixture();
+    const target = document(path.join(fixture.root, "notes", "other.md"), "# Heading", 3);
+    const postMessage = vi.fn((): boolean => true);
+    const handle: MarkdownEditorSessionHandle = {
+      documentUri: target.uri.toString(),
+      sessionId: "target-session",
+      reveal: (): void => undefined,
+      postMessage,
+    };
+    const registry = new MarkdownEditorSessionRegistry();
+    registry.register(handle, true);
+    registry.replaceController(handle.sessionId, "target-controller");
+    const navigator = new MarkdownLinkNavigator(registry);
+    fake.state.activeTab = {
+      input: new fake.FakeTabInputCustom(
+        target.uri as unknown as InstanceType<typeof fake.FakeUri>,
+      ),
+    };
+
+    await navigator.open(
+      target as unknown as VSCode.TextDocument,
+      new fake.FakeRange({ offset: 0 }, { offset: 9 }) as unknown as VSCode.Range,
+      {
+        targetOffset: 0,
+        highlightFrom: 0,
+        highlightTo: 9,
+      },
+    );
+    expect(postMessage).not.toHaveBeenCalled();
+
+    expect(
+      registry.reportEditorState(handle.sessionId, "target-controller", {
+        reportSequence: 1,
+        documentVersion: target.version,
+        selectionAnchor: 0,
+        selectionHead: 0,
+        line: 0,
+        column: 0,
+        focused: true,
+        composing: false,
+        recoveryActive: false,
+        barrierActive: false,
+        insertSpaces: true,
+        tabSize: 2,
+      }),
+    ).toBe(true);
+    const ready = registry.activeStatusSession;
+    expect(ready?.handle).toBe(handle);
+    if (ready === undefined) throw new Error("target session did not become ready");
+    navigator.deliverWhenReady(target as unknown as VSCode.TextDocument, ready.handle, true);
+
+    expect(postMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        kind: "navigate-to-heading",
+        documentUri: target.uri.toString(),
+        documentVersion: 3,
+        sessionId: "target-session",
+        targetOffset: 0,
+      }),
+    );
+  });
+
+  it("supersedes an older pending target while its vscode.open is still resolving", async () => {
+    const fixture = await createFixture();
+    const older = document(path.join(fixture.root, "notes", "older.md"), "# Older", 1);
+    const newer = document(path.join(fixture.root, "notes", "newer.md"), "# Newer", 1);
+    const olderPost = vi.fn((): boolean => true);
+    const newerPost = vi.fn((): boolean => true);
+    let releaseOlderOpen: (() => void) | undefined;
+    fake.state.open.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          releaseOlderOpen = resolve;
+        }),
+    );
+    const navigator = new MarkdownLinkNavigator();
+    const olderOpen = navigator.open(
+      older as unknown as VSCode.TextDocument,
+      new fake.FakeRange({ offset: 0 }, { offset: 7 }) as unknown as VSCode.Range,
+      { targetOffset: 0, highlightFrom: 0, highlightTo: 7 },
+    );
+    await Promise.resolve();
+    fake.state.activeTab = {
+      input: new fake.FakeTabInputCustom(newer.uri as unknown as InstanceType<typeof fake.FakeUri>),
+    };
+    await navigator.open(
+      newer as unknown as VSCode.TextDocument,
+      new fake.FakeRange({ offset: 0 }, { offset: 7 }) as unknown as VSCode.Range,
+      { targetOffset: 0, highlightFrom: 0, highlightTo: 7 },
+    );
+    releaseOlderOpen?.();
+    await olderOpen;
+
+    navigator.deliverWhenReady(
+      older as unknown as VSCode.TextDocument,
+      {
+        documentUri: older.uri.toString(),
+        sessionId: "older",
+        reveal: (): void => undefined,
+        postMessage: olderPost,
+      },
+      true,
+    );
+    navigator.deliverWhenReady(
+      newer as unknown as VSCode.TextDocument,
+      {
+        documentUri: newer.uri.toString(),
+        sessionId: "newer",
+        reveal: (): void => undefined,
+        postMessage: newerPost,
+      },
+      true,
+    );
+
+    expect(olderPost).not.toHaveBeenCalled();
+    expect(newerPost).toHaveBeenCalledTimes(1);
+  });
+
+  it("discards a version-drifted target and ignores a ready session for another document", async () => {
+    const fixture = await createFixture();
+    const target = document(path.join(fixture.root, "notes", "target.md"), "# Target", 5);
+    const other = document(path.join(fixture.root, "notes", "other.md"), "# Other", 5);
+    const targetPost = vi.fn((): boolean => true);
+    const otherPost = vi.fn((): boolean => true);
+    const navigator = new MarkdownLinkNavigator();
+    fake.state.activeTab = {
+      input: new fake.FakeTabInputCustom(
+        target.uri as unknown as InstanceType<typeof fake.FakeUri>,
+      ),
+    };
+    await navigator.open(
+      target as unknown as VSCode.TextDocument,
+      new fake.FakeRange({ offset: 0 }, { offset: 8 }) as unknown as VSCode.Range,
+      { targetOffset: 0, highlightFrom: 0, highlightTo: 8 },
+    );
+    navigator.deliverWhenReady(
+      target as unknown as VSCode.TextDocument,
+      {
+        documentUri: other.uri.toString(),
+        sessionId: "other",
+        reveal: (): void => undefined,
+        postMessage: otherPost,
+      },
+      true,
+    );
+    expect(otherPost).not.toHaveBeenCalled();
+
+    target.version = 6;
+    navigator.deliverWhenReady(
+      target as unknown as VSCode.TextDocument,
+      {
+        documentUri: target.uri.toString(),
+        sessionId: "target",
+        reveal: (): void => undefined,
+        postMessage: targetPost,
+      },
+      true,
+    );
+    target.version = 5;
+    navigator.deliverWhenReady(
+      target as unknown as VSCode.TextDocument,
+      {
+        documentUri: target.uri.toString(),
+        sessionId: "target",
+        reveal: (): void => undefined,
+        postMessage: targetPost,
+      },
+      true,
+    );
+
+    expect(targetPost).not.toHaveBeenCalled();
+  });
+
+  it("keeps a target navigation reservation when the source resource session disposes during vscode.open", async () => {
+    const fixture = await createFixture();
+    const targetPath = path.join(fixture.root, "notes", "target.md");
+    await writeFile(targetPath, "# Target");
+    const target = document(targetPath, "# Target", 2);
+    fake.state.documents.set(targetPath, target);
+    const targetPost = vi.fn((): boolean => true);
+    const navigator = new MarkdownLinkNavigator();
+    const source = new MarkdownResourceSession(
+      fixture.document as unknown as VSCode.TextDocument,
+      fixture.webview,
+      (): boolean => true,
+      false,
+      undefined,
+      navigator,
+    );
+    fake.state.activeTab = {
+      input: new fake.FakeTabInputCustom(
+        target.uri as unknown as InstanceType<typeof fake.FakeUri>,
+      ),
+    };
+    fake.state.open.mockImplementationOnce((): Promise<void> => {
+      source.dispose();
+      return Promise.resolve();
+    });
+
+    await source.receive(request("link-open", "target.md#target"));
+    navigator.deliverWhenReady(
+      target as unknown as VSCode.TextDocument,
+      {
+        documentUri: target.uri.toString(),
+        sessionId: "target",
+        reveal: (): void => undefined,
+        postMessage: targetPost,
+      },
+      true,
+    );
+
+    expect(targetPost).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: "navigate-to-heading", documentVersion: 2, targetOffset: 0 }),
+    );
   });
 
   it("requires trusted HTTPS opt-in for remote images and reports operation errors", async () => {
@@ -545,7 +813,19 @@ function document(
   version: number;
   getText: () => string;
   positionAt: (offset: number) => { offset: number };
+  offsetAt: (position: { readonly offset: number }) => number;
+  lineAt: (line: number) => {
+    readonly range: {
+      readonly start: { readonly offset: number };
+      readonly end: { readonly offset: number };
+    };
+  };
 } {
+  const lineStart = (line: number): number => {
+    let offset = 0;
+    for (let index = 0; index < line; index += 1) offset = text.indexOf("\n", offset) + 1;
+    return offset;
+  };
   return {
     uri: fake.file(fsPath) as unknown as VSCode.Uri,
     isUntitled: false,
@@ -553,6 +833,12 @@ function document(
     version,
     getText: (): string => text,
     positionAt: (offset: number): { offset: number } => ({ offset }),
+    offsetAt: (position: { readonly offset: number }): number => position.offset,
+    lineAt: (line: number) => {
+      const start = lineStart(line);
+      const end = text.indexOf("\n", start);
+      return { range: { start: { offset: start }, end: { offset: end < 0 ? text.length : end } } };
+    },
   };
 }
 

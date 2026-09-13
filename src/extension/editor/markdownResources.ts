@@ -3,7 +3,12 @@ import { mkdir, open, readFile, realpath, stat } from "node:fs/promises";
 import path from "node:path";
 import * as vscode from "vscode";
 import { findMarkdownLinks, headingOffset } from "../../core/markdown/markdownLinks.js";
+import { PROTOCOL_VERSION, type NavigateToHeadingMessage } from "../../protocol/messages.js";
 import { getDocumentWriteCapability } from "./documentCapabilities.js";
+import type {
+  MarkdownEditorSessionHandle,
+  MarkdownEditorSessionRegistry,
+} from "./MarkdownEditorSessionRegistry.js";
 import {
   MAX_IMAGE_BYTES,
   type RichRequest,
@@ -91,6 +96,134 @@ export function imageExtension(bytes: Uint8Array): string | undefined {
   return undefined;
 }
 
+interface PendingLinkNavigation {
+  readonly documentUri: string;
+  readonly documentVersion: number;
+  readonly targetOffset: number;
+  readonly highlightFrom: number;
+  readonly highlightTo: number;
+  lifecycle: vscode.Disposable;
+}
+
+/**
+ * Opens local links through VS Code's public default-editor resolver. A
+ * selection reaches a text editor through `vscode.open`; a Live Editor needs
+ * its existing, controller-bound presentation message after it becomes ready.
+ */
+export class MarkdownLinkNavigator {
+  private readonly pending = new Map<string, PendingLinkNavigation>();
+
+  public constructor(private readonly sessions?: MarkdownEditorSessionRegistry) {}
+
+  public async open(
+    document: vscode.TextDocument,
+    selection: vscode.Range,
+    navigation: Omit<PendingLinkNavigation, "documentUri" | "documentVersion" | "lifecycle">,
+  ): Promise<void> {
+    const pending: PendingLinkNavigation = {
+      documentUri: document.uri.toString(),
+      documentVersion: document.version,
+      ...navigation,
+      lifecycle: vscode.Disposable.from(),
+    };
+    // A newer explicit navigation supersedes any still-opening destination.
+    for (const previous of this.pending.values()) this.remove(previous);
+    this.pending.set(pending.documentUri, pending);
+    try {
+      await vscode.commands.executeCommand("vscode.open", document.uri, {
+        preview: true,
+        selection,
+      });
+    } catch (error) {
+      this.removeIfCurrent(pending);
+      throw error;
+    }
+    this.deliverToActiveOrDiscard(pending);
+  }
+
+  /** Called after a current controller reports its state, not merely registration. */
+  public deliverWhenReady(
+    document: vscode.TextDocument,
+    session: MarkdownEditorSessionHandle,
+    active: boolean,
+  ): void {
+    if (!active || session.documentUri !== document.uri.toString()) return;
+    const pending = this.pending.get(document.uri.toString());
+    if (pending === undefined) return;
+    if (pending.documentVersion !== document.version) {
+      this.remove(pending);
+      return;
+    }
+    if (!this.isCurrent(pending)) return;
+    this.deliver(session, pending);
+  }
+
+  private deliverToActiveOrDiscard(pending: PendingLinkNavigation): void {
+    if (!this.isCurrent(pending)) return;
+    const activeTab = vscode.window.tabGroups.activeTabGroup.activeTab;
+    const activeInput = activeTab?.input;
+    if (
+      activeInput instanceof vscode.TabInputText &&
+      activeInput.uri.toString() === pending.documentUri
+    ) {
+      this.remove(pending);
+      return;
+    }
+    if (
+      !(activeInput instanceof vscode.TabInputCustom) ||
+      activeInput.uri.toString() !== pending.documentUri ||
+      activeTab === undefined
+    ) {
+      this.remove(pending);
+      return;
+    }
+    pending.lifecycle = vscode.window.tabGroups.onDidChangeTabs((): void => {
+      if (!this.isCurrent(pending)) return;
+      if (vscode.window.tabGroups.activeTabGroup.activeTab !== activeTab) this.remove(pending);
+    });
+    const ready = this.sessions?.activeStatusSession;
+    const document = vscode.workspace.textDocuments.find(
+      (candidate) => candidate.uri.toString() === pending.documentUri,
+    );
+    if (
+      ready?.handle.documentUri === pending.documentUri &&
+      ready.editorState.documentVersion === pending.documentVersion &&
+      document?.version === pending.documentVersion
+    )
+      this.deliver(ready.handle, pending);
+  }
+
+  private deliver(session: MarkdownEditorSessionHandle, pending: PendingLinkNavigation): void {
+    if (!this.isCurrent(pending)) return;
+    this.remove(pending);
+    const message: NavigateToHeadingMessage = {
+      kind: "navigate-to-heading",
+      protocolVersion: PROTOCOL_VERSION,
+      documentUri: pending.documentUri,
+      documentVersion: pending.documentVersion,
+      sessionId: session.sessionId,
+      targetOffset: pending.targetOffset,
+      highlightFrom: pending.highlightFrom,
+      highlightTo: pending.highlightTo,
+    };
+    void Promise.resolve(session.postMessage(message)).catch((): void => undefined);
+  }
+
+  private isCurrent(pending: PendingLinkNavigation): boolean {
+    return this.pending.get(pending.documentUri) === pending;
+  }
+
+  private removeIfCurrent(pending: PendingLinkNavigation): void {
+    if (this.isCurrent(pending)) this.remove(pending);
+  }
+
+  private remove(pending: PendingLinkNavigation | undefined): void {
+    if (pending === undefined) return;
+    pending.lifecycle.dispose();
+    if (this.pending.get(pending.documentUri) === pending) this.pending.delete(pending.documentUri);
+  }
+}
+
 /** File writes occur only for an explicit picker/paste/drop request. */
 export async function storeAttachment(
   documentPath: string,
@@ -156,9 +289,12 @@ export class MarkdownResourceSession {
     private readonly isCurrent: (request: RichRequest) => boolean,
     private readonly allowRemoteImages = false,
     private readonly onImagesChanged?: () => void,
+    private readonly linkNavigator = new MarkdownLinkNavigator(),
   ) {}
   public dispose(): void {
     this.disposed = true;
+    // An authorized vscode.open can dispose its source preview tab. The
+    // destination navigation belongs to that open operation and stays valid.
     this.clearImageWatches();
   }
   private clearImageWatches(): void {
@@ -320,8 +456,17 @@ export class MarkdownResourceSession {
         url: `${this.webview.asWebviewUri(uri).toString()}?v=${encodeURIComponent(version)}`,
       };
     }
-    if (!/\.(?:md|markdown)$/iu.test(fileReal))
-      throw new Error("プレビュー・移動の対象はMarkdown文書です。");
+    const markdown = /\.(?:md|markdown)$/iu.test(fileReal);
+    if (!markdown) {
+      if (request.operation === "link-preview")
+        throw new Error("プレビューの対象はMarkdown文書です。");
+      this.requireVersion(request);
+      if (resolved.fragment !== "") throw new Error("見出し移動の対象はMarkdown文書です。");
+      await vscode.commands.executeCommand("vscode.open", vscode.Uri.file(resolved.path), {
+        preview: true,
+      });
+      return {};
+    }
     const info = await stat(fileReal);
     if (!info.isFile() || info.size > 2 * 1024 * 1024)
       throw new Error("リンク先文書が大きすぎます（上限2 MiB）。");
@@ -335,10 +480,14 @@ export class MarkdownResourceSession {
     this.requireVersion(request);
     if (targetDocument.uri.toString() === this.document.uri.toString())
       return { offset: text.slice(0, offset).replace(/\r\n/gu, "\n").length };
-    const position = targetDocument.positionAt(offset);
-    await vscode.window.showTextDocument(targetDocument, {
-      preview: true,
-      selection: new vscode.Range(position, position),
+    const heading = targetDocument.lineAt(targetDocument.positionAt(offset).line).range;
+    const selection = new vscode.Range(heading.start, heading.end);
+    const normalizedOffset = (rawOffset: number): number =>
+      text.slice(0, rawOffset).replace(/\r\n/gu, "\n").length;
+    await this.linkNavigator.open(targetDocument, selection, {
+      targetOffset: normalizedOffset(offset),
+      highlightFrom: normalizedOffset(targetDocument.offsetAt(heading.start)),
+      highlightTo: normalizedOffset(targetDocument.offsetAt(heading.end)),
     });
     return {};
   }

@@ -9,6 +9,12 @@ import { Decoration, EditorView, WidgetType, type DecorationSet } from "@codemir
 import { findMarkdownLinks, type MarkdownLink } from "../../core/markdown/markdownLinks.js";
 import { MAX_IMAGE_BYTES } from "../../protocol/richMessages.js";
 import type { RichClient } from "../richClient.js";
+import {
+  searchReveal,
+  searchPresentation,
+  revealSearchMatch,
+  setSearchPresentation,
+} from "./searchReveal.js";
 
 export interface ImageActions {
   readonly client: RichClient;
@@ -65,7 +71,12 @@ export function imageEditing(actions: ImageActions): Extension {
         !transaction.docChanged &&
         transaction.selection === undefined &&
         !transaction.isUserEvent("input.structural.settle") &&
-        !transaction.effects.some((effect) => effect.is(refreshImages))
+        !transaction.effects.some(
+          (effect) =>
+            effect.is(refreshImages) ||
+            effect.is(revealSearchMatch) ||
+            effect.is(setSearchPresentation),
+        )
       )
         return value;
       return build(transaction.state);
@@ -77,7 +88,12 @@ export function imageEditing(actions: ImageActions): Extension {
     for (const link of findMarkdownLinks(state.doc.toString())) {
       if (!link.image || state.doc.lineAt(link.from).number !== state.doc.lineAt(link.to).number)
         continue;
-      if (state.selection.ranges.some((range) => range.from <= link.to && range.to >= link.from))
+      const match = state.field(searchReveal, false);
+      if (
+        (match !== undefined && match.from < link.to && match.to > link.from) ||
+        (!state.field(searchPresentation, false) &&
+          state.selection.ranges.some((range) => range.from <= link.to && range.to >= link.from))
+      )
         continue;
       ranges.push(
         Decoration.replace({

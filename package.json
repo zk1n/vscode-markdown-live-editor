@@ -305,7 +305,8 @@
     "package:vsix:review": "npm run build && node ./scripts/package-vsix.mjs --review",
     "package:vsix:ux-review": "npm run build && node ./scripts/package-vsix.mjs --ux-review",
     "package:vsix:ux-stability-review": "npm run build && node ./scripts/package-vsix.mjs --ux-stability-review",
-    "package:vsix:ux-interaction-review": "npm run build && node ./scripts/package-vsix.mjs --ux-interaction-review"
+    "package:vsix:ux-interaction-review": "npm run build && node ./scripts/package-vsix.mjs --ux-interaction-review",
+    "package:vsix:ux-fourth-review": "npm run build && node ./scripts/package-vsix.mjs --ux-fourth-review"
   },
   "dependencies": {
     "@codemirror/commands": "6.11.0",

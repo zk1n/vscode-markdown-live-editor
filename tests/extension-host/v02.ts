@@ -15,6 +15,7 @@ import { PROTOCOL_VERSION, type HostToWebviewMessage } from "../../src/protocol/
 import { VscodeDocumentPort } from "../../src/extension/sync/VscodeDocumentPort.js";
 import { verifyV02Interaction } from "./v02Interaction.js";
 import { verifyV02ImageLifecycle } from "./v02ImageLifecycle.js";
+import { run as verifyU4Links } from "./u4Links.js";
 
 const VIEW_TYPE = "vscodeMarkdownLiveEditor.editor";
 const EXTENSION_ID = "zcw.vscode-markdown-live-editor";
@@ -31,6 +32,10 @@ export async function run(): Promise<void> {
   const extension = vscode.extensions.getExtension(EXTENSION_ID);
   assert.ok(extension, `Extension '${EXTENSION_ID}' was not found.`);
   await extension.activate();
+  if (process.env["U4_LINKS_ONLY"] === "1") {
+    await verifyU4Links();
+    return;
+  }
   if (process.env["V02_INTERACTION_ONLY"] === "1") {
     await verifyV02Interaction(workspaceFolder.uri);
     return;

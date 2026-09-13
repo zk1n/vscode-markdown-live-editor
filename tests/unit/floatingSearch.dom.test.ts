@@ -11,6 +11,7 @@ import {
 } from "../../src/webview/search/searchPlan.js";
 import { tableEditing } from "../../src/webview/livePreview/tableEditing.js";
 import { createLivePreviewEngine } from "../../src/webview/livePreview/LivePreviewEngine.js";
+import { searchReveal } from "../../src/webview/livePreview/searchReveal.js";
 
 const views: EditorView[] = [];
 afterEach(() => {
@@ -76,6 +77,27 @@ function key(element: HTMLElement, key: string, options: KeyboardEventInit = {})
 }
 
 describe("floating full-source search", () => {
+  it("keeps user selection and rendered Markdown while query generations expire", async () => {
+    const source = "# asdf\n\n**asdf** [label](hidden.md)\n\nend";
+    const { view, open } = create(source);
+    view.dispatch({ selection: { anchor: 2, head: 6 } });
+    const saved = view.state.selection;
+    open();
+    input("query", "asdf");
+    await settle();
+    expect(view.state.selection.eq(saved)).toBe(true);
+    expect(view.contentDOM.textContent).not.toContain("#");
+    expect(view.contentDOM.textContent).not.toContain("**");
+    input("query", "asdfg");
+    await settle();
+    expect(view.dom.querySelectorAll(".cm-source-search-match")).toHaveLength(0);
+    expect(view.dom.querySelectorAll(".cm-source-search-current")).toHaveLength(0);
+    expect(view.state.selection.eq(saved)).toBe(true);
+    click("置換");
+    expect(view.state.doc.toString()).toBe(source);
+    key(field("query"), "Escape");
+    expect(view.state.selection.eq(saved)).toBe(true);
+  });
   it("finds hidden source, replaces all in one undo operation and resumes input on Escape", async () => {
     const source = "| needle | b |\n| --- | --- |\n| [l](needle.md) | needle |\n\nafter needle";
     const { view, open } = create(source);
@@ -85,9 +107,8 @@ describe("floating full-source search", () => {
     expect(document.querySelector('[role="status"]')?.textContent).toBe("1 / 4");
     expect(view.dom.querySelectorAll(".cm-table-row")).toHaveLength(2);
     key(field("query"), "Enter");
-    expect(view.state.sliceDoc(view.state.selection.main.from, view.state.selection.main.to)).toBe(
-      "needle",
-    );
+    const match = view.state.field(searchReveal);
+    expect(match && view.state.sliceDoc(match.from, match.to)).toBe("needle");
     expect(view.contentDOM.textContent).toContain("[l](needle.md)");
     input("replacement", "new");
     await settle();

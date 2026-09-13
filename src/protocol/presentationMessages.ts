@@ -33,6 +33,7 @@ export interface EditorConfigurationMessage extends EditorIdentity {
   readonly insertSpaces: boolean;
   readonly tabSize: number;
   readonly indentSize?: number;
+  readonly minimapEnabled?: boolean;
 }
 
 /** A presentation-only cursor move requested by extension-owned status UI. */
@@ -183,6 +184,9 @@ export function decodeHostPresentationMessage(
       };
     }
     case "editor-configuration": {
+      const minimapEnabled = value["minimapEnabled"];
+      if (minimapEnabled !== undefined && typeof minimapEnabled !== "boolean")
+        return { ok: false, error: "minimapEnabled must be a boolean." };
       const revision = readNonNegativeInteger(value["revision"], "revision");
       const tabSize = readPositiveInteger(value["tabSize"], "tabSize");
       const indentSize = value["indentSize"];
@@ -204,6 +208,7 @@ export function decodeHostPresentationMessage(
           insertSpaces: value["insertSpaces"],
           tabSize: tabSize.value,
           ...(indentSize === undefined ? {} : { indentSize }),
+          ...(minimapEnabled === undefined ? {} : { minimapEnabled }),
         },
       };
     }
