@@ -117,7 +117,7 @@ describe("v0.2 through the actual webview controller", () => {
     );
     expect(resolveIndex).toBeGreaterThan(readyIndex);
   });
-  it("allows native Find for a readonly source while refusing text and attachment edits", async () => {
+  it("allows floating Find for a readonly source while refusing text and attachment edits", async () => {
     const view = await create("readonly", false);
     expect(view.state.readOnly).toBe(true);
     expect(view.contentDOM.contentEditable).toBe("false");
@@ -129,9 +129,8 @@ describe("v0.2 through the actual webview controller", () => {
     expect(request("image-pick")).toBeUndefined();
     command("find");
     await Promise.resolve();
-    expect(messages.find((message) => message.kind === "native-search")).toMatchObject({
-      mode: "find",
-    });
+    expect(view.dom.querySelector(".cm-floating-search")).not.toBeNull();
+    expect(messages.some((message) => message.kind === "native-search")).toBe(false);
   });
   it("uses heading Enter before the default Markdown keymap and saves exactly that source", async () => {
     const view = await create("# 見出し");
@@ -173,9 +172,8 @@ describe("v0.2 through the actual webview controller", () => {
     acknowledge(view.state.doc.toString(), 1, 2);
     expect(messages.filter((message) => message.kind === "save")).toHaveLength(1);
   });
-  it("hands the acknowledged whole document to native Replace and restores its selection", async () => {
-    const text =
-      "# heading\n\n| needle | b |\n| --- | --- |\n| needle | c |\n\n![needle](needle.png)\n[needle](needle.md)";
+  it("opens floating Replace without waiting for ACK or switching the editor", async () => {
+    const text = "needle [label](needle.md)";
     const view = await create(text);
     view.dispatch({
       changes: { from: text.length, insert: "!" },
@@ -183,23 +181,12 @@ describe("v0.2 through the actual webview controller", () => {
     });
     command("replace");
     await Promise.resolve();
+    expect(view.dom.querySelector(".cm-floating-search")).not.toBeNull();
     expect(messages.some((message) => message.kind === "native-search")).toBe(false);
     acknowledge(`${text}!`, 1, 2);
-    await Promise.resolve();
-    await Promise.resolve();
-    expect(messages.find((message) => message.kind === "native-search")).toMatchObject({
-      ...identity,
-      kind: "native-search",
-      mode: "replace",
-      documentVersion: 2,
-      anchor: text.length + 1,
-    });
-    expect(view.dom.querySelector("[data-find-replace]")).toBeNull();
-    view.dispatch({ changes: { from: 0, insert: "blocked" } });
-    expect(view.state.doc.toString()).toBe(`${text}!`);
-    receive({ ...identity, kind: "native-search-return", documentVersion: 2, anchor: 2, head: 7 });
-    expect(view.state.selection.main.from).toBe(2);
-    expect(view.state.selection.main.to).toBe(7);
+    const input = view.dom.querySelector<HTMLInputElement>("[data-search-input=query]");
+    input?.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    expect(view.hasFocus).toBe(true);
     press(view, "z", { ctrlKey: true });
     expect(messages.filter((message) => message.kind === "undo")).toHaveLength(1);
     acknowledge(text, 2, 3, "undo");
@@ -287,11 +274,8 @@ describe("v0.2 through the actual webview controller", () => {
     command("find");
     await Promise.resolve();
     await Promise.resolve();
-    expect(messages.find((message) => message.kind === "native-search")).toMatchObject({
-      mode: "find",
-      anchor: 9,
-      head: 9,
-    });
+    expect(view.dom.querySelector(".cm-floating-search")).not.toBeNull();
+    expect(messages.some((message) => message.kind === "native-search")).toBe(false);
     expect(view.state.doc.toString()).toBe(text);
     expect(edits()).toHaveLength(0);
   });

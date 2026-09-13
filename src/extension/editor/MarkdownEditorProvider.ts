@@ -184,13 +184,19 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
         if (currentControllerId === undefined || lifecycle.disposed) return;
         // Re-evaluate roots when the resource scope changes; do not retain
         // file-specific grants from an earlier workspace configuration.
-        webview.options = {
-          ...webview.options,
-          localResourceRoots: [
-            vscode.Uri.joinPath(this.options.webviewScriptPath, ".."),
-            ...resourceRootsForDocument(document),
-          ],
-        };
+        const roots = [
+          vscode.Uri.joinPath(this.options.webviewScriptPath, ".."),
+          ...resourceRootsForDocument(document),
+        ];
+        // Reassigning webview options can reload its controller. Image file
+        // invalidation needs a presentation refresh, not an unchanged grant.
+        const previous = webview.options.localResourceRoots;
+        if (
+          previous?.length !== roots.length ||
+          roots.some((root, index) => root.toString() !== previous[index]?.toString())
+        ) {
+          webview.options = { ...webview.options, localResourceRoots: roots };
+        }
         void webview.postMessage({
           kind: "image-resources-changed",
           protocolVersion: PROTOCOL_VERSION,
@@ -667,6 +673,7 @@ function createWebviewHtml(
     `script-src 'nonce-${nonce}'`,
     `font-src ${webview.cspSource}`,
     "connect-src 'none'",
+    "worker-src blob:",
   ].join("; ");
   const bootstrapJson = JSON.stringify(bootstrap).replaceAll("<", "\\u003c");
   const diagnosticPanel = recordsDiagnosticTrace(bootstrap.diagnosticMode)
@@ -674,7 +681,7 @@ function createWebviewHtml(
     : "";
 
   return `<!DOCTYPE html>
-<html lang="ja">
+<html lang="${escapeHtmlAttribute(vscode.env.language)}">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">

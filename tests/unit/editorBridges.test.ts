@@ -191,6 +191,8 @@ describe("untitled image Save As bridge", () => {
     continuation.ready("new");
     await initial.receive(request());
     expect(view.postMessage).not.toHaveBeenCalled();
+    continuation.report({ ...report, focused: false });
+    expect(view.postMessage).not.toHaveBeenCalled();
     continuation.report(report);
     continuation.report(report);
     expect(view.postMessage).toHaveBeenCalledTimes(1);

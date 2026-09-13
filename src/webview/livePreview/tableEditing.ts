@@ -1,5 +1,8 @@
 import {
   StateEffect,
+  EditorState as State,
+  Transaction,
+  type TransactionSpec,
   StateField,
   EditorSelection,
   Prec,
@@ -8,14 +11,24 @@ import {
   type Extension,
   type Range,
 } from "@codemirror/state";
-import { Decoration, EditorView, WidgetType, keymap, type DecorationSet } from "@codemirror/view";
+import {
+  Decoration,
+  EditorView,
+  WidgetType,
+  keymap,
+  drawSelection,
+  ViewPlugin,
+  type ViewUpdate,
+  type DecorationSet,
+} from "@codemirror/view";
 import {
   changeTableColumn,
   findTables,
   tableCellAt,
   type SourceTable,
-  type TableRow,
 } from "../../core/markdown/tableSource.js";
+
+import { searchReveal, revealSearchMatch } from "./searchReveal.js";
 
 // The cells are the main CodeMirror contentDOM: native selection, clipboard,
 // IME, Save and history all retain the same source and controller owner.
@@ -28,51 +41,28 @@ const rawTableField = StateField.define<number | undefined>({
     return next;
   },
 });
-// Direct pipe/delimiter editing reveals only that row and stays stable until
-// every selection leaves it. Returning to cell text cannot hide syntax mid-edit.
-const sourceRows = StateField.define<readonly number[]>({
-  create: (state) => activeSourceRows(state, []),
-  update: (value, transaction) =>
-    activeSourceRows(
-      transaction.state,
-      transaction.effects.some((effect) => effect.is(rawTable))
-        ? []
-        : value.map((position) => transaction.changes.mapPos(position)),
-    ),
-});
-function rowTouchesSelection(state: EditorState, row: TableRow): boolean {
-  return state.selection.ranges.some(
-    (selection) => selection.from <= row.to && selection.to >= row.from,
-  );
-}
-function activeSourceRows(state: EditorState, previous: readonly number[]): readonly number[] {
-  const rows: number[] = [];
-  for (const table of findTables(state.doc.toString())) {
-    for (const row of [...table.rows, table.delimiter]) {
-      if (!rowTouchesSelection(state, row)) continue;
-      if (
-        previous.includes(row.from) ||
-        row === table.delimiter ||
-        state.selection.ranges.some((selection) =>
-          row.pipes.some((pipe) =>
-            selection.empty
-              ? selection.head === pipe
-              : selection.from <= pipe && selection.to > pipe,
-          ),
-        )
+function sourceRows(state: EditorState): readonly number[] {
+  const match = state.field(searchReveal, false);
+  if (match === undefined) return [];
+  return findTables(state.doc.toString()).flatMap((table) =>
+    [...table.rows, table.delimiter]
+      .filter(
+        (row) =>
+          match.from <= row.to &&
+          match.to >= row.from &&
+          (row === table.delimiter ||
+            !row.cells.some((cell) => match.from >= cell.from && match.to <= cell.to)),
       )
-        rows.push(row.from);
-    }
-  }
-  return rows;
+      .map((row) => row.from),
+  );
 }
 /** The base renderer must reveal inline markers in a row being edited as source. */
 export function tableSourceSelectionRanges(
   state: EditorState,
 ): readonly { from: number; to: number }[] {
-  const rows = state.field(sourceRows, false);
+  const rows = sourceRows(state);
   const tableFrom = state.field(rawTableField, false);
-  if (rows === undefined || (rows.length === 0 && tableFrom === undefined)) return [];
+  if (rows.length === 0 && tableFrom === undefined) return [];
   return findTables(state.doc.toString()).flatMap((table) =>
     [...table.rows, table.delimiter].filter(
       (row) => tableFrom === table.from || rows.includes(row.from),
@@ -87,12 +77,12 @@ const tableDecorations = StateField.define<DecorationSet>({
       !transaction.docChanged &&
       transaction.selection === undefined &&
       !transaction.isUserEvent("input.structural.settle") &&
-      !transaction.effects.some((effect) => effect.is(rawTable))
+      !transaction.effects.some((effect) => effect.is(rawTable) || effect.is(revealSearchMatch))
     )
       return value;
     return build(transaction.state);
   },
-  provide: (field) => EditorView.decorations.from(field),
+  provide: (field) => EditorView.outerDecorations.from(field),
 });
 
 function build(state: EditorState): DecorationSet {
@@ -100,7 +90,7 @@ function build(state: EditorState): DecorationSet {
   for (const table of findTables(state.doc.toString())) {
     if (state.field(rawTableField) === table.from) continue;
     for (const [rowIndex, row] of table.rows.entries()) {
-      if (state.field(sourceRows).includes(row.from)) continue;
+      if (sourceRows(state).includes(row.from)) continue;
       ranges.push(
         Decoration.line({
           class: "cm-table-row",
@@ -122,9 +112,7 @@ function build(state: EditorState): DecorationSet {
       }
       for (const pipe of row.pipes) ranges.push(Decoration.replace({}).range(pipe, pipe + 1));
     }
-    const selected = state.selection.ranges.some(
-      (range) => range.from <= table.delimiter.to && range.to >= table.delimiter.from,
-    );
+    const selected = sourceRows(state).includes(table.delimiter.from);
     if (!selected) {
       ranges.push(Decoration.line({ class: "cm-table-delimiter" }).range(table.delimiter.from));
       ranges.push(Decoration.replace({}).range(table.delimiter.from, table.delimiter.to));
@@ -141,9 +129,7 @@ function isTableSourceActive(state: EditorState, table: SourceTable): boolean {
   if (state.field(rawTableField) === table.from) {
     return true;
   }
-  return [...table.rows, table.delimiter].some(
-    (row) => state.field(sourceRows).includes(row.from) && rowTouchesSelection(state, row),
-  );
+  return sourceRows(state).some((from) => from >= table.from && from <= table.to);
 }
 
 class EmptyCell extends WidgetType {
@@ -175,6 +161,20 @@ class EmptyCell extends WidgetType {
     });
     return cell;
   }
+  public override coordsAt(dom: HTMLElement): {
+    left: number;
+    right: number;
+    top: number;
+    bottom: number;
+  } {
+    const rect = dom.getBoundingClientRect();
+    return {
+      left: rect.left + 7,
+      right: rect.left + 7,
+      top: rect.top + 4,
+      bottom: rect.bottom - 4,
+    };
+  }
   public override ignoreEvent(): boolean {
     return true;
   }
@@ -182,6 +182,8 @@ class EmptyCell extends WidgetType {
 
 export type TableAction =
   | "insert"
+  | "row-append"
+  | "column-append"
   | "row-add"
   | "row-delete"
   | "column-add"
@@ -226,25 +228,36 @@ export function editTable(view: EditorView, action: TableAction, targetPosition?
   let changes: ChangeSpec = [];
   let targetRow = current.row;
   let targetColumn = current.column;
-  if (action === "row-add") {
-    const row = current.row === 0 ? table.delimiter : table.rows[current.row];
+  if (action === "row-add" || action === "row-append") {
+    const row =
+      action === "row-append"
+        ? table.rows.at(-1) === table.rows[0]
+          ? table.delimiter
+          : table.rows.at(-1)
+        : current.row === 0
+          ? table.delimiter
+          : table.rows[current.row];
     if (row === undefined) return false;
     changes = { from: row.to, insert: `\n|${"  |".repeat(table.columns)}` };
-    targetRow += 1;
+    targetRow = action === "row-append" ? table.rows.length : current.row + 1;
+    if (action === "row-append") targetColumn = 0;
   } else if (action === "row-delete") {
     if (current.row === 0) return false;
     const row = table.rows[current.row];
     if (row === undefined) return false;
     changes = { from: row.from - 1, to: row.to, insert: "" };
     targetRow = Math.min(current.row, table.rows.length - 2);
-  } else if (action === "column-add" || action === "column-delete") {
+  } else if (action === "column-add" || action === "column-delete" || action === "column-append") {
     changes = changeTableColumn(
       text,
       table,
-      current.column + (action === "column-add" ? 1 : 0),
+      action === "column-append"
+        ? table.columns
+        : current.column + (action === "column-add" ? 1 : 0),
       action === "column-delete",
     );
-    if (action === "column-add") targetColumn += 1;
+    if (action === "column-append") targetColumn = table.columns;
+    else if (action === "column-add") targetColumn += 1;
     else targetColumn = Math.min(current.column, table.columns - 2);
   } else {
     const cell = table.delimiter.cells[current.column];
@@ -291,7 +304,10 @@ function moveCell(view: EditorView, backwards: boolean, vertical = false): boole
   const rowIndex = Math.floor(index / table.columns);
   if (rowIndex >= table.rows.length) {
     const lastCell = table.rows.at(-1)?.cells[index % table.columns];
-    return lastCell !== undefined && editTable(view, "row-add", lastCell.contentFrom);
+    return (
+      lastCell !== undefined &&
+      editTable(view, vertical ? "row-add" : "row-append", lastCell.contentFrom)
+    );
   }
   const target = table.rows[rowIndex]?.cells[index % table.columns];
   if (target === undefined) return false;
@@ -344,15 +360,218 @@ function cellBoundary(view: EditorView, end: boolean, extend = false): boolean {
   return true;
 }
 
+function clickCell(event: MouseEvent, view: EditorView): boolean {
+  if (event.button !== 0 || event.shiftKey || view.composing || view.compositionStarted)
+    return false;
+  const element =
+    event.target instanceof Element ? event.target.closest<HTMLElement>("[data-table-cell]") : null;
+  if (element === null) return false;
+  const position = Number(element.dataset["tableCell"]);
+  const table = findTables(view.state.doc.toString()).find((table) => tableCellAt(table, position));
+  const cell = table === undefined ? undefined : tableCellAt(table, position)?.cell;
+  if (cell === undefined) return false;
+  const hit = view.posAtCoords({ x: event.clientX, y: event.clientY });
+  const anchor = Math.max(cell.contentFrom, Math.min(cell.contentTo, hit ?? cell.contentFrom));
+  event.preventDefault();
+  view.dispatch({ selection: { anchor } });
+  view.focus();
+  return true;
+}
+
+/** Only normal cell input is protected. Explicit source edits and search replacement stay literal. */
+function protectCells(transaction: Transaction): Transaction | readonly TransactionSpec[] {
+  const state = transaction.startState;
+  const tables = findTables(state.doc.toString());
+  if (transaction.docChanged) {
+    if (!(
+      transaction.annotation(Transaction.userEvent) === "input" ||
+      transaction.isUserEvent("input.type") ||
+      transaction.isUserEvent("input.paste") ||
+      transaction.isUserEvent("input.drop") ||
+      transaction.isUserEvent("delete")
+    ))
+      return transaction;
+    const cells = new Map<number, { from: number; to: number }>();
+    const safety = { unsafe: false };
+    transaction.changes.iterChanges((from, to) => {
+      for (const table of tables) {
+        if (to < table.from || from > table.to || isTableSourceActive(state, table)) continue;
+        const cell = table.rows
+          .flatMap((row) => row.cells)
+          .find((cell) => from >= cell.contentFrom && to <= cell.contentTo);
+        if (cell === undefined) safety.unsafe = true;
+        else cells.set(cell.from, cell);
+      }
+    });
+    if (safety.unsafe) return [];
+    const corrections: ChangeSpec[] = [];
+    for (const current of cells.values()) {
+      const from = transaction.changes.mapPos(current.from, -1);
+      const to = transaction.changes.mapPos(current.to, 1);
+      const value = transaction.newDoc.sliceString(from, to);
+      let escaped = false;
+      for (let index = 0; index < value.length; index++) {
+        const char = value[index];
+        if (char === "|" && !escaped) corrections.push({ from: from + index, insert: "\\" });
+        if (char === "\n")
+          corrections.push({ from: from + index, to: from + index + 1, insert: " " });
+        escaped = char === "\\" && !escaped;
+      }
+    }
+    return corrections.length === 0
+      ? transaction
+      : [transaction, { changes: corrections, sequential: true }];
+  }
+  if (state.selection.ranges.length !== 1) return transaction;
+  if (
+    transaction.selection === undefined ||
+    transaction.effects.some(
+      (effect) => effect.is(revealSearchMatch) && effect.value !== undefined,
+    ) ||
+    transaction.state.field(searchReveal, false) !== undefined ||
+    !transaction.newSelection.main.empty
+  )
+    return transaction;
+  const head = transaction.newSelection.main.head;
+  const target = tables.find((table) => table.from <= head && table.to >= head);
+  if (target === undefined || isTableSourceActive(state, target)) return transaction;
+  const cell =
+    tableCellAt(target, head)?.cell ??
+    target.rows
+      .flatMap((row) => row.cells)
+      .reduce((best, cell) =>
+        Math.abs(cell.contentFrom - head) < Math.abs(best.contentFrom - head) ? cell : best,
+      );
+  const anchor = Math.max(cell.contentFrom, Math.min(cell.contentTo, head));
+  return anchor === head ? transaction : [transaction, { selection: { anchor }, sequential: true }];
+}
+
+function tableControls(isEditable: () => boolean): Extension {
+  return ViewPlugin.fromClass(
+    class {
+      private readonly row = document.createElement("button");
+      private readonly column = document.createElement("button");
+      private hovered: number | undefined;
+      private target: number | undefined;
+      constructor(private readonly view: EditorView) {
+        for (const [button, action, label] of [
+          [this.row, "row-append", "末尾に行を追加"],
+          [this.column, "column-append", "末尾に列を追加"],
+        ] as const) {
+          button.type = "button";
+          button.className = "cm-table-add";
+          button.dataset["tableAdd"] = action;
+          button.textContent = "+";
+          button.title = label;
+          button.setAttribute("aria-label", label);
+          button.hidden = true;
+          button.addEventListener("mousedown", (event) => {
+            event.preventDefault();
+          });
+          button.addEventListener("click", () => {
+            if (isEditable() && this.target !== undefined) editTable(view, action, this.target);
+          });
+          view.dom.append(button);
+        }
+        view.dom.addEventListener("mouseover", this.over);
+        view.dom.addEventListener("mouseleave", this.leave);
+        view.scrollDOM.addEventListener("scroll", this.measure);
+        this.measure();
+      }
+      private readonly over = (event: MouseEvent): void => {
+        const element =
+          event.target instanceof Element
+            ? event.target.closest<HTMLElement>("[data-table-from]")
+            : null;
+        if (element !== null) this.hovered = Number(element.dataset["tableFrom"]);
+        else if (event.target !== this.row && event.target !== this.column)
+          this.hovered = undefined;
+        this.measure();
+      };
+      private readonly leave = (): void => {
+        this.hovered = undefined;
+        this.measure();
+      };
+      private readonly measure = (): void => {
+        this.view.requestMeasure({
+          key: this,
+          read: (view) => {
+            const table = findTables(view.state.doc.toString()).find(
+              (table) =>
+                this.hovered === table.from ||
+                tableCellAt(table, view.state.selection.main.head) !== undefined,
+            );
+            if (table === undefined || isTableSourceActive(view.state, table)) return undefined;
+            const rows = view.contentDOM.querySelectorAll<HTMLElement>(
+              `[data-table-from="${String(table.from)}"]`,
+            );
+            const first = rows[0]?.getBoundingClientRect();
+            const last = rows[rows.length - 1]?.getBoundingClientRect();
+            const root = view.dom.getBoundingClientRect();
+            if (
+              first === undefined ||
+              last === undefined ||
+              last.bottom < root.top ||
+              first.top > root.bottom
+            )
+              return undefined;
+            return {
+              first,
+              last,
+              root,
+              target: tableCellAt(table, view.state.selection.main.head)
+                ? view.state.selection.main.head
+                : table.rows[0]?.cells[0]?.contentFrom,
+            };
+          },
+          write: (bounds) => {
+            this.target = bounds?.target;
+            for (const button of [this.row, this.column]) {
+              button.hidden = bounds === undefined;
+              button.disabled = !isEditable();
+            }
+            if (bounds === undefined) return;
+            const { first, last, root } = bounds;
+            this.column.style.left = `${String(Math.max(0, Math.min(first.right - root.left, root.width - 28)))}px`;
+            this.column.style.top = `${String(Math.max(0, first.top - root.top))}px`;
+            this.row.style.left = `${String(Math.max(0, Math.min(first.left - root.left + 8, root.width - 28)))}px`;
+            this.row.style.top = `${String(Math.max(0, Math.min(last.bottom - root.top - 1, root.height - 26)))}px`;
+          },
+        });
+      };
+      update(update: ViewUpdate): void {
+        if (update.docChanged && this.hovered !== undefined)
+          this.hovered = update.changes.mapPos(this.hovered);
+        this.measure();
+      }
+      destroy(): void {
+        this.view.dom.removeEventListener("mouseover", this.over);
+        this.view.dom.removeEventListener("mouseleave", this.leave);
+        this.view.scrollDOM.removeEventListener("scroll", this.measure);
+        this.row.remove();
+        this.column.remove();
+      }
+    },
+  );
+}
+
 export function tableEditing(isEditable: () => boolean): Extension {
   return [
     rawTableField,
-    sourceRows,
+    searchReveal,
+    drawSelection(),
+    State.transactionFilter.of(protectCells),
+    tableControls(isEditable),
+    EditorView.domEventHandlers({ mousedown: clickCell }),
     tableDecorations,
     Prec.highest(
       keymap.of([
-        { key: "Tab", run: (view) => isEditable() && moveCell(view, false) },
-        { key: "Shift-Tab", run: (view) => isEditable() && moveCell(view, true) },
+        { key: "Tab", stopPropagation: true, run: (view) => isEditable() && moveCell(view, false) },
+        {
+          key: "Shift-Tab",
+          stopPropagation: true,
+          run: (view) => isEditable() && moveCell(view, true),
+        },
         { key: "Enter", run: (view) => isEditable() && moveCell(view, false, true) },
         { key: "Shift-Enter", run: (view) => isEditable() && moveCell(view, true, true) },
         { key: "Home", run: (view) => isEditable() && cellBoundary(view, false) },
@@ -364,6 +583,20 @@ export function tableEditing(isEditable: () => boolean): Extension {
       ]),
     ),
     EditorView.baseTheme({
+      ".cm-table-add": {
+        position: "absolute",
+        zIndex: "5",
+        width: "26px",
+        height: "26px",
+        padding: "0",
+        cursor: "pointer",
+        color: "var(--vscode-button-foreground, white)",
+        background: "var(--vscode-button-background, #1675b9)",
+        border: "1px solid var(--vscode-focusBorder, #888)",
+        borderRadius: "3px",
+      },
+      ".cm-table-add[hidden]": { display: "none" },
+      ".cm-table-add:focus-visible": { outline: "2px solid var(--vscode-focusBorder)" },
       ".cm-line.cm-table-row": {
         display: "table",
         tableLayout: "fixed",

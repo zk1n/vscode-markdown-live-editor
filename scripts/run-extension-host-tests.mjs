@@ -25,6 +25,7 @@ try {
     for (const viewType of [
       "vscodeMarkdownLiveEditor.v02WebviewFindWidgetProbe",
       "vscodeMarkdownLiveEditor.v02ImageLifecycle",
+      "vscodeMarkdownLiveEditor.v02Interaction",
     ])
       manifest.contributes.customEditors.push({
         viewType,
@@ -37,6 +38,7 @@ try {
     for (const file of [
       "dist/extension.cjs",
       "dist/webview.js",
+      "dist/interaction-probe.js",
       "package.nls.json",
       "package.nls.ja.json",
       "l10n/bundle.l10n.json",

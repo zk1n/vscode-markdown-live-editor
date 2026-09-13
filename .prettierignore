@@ -8,3 +8,4 @@ package-lock.json
 tests/fixtures/v02-review/*.md
 tests/fixtures/v02-ux-review/*.md
 tests/fixtures/v02-ux-stability-review/*.md
+tests/fixtures/v02-ux-interaction-review/*.md

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.0 UX interaction review — 2026-09-13
+
+- 表を表示したままセルを編集。Tab／Shift+Tab、最終セルのTab行追加、右端／下側の＋から入力を継続できる。
+- Ctrl+F／Hで右上に小さな検索・置換窓を開く。Markdown全文、case／word／regex／選択範囲、単一／全置換と既存Undo／Redoに対応。Escで本文入力へ戻る。
+- 画像貼り付け後に本文入力行を確保し、非同期処理中に移ったUIからfocusを奪わない。許可root内画像の重複grantによるWebview再生成を抑止。
+- 旧R2の独自UI採用判断待ちは解消。正式releaseとHuman IME／操作感の受入は未実施。
+
 ## 0.2.0 UX stability review — 2026-09-13
 
 - 表の行・列追加直後に新しいセルへcaretとfocusを移し、パイプの直接編集は対象行のsource表示を維持。

@@ -1,5 +1,7 @@
 import * as esbuild from "esbuild";
 
+import { searchWorkerDefine } from "./search-worker-build.mjs";
+
 const watch = process.argv.includes("--watch");
 
 const extensionContext = await esbuild.context({
@@ -15,6 +17,7 @@ const extensionContext = await esbuild.context({
 });
 
 const webviewContext = await esbuild.context({
+  define: await searchWorkerDefine(),
   entryPoints: ["src/webview/editor.ts"],
   bundle: true,
   outfile: "dist/webview.js",
@@ -23,6 +26,16 @@ const webviewContext = await esbuild.context({
   target: "es2022",
   sourcemap: true,
   logLevel: "info",
+});
+
+const interactionProbeContext = await esbuild.context({
+  entryPoints: ["tests/browser/interaction-probe.ts"],
+  bundle: true,
+  outfile: "dist/interaction-probe.js",
+  format: "iife",
+  platform: "browser",
+  target: "es2022",
+  define: await searchWorkerDefine(),
 });
 
 const extensionHostTestContext = await esbuild.context({
@@ -48,6 +61,7 @@ if (watch) {
   await Promise.all([
     extensionContext.watch(),
     webviewContext.watch(),
+    interactionProbeContext.watch(),
     extensionHostTestContext.watch(),
   ]);
   console.log("Watching extension bundle...");
@@ -55,11 +69,13 @@ if (watch) {
   await Promise.all([
     extensionContext.rebuild(),
     webviewContext.rebuild(),
+    interactionProbeContext.rebuild(),
     extensionHostTestContext.rebuild(),
   ]);
   await Promise.all([
     extensionContext.dispose(),
     webviewContext.dispose(),
+    interactionProbeContext.dispose(),
     extensionHostTestContext.dispose(),
   ]);
 }
