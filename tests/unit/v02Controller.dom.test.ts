@@ -93,6 +93,30 @@ afterEach(() => {
 });
 
 describe("v0.2 through the actual webview controller", () => {
+  it("refreshes image and table source positions after composition without recreating the image", async () => {
+    const text = "before\n\n| h | b |\n| --- | --- |\n| c | d |\n\n![alt](image.png)\n\nafter";
+    const view = await create(text);
+    const image = view.dom.querySelector(".cm-image-preview img");
+    view.contentDOM.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
+    view.dispatch({ changes: { from: 0, insert: "日本語" }, userEvent: "input.type.compose" });
+    view.contentDOM.dispatchEvent(new CompositionEvent("compositionend", { bubbles: true }));
+    await Promise.resolve();
+    expect(view.dom.querySelector(".cm-image-preview img")).toBe(image);
+    expect(view.dom.querySelector<HTMLElement>(".cm-image-preview")?.dataset["imageFrom"]).toBe(
+      String(text.indexOf("![alt]") + 3),
+    );
+    expect(view.dom.querySelector<HTMLElement>(".cm-table-cell")?.dataset["tableCell"]).toBe(
+      String(text.indexOf("h |") + 3),
+    );
+  });
+  it("waits for controller activation before resolving a cold image", async () => {
+    await create("before\n![cold](assets/cold.png)\n\nafter");
+    const readyIndex = messages.findIndex((message) => message.kind === "editor-ready");
+    const resolveIndex = messages.findIndex(
+      (message) => message.kind === "rich-request" && message.operation === "image-resolve",
+    );
+    expect(resolveIndex).toBeGreaterThan(readyIndex);
+  });
   it("allows native Find for a readonly source while refusing text and attachment edits", async () => {
     const view = await create("readonly", false);
     expect(view.state.readOnly).toBe(true);
@@ -251,7 +275,8 @@ describe("v0.2 through the actual webview controller", () => {
     const text = "# heading\n\n![alt](image.png)\n\nbody";
     const view = await create(text);
     view.dispatch({ selection: { anchor: text.length } });
-    const reveal = view.dom.querySelector<HTMLButtonElement>(".cm-image-preview button");
+    expect(view.dom.querySelector(".cm-image-preview button")).toBeNull();
+    const reveal = view.dom.querySelector<HTMLImageElement>(".cm-image-preview img");
     expect(reveal).not.toBeNull();
     reveal?.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true }));
     expect(view.state.sliceDoc(view.state.selection.main.from, view.state.selection.main.to)).toBe(

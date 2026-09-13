@@ -303,7 +303,8 @@
     "check": "npm run typecheck && npm run lint && npm run test && npm run build && npm run format:check",
     "package:vsix": "npm run build && node ./scripts/package-vsix.mjs",
     "package:vsix:review": "npm run build && node ./scripts/package-vsix.mjs --review",
-    "package:vsix:ux-review": "npm run build && node ./scripts/package-vsix.mjs --ux-review"
+    "package:vsix:ux-review": "npm run build && node ./scripts/package-vsix.mjs --ux-review",
+    "package:vsix:ux-stability-review": "npm run build && node ./scripts/package-vsix.mjs --ux-stability-review"
   },
   "dependencies": {
     "@codemirror/commands": "6.11.0",

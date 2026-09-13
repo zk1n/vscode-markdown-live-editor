@@ -57,7 +57,12 @@ import {
 import { RichNotice } from "./richNotice.js";
 import { compactSpacing } from "./livePreview/compactSpacing.js";
 import { editTable, tableEditing } from "./livePreview/tableEditing.js";
-import { imageEditing, insertImage, type ImageActions } from "./livePreview/imageEditing.js";
+import {
+  imageEditing,
+  insertImage,
+  refreshImages,
+  type ImageActions,
+} from "./livePreview/imageEditing.js";
 import { linkPreview } from "./livePreview/linkPreview.js";
 import type { NativeSearchRequest } from "../protocol/nativeSearchMessages.js";
 import { decodeSaveAsImage, type SaveAsImageRequest } from "../protocol/saveAsImageMessages.js";
@@ -226,13 +231,16 @@ class MarkdownWebviewController {
         controllerId,
         documentVersion: this.documentVersion,
       });
-    });
+    }, this.controllerReady);
     this.imageActions = {
       client: this.richClient,
       isEditable: () => this.isTabEditable(),
       synchronize: () => this.synchronizeRichAction(),
       notify: (note) => {
         this.showRichNotice(note);
+      },
+      onImageEvent: (event) => {
+        this.diagnostics.record(`image.${event}`, {});
       },
       prepareImport: (fields, anchor, head) => {
         if (!bootstrap.documentUri.startsWith("untitled:")) return false;
@@ -461,6 +469,14 @@ class MarkdownWebviewController {
           "保存後の画像データを読み取れませんでした。画像をもう一度貼り付けてください。",
         );
       }
+      return;
+    }
+    if (
+      isRichIdentity(value) &&
+      this.matchesController(value) &&
+      value["kind"] === "image-resources-changed"
+    ) {
+      this.view.dispatch({ effects: refreshImages.of(null) });
       return;
     }
     if (
@@ -1248,6 +1264,7 @@ class MarkdownWebviewController {
     this.compositionEndObserved = false;
     this.pendingEdits.reset(message.text);
     this.controllerReady = true;
+    this.richClient.activate();
 
     if (hasUnconfirmedLocalText && localText !== message.text) {
       this.enterRecovery(

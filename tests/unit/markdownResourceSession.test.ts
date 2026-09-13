@@ -23,6 +23,17 @@ const fake = vi.hoisted(() => {
       public readonly end: unknown,
     ) {}
   }
+  class FakeRelativePattern {
+    public constructor(
+      public readonly baseUri: FakeUri,
+      public readonly pattern: string,
+    ) {}
+  }
+  const watchers: {
+    change: (uri: FakeUri) => void;
+    dispose: ReturnType<typeof vi.fn>;
+    listeners: Set<(uri: FakeUri) => void>;
+  }[] = [];
   const state = {
     root: undefined as FakeUri | undefined,
     trusted: true,
@@ -41,6 +52,24 @@ const fake = vi.hoisted(() => {
   const parse = (value: string): FakeUri =>
     new FakeUri(new URL(value).protocol.slice(0, -1), "", value);
   const workspace = {
+    createFileSystemWatcher: () => {
+      const listeners = new Set<(uri: FakeUri) => void>();
+      const subscribe = (listener: (uri: FakeUri) => void): { dispose: () => boolean } => {
+        listeners.add(listener);
+        return { dispose: () => listeners.delete(listener) };
+      };
+      const watcher = {
+        change: (uri: FakeUri) => {
+          for (const listener of [...listeners]) listener(uri);
+        },
+        dispose: vi.fn(() => {
+          listeners.clear();
+        }),
+        listeners,
+      };
+      watchers.push(watcher);
+      return { ...watcher, onDidChange: subscribe, onDidCreate: subscribe, onDidDelete: subscribe };
+    },
     get isTrusted(): boolean {
       return state.trusted;
     },
@@ -66,6 +95,7 @@ const fake = vi.hoisted(() => {
     (uri: FakeUri): FakeUri => new FakeUri("webview", "", `webview:${uri.toString()}`),
   );
   return {
+    watchers,
     FakeUri,
     FakeRange,
     file,
@@ -76,6 +106,7 @@ const fake = vi.hoisted(() => {
       Uri: { file, parse },
       FilePermission: { Readonly: 1 },
       Range: FakeRange,
+      RelativePattern: FakeRelativePattern,
       workspace,
       window: { showTextDocument: state.showTextDocument, showOpenDialog: state.showOpenDialog },
       env: { openExternal: state.openExternal },
@@ -96,6 +127,7 @@ afterEach(async () => {
 });
 
 beforeEach(() => {
+  fake.watchers.length = 0;
   fake.state.root = undefined;
   fake.state.trusted = true;
   fake.state.fileSystemWritable = true;
@@ -113,6 +145,39 @@ beforeEach(() => {
 });
 
 describe("MarkdownResourceSession", () => {
+  it("invalidates actual image resources, prunes removed images and disposes all watchers", async () => {
+    const fixture = await createFixture("![a](image.png)\n![b](image.png)");
+    const imagePath = path.join(fixture.root, "notes", "image.png");
+    await writeFile(imagePath, Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]));
+    const invalidated = vi.fn();
+    const session = new MarkdownResourceSession(
+      fixture.document as unknown as VSCode.TextDocument,
+      fixture.webview,
+      () => true,
+      false,
+      invalidated,
+    );
+    await session.receive(request("image-resolve", "image.png"));
+    const originalUrl = lastMessage(fixture.postMessage)["url"];
+    const first = fake.watchers[0];
+    expect(first).toBeDefined();
+    first?.change(fake.file(path.join(fixture.root, "notes", "unrelated.md")));
+    expect(invalidated).not.toHaveBeenCalled();
+    first?.change(fake.file(imagePath));
+    expect(invalidated).toHaveBeenCalledTimes(1);
+    expect(first?.dispose).toHaveBeenCalledTimes(1);
+    await session.receive(request("image-resolve", "image.png"));
+    expect(lastMessage(fixture.postMessage)["url"]).not.toBe(originalUrl);
+    session.pruneImageWatches("![b](image.png)");
+    expect(fake.watchers[1]?.dispose).not.toHaveBeenCalled();
+    session.pruneImageWatches("no image");
+    expect(fake.watchers[1]?.dispose).toHaveBeenCalledTimes(1);
+    await session.receive(request("image-resolve", "image.png"));
+    session.dispose();
+    expect(fake.watchers[2]?.dispose).toHaveBeenCalledTimes(1);
+    first?.change(fake.file(imagePath));
+    expect(invalidated).toHaveBeenCalledTimes(1);
+  });
   it("reserves image import before the asynchronous capability check", async () => {
     const fixture = await createFixture();
     const session = new MarkdownResourceSession(

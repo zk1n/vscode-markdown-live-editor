@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 
 import { history, undo } from "@codemirror/commands";
-import { EditorState, Transaction } from "@codemirror/state";
+import { EditorSelection, EditorState, Transaction } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 import { afterEach, describe, expect, it } from "vitest";
 
@@ -31,7 +31,12 @@ function createView(text: string, selection = text.length): EditorView {
     state: EditorState.create({
       doc: text,
       selection: { anchor: selection },
-      extensions: [engine.extension, tableEditing((): boolean => true), history()],
+      extensions: [
+        engine.extension,
+        tableEditing((): boolean => true),
+        history(),
+        EditorState.allowMultipleSelections.of(true),
+      ],
     }),
     parent,
   });
@@ -64,11 +69,77 @@ function press(
 }
 
 describe("table editing in the main CodeMirror content DOM", () => {
+  it("keeps a one-column table recognized when removing a column without outer pipes", () => {
+    const source = "a | b\n--- | ---\n c | d\n\nafter";
+    const view = createView(source, source.indexOf("d\n"));
+    expect(editTable(view, "column-delete")).toBe(true);
+    expect(table(view.state.doc.toString()).columns).toBe(1);
+    expect(view.state.doc.toString()).toBe("|a |\n|--- |\n| c |\n\nafter");
+  });
+  it("keeps only the directly edited row raw, including inline syntax and padding", () => {
+    const source = "| **h** | b |\n| --- | --- |\n| `code` | [l](a.md) |\n\nafter";
+    const view = createView(source);
+    const row = table(source).rows[1];
+    if (row === undefined) throw new Error("Missing row");
+    view.dispatch({ selection: { anchor: row.from } });
+    view.dispatch({ selection: { anchor: row.cells[1]?.contentFrom ?? 0 } });
+    expect(view.contentDOM.textContent).toContain("| `code` | [l](a.md) |");
+    expect(view.contentDOM.querySelectorAll(".cm-table-row")).toHaveLength(1);
+    view.dispatch({ selection: { anchor: source.length } });
+    expect(view.contentDOM.querySelectorAll(".cm-table-row")).toHaveLength(2);
+    expect(view.state.doc.toString()).toBe(source);
+  });
+  it("retains secondary selections on cell commands and does not collapse them on Tab", () => {
+    const source = "| a | b |\n| --- | --- |\n| c | d |\n\nafter";
+    const view = createView(source, source.indexOf("c |"));
+    view.dispatch({
+      selection: EditorSelection.create([
+        EditorSelection.cursor(source.indexOf("c |")),
+        EditorSelection.cursor(source.length),
+      ]),
+    });
+    expect(editTable(view, "column-add")).toBe(true);
+    expect(view.state.selection.ranges).toHaveLength(2);
+    expect(view.state.selection.ranges[1]?.head).toBe(view.state.doc.length);
+    press(view, "Tab");
+    expect(view.state.selection.ranges).toHaveLength(2);
+  });
+  it.each(["row-delete", "column-delete"] as const)(
+    "%s selects a remaining adjacent cell",
+    (action) => {
+      const source = "| a | b |\n| --- | --- |\n| c | d |\n| e | f |\n\nafter";
+      const view = createView(source, source.indexOf("f |"));
+      expect(editTable(view, action)).toBe(true);
+      const next = table(view.state.doc.toString());
+      const target = next.rows.at(-1)?.cells.at(-1);
+      expect(view.state.selection.main.head).toBe(target?.contentFrom);
+      expect(view.hasFocus).toBe(true);
+    },
+  );
+  it.each(["row-add", "column-add"] as const)(
+    "%s puts immediate input inside the new target cell",
+    (action) => {
+      const source = "before\n| h1 | h2 |\n| --- | --- |\n| a | b |\n| c | d |\n\nafter";
+      const view = createView(source, source.indexOf("a |"));
+      expect(editTable(view, action)).toBe(true);
+      const target = table(view.state.doc.toString()).rows[action === "row-add" ? 2 : 1]?.cells[
+        action === "row-add" ? 0 : 1
+      ];
+      if (target === undefined) throw new Error("Missing inserted cell");
+      expect(view.state.selection.main.empty).toBe(true);
+      expect(view.state.selection.main.head).toBeGreaterThan(target.from);
+      expect(view.state.selection.main.head).toBeLessThan(target.to);
+      expect(view.hasFocus).toBe(true);
+      view.dispatch(view.state.replaceSelection("即入力"));
+      expect(view.state.doc.toString()).toContain("| 即入力 |");
+      expect(table(view.state.doc.toString()).columns).toBe(action === "row-add" ? 2 : 3);
+    },
+  );
   it("keeps cell-end insertion visible and scopes Home/End to the cell", () => {
     const source = "| h1 | h2 |\n| --- | --- |\n| 日本語 | second |\n\nafter";
     const cell = table(source).rows[1]?.cells[0];
     if (cell === undefined) throw new Error("Missing data cell");
-    const view = createView(source, cell.to);
+    const view = createView(source, cell.contentTo);
     expect(view.contentDOM.querySelector(".cm-table-cell")).not.toBeNull();
     press(view, "End");
     expect(view.state.selection.main.head).toBe(cell.contentTo);
@@ -133,7 +204,7 @@ describe("table editing in the main CodeMirror content DOM", () => {
 
     const pipe = source.indexOf("|");
     view.dispatch({ selection: { anchor: pipe, head: pipe + 1 } });
-    expect(view.contentDOM.querySelector(".cm-table-cell")).toBeNull();
+    expect(view.contentDOM.querySelectorAll(".cm-table-row")).toHaveLength(1);
     expect(view.contentDOM.textContent).toContain("| a | b |");
     expect(view.state.doc.toString()).toBe(source);
   });

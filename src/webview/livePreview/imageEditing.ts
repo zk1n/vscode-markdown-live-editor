@@ -1,4 +1,10 @@
-import { StateField, type EditorState, type Extension, type Range } from "@codemirror/state";
+import {
+  StateEffect,
+  StateField,
+  type EditorState,
+  type Extension,
+  type Range,
+} from "@codemirror/state";
 import { Decoration, EditorView, WidgetType, type DecorationSet } from "@codemirror/view";
 import { findMarkdownLinks, type MarkdownLink } from "../../core/markdown/markdownLinks.js";
 import { MAX_IMAGE_BYTES } from "../../protocol/richMessages.js";
@@ -9,12 +15,21 @@ export interface ImageActions {
   readonly isEditable: () => boolean;
   readonly synchronize: () => Promise<boolean>;
   readonly notify: (note: string) => void;
+  /** Count lifecycle events in diagnostics/tests; never includes source or bytes. */
+  readonly onImageEvent?: (event: string) => void;
   readonly prepareImport?: (
     fields: { readonly name?: string; readonly data?: string },
     anchor: number,
     head: number,
   ) => boolean;
 }
+
+export const refreshImages = StateEffect.define();
+const imageRevision = StateField.define<number>({
+  create: () => 0,
+  update: (value, transaction) =>
+    transaction.effects.some((effect) => effect.is(refreshImages)) ? value + 1 : value,
+});
 
 function supportsImageFile(file: File, declaredType = file.type): boolean {
   return declaredType.startsWith("image/") || /\.(?:png|jpe?g|gif|webp)$/iu.test(file.name);
@@ -46,7 +61,13 @@ export function imageEditing(actions: ImageActions): Extension {
     create: build,
     update(value, transaction) {
       if (transaction.isUserEvent("input.type.compose")) return value.map(transaction.changes);
-      if (!transaction.docChanged && transaction.selection === undefined) return value;
+      if (
+        !transaction.docChanged &&
+        transaction.selection === undefined &&
+        !transaction.isUserEvent("input.structural.settle") &&
+        !transaction.effects.some((effect) => effect.is(refreshImages))
+      )
+        return value;
       return build(transaction.state);
     },
     provide: (field) => EditorView.decorations.from(field),
@@ -60,7 +81,7 @@ export function imageEditing(actions: ImageActions): Extension {
         continue;
       ranges.push(
         Decoration.replace({
-          widget: new ImageWidget(link, actions.client),
+          widget: new ImageWidget(link, actions, state.field(imageRevision)),
           inclusive: false,
         }).range(link.from, link.to),
       );
@@ -68,6 +89,7 @@ export function imageEditing(actions: ImageActions): Extension {
     return Decoration.set(ranges, true);
   }
   return [
+    imageRevision,
     images,
     EditorView.domEventHandlers({
       paste(event, view) {
@@ -110,26 +132,45 @@ export function imageEditing(actions: ImageActions): Extension {
         border: "1px solid var(--vscode-editorWidget-border, transparent)",
       },
       ".cm-image-preview img": { maxWidth: "100%", maxHeight: "60vh", objectFit: "contain" },
-      ".cm-image-preview button, .cm-image-preview span": {
+      ".cm-image-preview span": {
         font: "12px var(--vscode-font-family)",
         color: "var(--vscode-descriptionForeground)",
         background: "transparent",
         border: "0",
       },
-      ".cm-image-preview button": { cursor: "pointer", textDecoration: "underline" },
     }),
   ];
+}
+
+interface ImageBinding {
+  link: MarkdownLink;
+  readonly client: RichClient;
+  readonly revision: number;
+  readonly abort: AbortController;
+  dispose(): void;
+}
+// DOM lifetime only: no URL cache shared by documents, sessions or duplicate images.
+const imageBindings = new WeakMap<HTMLElement, ImageBinding>();
+
+function setImagePosition(container: HTMLElement, link: MarkdownLink): void {
+  container.dataset["imageSource"] = "markdown";
+  container.dataset["imageFrom"] = String(link.from);
+  container.dataset["imageTo"] = String(link.to);
+  container.dataset["imageTarget"] = link.target;
 }
 
 class ImageWidget extends WidgetType {
   public constructor(
     private readonly link: MarkdownLink,
-    private readonly client: RichClient,
+    private readonly actions: ImageActions,
+    private readonly revision: number,
   ) {
     super();
   }
   public override eq(other: ImageWidget): boolean {
     return (
+      this.actions.client === other.actions.client &&
+      this.revision === other.revision &&
       this.link.from === other.link.from &&
       this.link.to === other.link.to &&
       this.link.target === other.link.target &&
@@ -137,60 +178,111 @@ class ImageWidget extends WidgetType {
       this.link.title === other.link.title
     );
   }
+  public override updateDOM(container: HTMLElement): boolean {
+    const binding = imageBindings.get(container);
+    if (
+      binding?.client !== this.actions.client ||
+      binding.revision !== this.revision ||
+      binding.link.target !== this.link.target ||
+      binding.link.label !== this.link.label ||
+      binding.link.title !== this.link.title
+    )
+      return false;
+    binding.link = this.link;
+    setImagePosition(container, this.link);
+    this.actions.onImageEvent?.("dom-reused");
+    return true;
+  }
   public override toDOM(view: EditorView): HTMLElement {
+    this.actions.onImageEvent?.("dom-created");
     const container = document.createElement("span");
     container.className = "cm-image-preview";
     // U1's context menu identifies the source range; selecting the preview
     // itself never changes Markdown merely to expose that context.
-    container.dataset["imageSource"] = "markdown";
-    container.dataset["imageFrom"] = String(this.link.from);
-    container.dataset["imageTo"] = String(this.link.to);
-    container.dataset["imageTarget"] = this.link.target;
+    setImagePosition(container, this.link);
     const image = document.createElement("img");
     image.alt = this.link.label;
     image.title = this.link.title ?? this.link.label;
     const status = document.createElement("span");
     status.textContent = "画像を読み込み中…";
-    const edit = document.createElement("button");
-    edit.type = "button";
-    edit.textContent = "画像のMarkdownを編集";
+    container.dataset["imageState"] = "loading";
+    this.actions.onImageEvent?.("loading");
+    const abort = new AbortController();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const binding: ImageBinding = {
+      link: this.link,
+      client: this.actions.client,
+      revision: this.revision,
+      abort,
+      dispose: () => {
+        abort.abort();
+        clearTimeout(timer);
+        image.removeEventListener("mousedown", reveal);
+        image.removeEventListener("load", loaded);
+        image.removeEventListener("error", failed);
+      },
+    };
+    imageBindings.set(container, binding);
     const reveal = (event: Event): void => {
       event.preventDefault();
       event.stopPropagation();
-      if (view.composing || view.compositionStarted) return;
+      if (view.composing || view.compositionStarted || abort.signal.aborted) return;
       // Removing the widget during a bubbling mousedown would make CM treat
       // the old target as ordinary content and collapse the new selection.
       view.dispatch({
-        selection: { anchor: this.link.from, head: this.link.to },
+        selection: { anchor: binding.link.from, head: binding.link.to },
         scrollIntoView: true,
       });
       queueMicrotask(() => {
         if (view.dom.isConnected) view.focus();
       });
     };
-    edit.addEventListener("mousedown", reveal);
     image.addEventListener("mousedown", reveal);
-    edit.addEventListener("click", reveal);
-    image.addEventListener("load", () => {
+    const loaded = (): void => {
+      if (abort.signal.aborted) return;
+      clearTimeout(timer);
       status.textContent = "";
+      container.dataset["imageState"] = "loaded";
+      this.actions.onImageEvent?.("load");
       view.requestMeasure();
-    });
-    image.addEventListener("error", () => {
-      status.textContent = "画像を読み込めません。Markdownのパスを確認してください。";
+    };
+    const fail = (note: string): void => {
+      if (abort.signal.aborted) return;
+      clearTimeout(timer);
+      status.textContent = note;
+      container.dataset["imageState"] = "error";
       image.hidden = true;
+      this.actions.onImageEvent?.("error");
       view.requestMeasure();
-    });
-    container.append(image, status, edit);
-    void this.client.request("image-resolve", { target: this.link.target }).then((response) => {
-      if (!container.isConnected) return;
-      if (response?.ok === true && response.url !== undefined) image.src = response.url;
-      else {
-        image.hidden = true;
-        status.textContent = response?.note ?? "画像を読み込めません。";
-      }
-      view.requestMeasure();
-    });
+    };
+    const failed = (): void => {
+      fail("画像を読み込めません。Markdownのパスを確認してください。");
+    };
+    image.addEventListener("load", loaded);
+    image.addEventListener("error", failed);
+    container.append(image, status);
+    this.actions.onImageEvent?.("resolve-requested");
+    void this.actions.client
+      .request("image-resolve", { target: this.link.target }, abort.signal)
+      .then((response) => {
+        if (abort.signal.aborted) return;
+        this.actions.onImageEvent?.("resolve-settled");
+        if (response?.ok === true && response.url !== undefined) {
+          timer = setTimeout(() => {
+            fail("画像の読み込みが時間内に完了しませんでした。Markdownのパスを確認してください。");
+            image.removeEventListener("load", loaded);
+            image.removeEventListener("error", failed);
+          }, 15000);
+          image.src = response.url;
+        } else
+          fail(response?.note ?? "画像を解決できませんでした。Markdownのパスを確認してください。");
+      });
     return container;
+  }
+  public override destroy(container: HTMLElement): void {
+    imageBindings.get(container)?.dispose();
+    imageBindings.delete(container);
+    this.actions.onImageEvent?.("dom-destroyed");
   }
   public override ignoreEvent(): boolean {
     return true;

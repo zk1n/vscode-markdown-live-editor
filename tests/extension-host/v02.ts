@@ -14,6 +14,8 @@ import {
 import { PROTOCOL_VERSION, type HostToWebviewMessage } from "../../src/protocol/messages.js";
 import { VscodeDocumentPort } from "../../src/extension/sync/VscodeDocumentPort.js";
 import { verifyV02NativeSearch } from "./v02NativeSearch.js";
+import { verifyV02WebviewFindWidgetProbe } from "./v02WebviewFindProbe.js";
+import { verifyV02ImageLifecycle } from "./v02ImageLifecycle.js";
 
 const VIEW_TYPE = "vscodeMarkdownLiveEditor.editor";
 const EXTENSION_ID = "zcw.vscode-markdown-live-editor";
@@ -32,6 +34,8 @@ export async function run(): Promise<void> {
   await extension.activate();
   await verifyV02TextDocumentBoundary(workspaceFolder.uri);
   await verifyV02NativeSearch(workspaceFolder.uri);
+  await verifyV02WebviewFindWidgetProbe(workspaceFolder.uri);
+  await verifyV02ImageLifecycle(workspaceFolder.uri);
 }
 
 export async function verifyV02TextDocumentBoundary(workspaceUri: vscode.Uri): Promise<void> {

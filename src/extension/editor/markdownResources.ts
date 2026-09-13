@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { mkdir, open, readFile, realpath, stat } from "node:fs/promises";
 import path from "node:path";
 import * as vscode from "vscode";
-import { headingOffset } from "../../core/markdown/markdownLinks.js";
+import { findMarkdownLinks, headingOffset } from "../../core/markdown/markdownLinks.js";
 import { getDocumentWriteCapability } from "./documentCapabilities.js";
 import {
   MAX_IMAGE_BYTES,
@@ -148,14 +148,70 @@ function requireTrustedWorkspace(): void {
 export class MarkdownResourceSession {
   private disposed = false;
   private importBusy = false;
+  private resourceRevision = 0;
+  private readonly imageWatches = new Map<string, vscode.Disposable & { targets: Set<string> }>();
   public constructor(
     private readonly document: vscode.TextDocument,
     private readonly webview: vscode.Webview,
     private readonly isCurrent: (request: RichRequest) => boolean,
     private readonly allowRemoteImages = false,
+    private readonly onImagesChanged?: () => void,
   ) {}
   public dispose(): void {
     this.disposed = true;
+    this.clearImageWatches();
+  }
+  private clearImageWatches(): void {
+    for (const watcher of this.imageWatches.values()) watcher.dispose();
+    this.imageWatches.clear();
+  }
+  public invalidateImages(): void {
+    if (this.disposed) return;
+    this.resourceRevision += 1;
+    this.clearImageWatches();
+    this.onImagesChanged?.();
+  }
+  public pruneImageWatches(source: string): void {
+    const targets = new Set(
+      findMarkdownLinks(source)
+        .filter((link) => link.image)
+        .map((link) => link.target),
+    );
+    for (const [filePath, watch] of this.imageWatches) {
+      for (const target of watch.targets) if (!targets.has(target)) watch.targets.delete(target);
+      if (watch.targets.size === 0) {
+        watch.dispose();
+        this.imageWatches.delete(filePath);
+      }
+    }
+  }
+  private watchImage(filePath: string, target: string): void {
+    if (this.onImagesChanged === undefined) return;
+    const existing = this.imageWatches.get(filePath);
+    if (existing !== undefined) {
+      existing.targets.add(target);
+      return;
+    }
+    // Watch only the resolved image's directory; filter exact paths before
+    // invalidation. No additional webview read permission is granted here.
+    const watcher = vscode.workspace.createFileSystemWatcher(
+      new vscode.RelativePattern(vscode.Uri.file(path.dirname(filePath)), "*"),
+    );
+    const changed = (uri: vscode.Uri): void => {
+      if (path.relative(filePath, uri.fsPath) === "") this.invalidateImages();
+    };
+    const events = [
+      watcher.onDidChange(changed),
+      watcher.onDidCreate(changed),
+      watcher.onDidDelete(changed),
+    ];
+    this.imageWatches.set(filePath, {
+      targets: new Set([target]),
+      dispose: () => {
+        for (const event of events) event.dispose();
+        watcher.dispose();
+      },
+    });
   }
   private active(request: RichRequest): boolean {
     return !this.disposed && this.isCurrent(request);
@@ -163,9 +219,13 @@ export class MarkdownResourceSession {
 
   public async receive(request: RichRequest): Promise<void> {
     if (!this.active(request)) return;
+    const revision = this.resourceRevision;
     try {
-      const result = await this.execute(request);
-      if (this.active(request))
+      const result = await this.execute(request, revision);
+      if (
+        this.active(request) &&
+        (request.operation !== "image-resolve" || revision === this.resourceRevision)
+      )
         await this.webview.postMessage({
           ...request,
           kind: "rich-response",
@@ -191,7 +251,7 @@ export class MarkdownResourceSession {
     }
   }
 
-  private async execute(request: RichRequest): Promise<Partial<RichResponse>> {
+  private async execute(request: RichRequest, revision: number): Promise<Partial<RichResponse>> {
     if (request.operation === "image-pick" || request.operation === "image-import")
       return this.importImage(request);
     const target = request.target ?? "";
@@ -234,11 +294,25 @@ export class MarkdownResourceSession {
       const info = await stat(fileReal);
       if (!info.isFile() || info.size > 32 * 1024 * 1024)
         throw new Error("画像を読み込めません（上限32 MiB）。");
+      if (!this.active(request) || revision !== this.resourceRevision)
+        throw new Error("画像の表示先が変更されました。");
       const uri = vscode.Uri.file(fileReal);
       const roots = this.webview.options.localResourceRoots ?? [];
       if (!roots.some((candidate) => candidate.toString() === uri.toString()))
         this.webview.options = { ...this.webview.options, localResourceRoots: [...roots, uri] };
-      return { url: this.webview.asWebviewUri(uri).toString() };
+      this.watchImage(resolved.path, target);
+      if (fileReal !== resolved.path) this.watchImage(fileReal, target);
+      const version = [
+        info.dev,
+        info.ino,
+        info.size,
+        info.mtimeMs,
+        info.ctimeMs,
+        this.resourceRevision,
+      ].join("-");
+      return {
+        url: `${this.webview.asWebviewUri(uri).toString()}?v=${encodeURIComponent(version)}`,
+      };
     }
     if (!/\.(?:md|markdown)$/iu.test(fileReal))
       throw new Error("プレビュー・移動の対象はMarkdown文書です。");
