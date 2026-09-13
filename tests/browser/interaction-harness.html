@@ -32,6 +32,36 @@
         white-space: pre-wrap;
         font: 12px monospace;
       }
+      body[data-theme="light"] {
+        background: #fff;
+        color: #333;
+        --vscode-editor-background: #fff;
+        --vscode-editor-foreground: #333;
+        --vscode-editorWidget-background: #f3f3f3;
+        --vscode-editorWidget-foreground: #333;
+        --vscode-input-background: #fff;
+        --vscode-input-foreground: #333;
+        --vscode-editorCursor-foreground: #000;
+        --vscode-editor-selectionBackground: #add6ff;
+        --vscode-editor-inactiveSelectionBackground: #e5ebf1;
+        --vscode-editor-findMatchBackground: #a8ac94;
+        --vscode-editor-findMatchHighlightBackground: #ea5c0055;
+      }
+      body[data-theme="contrast"] {
+        background: #000;
+        color: #fff;
+        --vscode-editor-background: #000;
+        --vscode-editor-foreground: #fff;
+        --vscode-editorWidget-background: #000;
+        --vscode-editorWidget-foreground: #fff;
+        --vscode-input-background: #000;
+        --vscode-input-foreground: #fff;
+        --vscode-editor-selectionBackground: #264f78;
+        --vscode-editor-inactiveSelectionBackground: #264f78;
+        --vscode-contrastBorder: #6fc3df;
+        --vscode-editor-findMatchBorder: #f38518;
+        --vscode-editor-findMatchHighlightBorder: #f38518;
+      }
       #editor-status {
         display: none;
       }
@@ -43,10 +73,20 @@
       ><button id="paste-image">画像Pasteイベント</button
       ><button id="defer-image">取込応答の保留切替</button
       ><button id="release-image">保留応答を返す</button><button id="outside">別UI</button>
+      <select id="theme" aria-label="テーマ">
+        <option value="dark">Dark</option>
+        <option value="light">Light</option>
+        <option value="contrast">High Contrast</option>
+      </select>
+      <button id="fourth-fixture">第四改修fixture</button
+      ><button id="minimap-toggle">ミニマップ切替</button> <button id="metrics">表示位置計測</button
+      ><button id="font">文字サイズ切替</button>
     </div>
+    <button id="large-fixture">大文書fixture</button>
     <main id="editor-root"></main>
     <div id="editor-status"></div>
     <div id="result" role="status">起動中</div>
+    <pre id="metrics-output" aria-label="表示計測"></pre>
     <pre id="source-output" aria-label="現在のMarkdown"></pre>
     <script src="/dist/interaction-harness.js"></script>
   </body>

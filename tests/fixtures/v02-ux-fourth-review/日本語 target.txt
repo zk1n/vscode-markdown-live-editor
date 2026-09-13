@@ -1,0 +1,1 @@
+この Text target は VS Code のファイル種別ごとの既定 editor を確認するためのファイルです。

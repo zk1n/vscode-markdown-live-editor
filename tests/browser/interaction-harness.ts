@@ -1,4 +1,5 @@
 import { EditorView } from "@codemirror/view";
+import { findTables, tableCellAt } from "../../src/core/markdown/tableSource.js";
 import { applyWireChanges } from "../../src/core/sync/documentText.js";
 import { PROTOCOL_VERSION, decodeWebviewToHostMessage } from "../../src/protocol/messages.js";
 
@@ -11,6 +12,9 @@ let future: string[] = [];
 let hold = false;
 let pending: (() => void) | undefined;
 let currentView: EditorView | undefined;
+let controller: unknown;
+let configurationRevision = 0;
+let minimapEnabled = true;
 function element(id: string): HTMLElement {
   const found = document.getElementById(id);
   if (!found) throw new Error("harness DOM missing");
@@ -40,6 +44,7 @@ document.body.append(bootstrap);
 Object.defineProperty(window, "acquireVsCodeApi", {
   value: () => ({
     postMessage: (message: Record<string, unknown>) => {
+      controller = message["controllerId"];
       queueMicrotask(() => {
         const base = {
           ...identity,
@@ -118,9 +123,110 @@ async function start(): Promise<void> {
   const editor = content && EditorView.findFromDOM(content);
   if (!editor) throw new Error("editor missing");
   const view = editor;
+  const inputFrames: number[] = [];
+  const scrollFrames: number[] = [];
+  view.contentDOM.addEventListener("beforeinput", () => {
+    const start = performance.now();
+    requestAnimationFrame(() => {
+      inputFrames.push(performance.now() - start);
+      if (inputFrames.length > 60) inputFrames.shift();
+    });
+  });
+  view.scrollDOM.addEventListener("scroll", () => {
+    const start = performance.now();
+    requestAnimationFrame(() => {
+      scrollFrames.push(performance.now() - start);
+      if (scrollFrames.length > 60) scrollFrames.shift();
+    });
+  });
   currentView = view;
   document.getElementById("reset")?.addEventListener("click", () => {
     window.location.reload();
+  });
+  document.getElementById("theme")?.addEventListener("change", (event) => {
+    if (event.target instanceof HTMLSelectElement)
+      document.body.dataset["theme"] = event.target.value;
+    view.requestMeasure();
+  });
+  document.getElementById("font")?.addEventListener("click", () => {
+    const current = document.body.style.getPropertyValue("--markdown-font-size");
+    document.body.style.setProperty("--markdown-font-size", current === "20px" ? "14px" : "20px");
+    view.requestMeasure();
+  });
+  document.getElementById("fourth-fixture")?.addEventListener("click", () => {
+    void fetch("/tests/fixtures/v02-ux-fourth-review/review-lf.md")
+      .then((response) => {
+        if (!response.ok) throw new Error("fixture unavailable");
+        return response.text();
+      })
+      .then((text) => {
+        view.dispatch({
+          changes: { from: 0, to: view.state.doc.length, insert: text },
+          selection: { anchor: 0 },
+          userEvent: "input.fixture",
+        });
+        view.scrollDOM.scrollTop = 0;
+      });
+  });
+  document.getElementById("minimap-toggle")?.addEventListener("click", () => {
+    minimapEnabled = !minimapEnabled;
+    receive({
+      ...identity,
+      kind: "editor-configuration",
+      controllerId: controller,
+      revision: ++configurationRevision,
+      tabSize: 4,
+      insertSpaces: true,
+      minimapEnabled,
+    });
+  });
+  document.getElementById("large-fixture")?.addEventListener("click", () => {
+    const text = view.state.doc.toString().repeat(20);
+    view.dispatch({
+      changes: { from: 0, to: view.state.doc.length, insert: text },
+      selection: { anchor: 0 },
+      userEvent: "input.fixture",
+    });
+    inputFrames.length = scrollFrames.length = 0;
+  });
+  document.getElementById("metrics")?.addEventListener("click", () => {
+    const activeTable = findTables(view.state.doc.toString()).find((table) =>
+      tableCellAt(table, view.state.selection.main.head),
+    );
+    const cell = activeTable && tableCellAt(activeTable, view.state.selection.main.head)?.cell;
+    view.requestMeasure({
+      read: () => ({
+        length: view.state.doc.length,
+        lines: view.state.doc.lines,
+        selection: {
+          anchor: view.state.selection.main.anchor,
+          head: view.state.selection.main.head,
+        },
+        scrollTop: view.scrollDOM.scrollTop,
+        contentHeight: view.contentHeight,
+        viewport: view.viewport,
+        blocks: view.viewportLineBlocks.map(({ from, to, top, bottom }) => ({
+          from,
+          to,
+          top,
+          bottom,
+        })),
+        minimap: document.querySelector<HTMLElement>(".cm-minimap")?.dataset,
+        inputFrames,
+        scrollFrames,
+        caret: view.coordsAtPos(view.state.selection.main.head),
+        cell: cell && {
+          from: cell.contentFrom,
+          to: cell.contentTo,
+          start: view.coordsAtPos(cell.contentFrom),
+          end: view.coordsAtPos(cell.contentTo),
+          down: view.moveVertically(view.state.selection.main, true).head,
+        },
+      }),
+      write: (measurement) => {
+        element("metrics-output").textContent = JSON.stringify(measurement);
+      },
+    });
   });
   document.getElementById("narrow")?.addEventListener("click", () => {
     const root = document.getElementById("editor-root");

@@ -29,11 +29,18 @@ import {
   type CustomCssSnapshot,
 } from "../styles/customCss.js";
 import { VscodeCustomCssHost } from "../styles/vscodeCustomCssHost.js";
-import type { MarkdownEditorSessionRegistry } from "./MarkdownEditorSessionRegistry.js";
+import type {
+  MarkdownEditorSessionHandle,
+  MarkdownEditorSessionRegistry,
+} from "./MarkdownEditorSessionRegistry.js";
 import { allocatePresentationRevision } from "./presentationRevision.js";
 import { DocumentIndentation } from "./DocumentIndentation.js";
 import { decodeRichRequest } from "../../protocol/richMessages.js";
-import { MarkdownResourceSession, resourceRootsForDocument } from "./markdownResources.js";
+import {
+  MarkdownLinkNavigator,
+  MarkdownResourceSession,
+  resourceRootsForDocument,
+} from "./markdownResources.js";
 import { type NativeSearchBridge } from "./NativeSearchBridge.js";
 import { decodeNativeSearchRequest } from "../../protocol/nativeSearchMessages.js";
 import { SaveAsImageBridge } from "./SaveAsImageBridge.js";
@@ -48,6 +55,7 @@ interface MarkdownEditorBootstrap {
   readonly nextSequence: number;
   readonly text: string;
   readonly canEdit?: boolean;
+  readonly minimapEnabled?: boolean;
   readonly readOnlyReason?: string;
 }
 
@@ -70,10 +78,13 @@ export interface MarkdownEditorProviderOptions {
 export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
   private readonly indentation = new DocumentIndentation();
   private readonly saveAsImages = new SaveAsImageBridge();
+  private readonly linkNavigator: MarkdownLinkNavigator;
   public constructor(
     private readonly coordinator: DocumentSyncCoordinator,
     private readonly options: MarkdownEditorProviderOptions,
-  ) {}
+  ) {
+    this.linkNavigator = new MarkdownLinkNavigator(options.sessionRegistry);
+  }
 
   public resolveCustomTextEditor(
     document: vscode.TextDocument,
@@ -205,6 +216,7 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
           controllerId: currentControllerId,
         });
       },
+      this.linkNavigator,
     );
     let styleRevision = 1;
     let latestStyle: CustomCssSnapshot | undefined;
@@ -229,6 +241,9 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
         controllerId: currentControllerId,
         revision: allocatePresentationRevision(),
         ...configuration,
+        minimapEnabled: vscode.workspace
+          .getConfiguration("editor", document.uri)
+          .get<boolean>("minimap.enabled", true),
       });
     };
     const sendLatestStyle = (): void => {
@@ -285,7 +300,8 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
       if (
         event.affectsConfiguration("editor.insertSpaces", document.uri) ||
         event.affectsConfiguration("editor.indentSize", document.uri) ||
-        event.affectsConfiguration("editor.tabSize", document.uri)
+        event.affectsConfiguration("editor.tabSize", document.uri) ||
+        event.affectsConfiguration("editor.minimap.enabled", document.uri)
       ) {
         sendConfiguration();
       }
@@ -354,6 +370,9 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
       nextSequence: 1,
       text: opened.snapshot.text,
       canEdit: capability.writable,
+      minimapEnabled: vscode.workspace
+        .getConfiguration("editor", document.uri)
+        .get<boolean>("minimap.enabled", true),
       ...(capability.reason === undefined ? {} : { readOnlyReason: capability.reason }),
     };
     receiveDisposable = webview.onDidReceiveMessage((value: unknown) => {
@@ -447,6 +466,10 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
           );
           nativeSearch?.report(report.value);
           saveAsImages.report(report.value);
+          const active = this.options.sessionRegistry?.activeStatusSession;
+          if (active?.handle.sessionId === sessionId) {
+            this.linkNavigator.deliverWhenReady(document, active.handle, webviewPanel.active);
+          }
         }
         return;
       }
@@ -532,6 +555,9 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
       sessionId,
       nextSequence: 1,
       text: toProtocolText(document.getText()),
+      minimapEnabled: vscode.workspace
+        .getConfiguration("editor", document.uri)
+        .get<boolean>("minimap.enabled", true),
     };
     let trackingDisposable = vscode.Disposable.from();
     let receiveDisposable = vscode.Disposable.from();
@@ -586,28 +612,26 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
     if (registry === undefined) {
       return vscode.Disposable.from();
     }
-    const registration = registry.register(
-      {
-        documentUri: document.uri.toString(),
-        sessionId,
-        reveal: (): void => {
-          webviewPanel.reveal(undefined, false);
-        },
-        postMessage: (message) => webviewPanel.webview.postMessage(message),
-        postPresentationMessage: (message) => {
-          if (message.kind === "editor-configuration") {
-            const delivered = this.indentation.set(document, {
-              insertSpaces: message.insertSpaces,
-              tabSize: message.tabSize,
-              indentSize: message.indentSize ?? message.tabSize,
-            });
-            if (delivered) return true;
-          }
-          return webviewPanel.webview.postMessage(message);
-        },
+    const handle: MarkdownEditorSessionHandle = {
+      documentUri: document.uri.toString(),
+      sessionId,
+      reveal: (): void => {
+        webviewPanel.reveal(undefined, false);
       },
-      webviewPanel.active,
-    );
+      postMessage: (message) => webviewPanel.webview.postMessage(message),
+      postPresentationMessage: (message) => {
+        if (message.kind === "editor-configuration") {
+          const delivered = this.indentation.set(document, {
+            insertSpaces: message.insertSpaces,
+            tabSize: message.tabSize,
+            indentSize: message.indentSize ?? message.tabSize,
+          });
+          if (delivered) return true;
+        }
+        return webviewPanel.webview.postMessage(message);
+      },
+    };
+    const registration = registry.register(handle, webviewPanel.active);
     const viewStateRegistration = webviewPanel.onDidChangeViewState((event): void => {
       registry.markViewState(sessionId, event.webviewPanel.active);
     });

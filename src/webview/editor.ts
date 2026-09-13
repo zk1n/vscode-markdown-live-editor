@@ -55,7 +55,7 @@ import {
   settleStructuralComposition,
 } from "./structuralSpacing.js";
 import { RichNotice } from "./richNotice.js";
-import { compactSpacing } from "./livePreview/compactSpacing.js";
+import { createCompactSpacing } from "./livePreview/compactSpacing.js";
 import { editTable, tableEditing } from "./livePreview/tableEditing.js";
 import {
   imageEditing,
@@ -104,6 +104,7 @@ interface WebviewBootstrap {
   readonly nextSequence: number;
   readonly text: string;
   readonly canEdit?: boolean;
+  readonly minimapEnabled?: boolean;
   readonly readOnlyReason?: string;
 }
 
@@ -138,18 +139,13 @@ declare function acquireVsCodeApi(): VsCodeApi;
 const remoteUpdate = Annotation.define<boolean>();
 const OUTLINE_HIGHLIGHT_DURATION_MS = 800;
 
-const vscodeEditorTheme = EditorView.theme({
-  ".cm-content": {
-    caretColor: "var(--vscode-editorCursor-foreground)",
-  },
-  "&.cm-focused .cm-cursor, .cm-dropCursor": {
-    borderLeftColor: "var(--vscode-editorCursor-foreground)",
-  },
-});
+import { selectionTheme as vscodeEditorTheme } from "./selectionTheme.js";
+import { minimap } from "./minimap.js";
 
 class MarkdownWebviewController {
   private readonly editable = new Compartment();
   private readonly tabSizeConfiguration = new Compartment();
+  private readonly minimapConfiguration = new Compartment();
   private readonly livePreview: LivePreviewEngine | undefined;
   private readonly diagnostics: DiagnosticTrace;
   private readonly view: EditorView;
@@ -311,12 +307,15 @@ class MarkdownWebviewController {
     if (this.livePreview !== undefined) {
       extensions.push(
         this.livePreview.extension,
-        compactSpacing,
+        createCompactSpacing(
+          () => this.composition.isActive || this.view.composing || this.view.compositionStarted,
+        ),
         structuralInputAssistance(() => this.composition.isActive || this.view.composing),
         headingInputAssistance(() => this.isTabEditable()),
         tableEditing(() => this.isTabEditable()),
         imageEditing(this.imageActions),
         this.floatingSearch.extension,
+        this.minimapConfiguration.of(bootstrap.minimapEnabled === false ? [] : minimap),
         linkPreview(this.imageActions),
         Prec.highest(
           keymap.of([
@@ -569,10 +568,13 @@ class MarkdownWebviewController {
         this.tabSize = message.tabSize;
         this.indentSize = message.indentSize ?? message.tabSize;
         this.view.dispatch({
-          effects: this.tabSizeConfiguration.reconfigure([
-            EditorState.tabSize.of(this.tabSize),
-            indentUnit.of(this.insertSpaces ? " ".repeat(this.indentSize) : "\t"),
-          ]),
+          effects: [
+            this.tabSizeConfiguration.reconfigure([
+              EditorState.tabSize.of(this.tabSize),
+              indentUnit.of(this.insertSpaces ? " ".repeat(this.indentSize) : "\t"),
+            ]),
+            this.minimapConfiguration.reconfigure(message.minimapEnabled === false ? [] : minimap),
+          ],
         });
         this.reportEditorState();
         return;
@@ -1877,6 +1879,7 @@ function isBootstrap(value: unknown): value is WebviewBootstrap {
     typeof value["sessionId"] === "string" &&
     typeof value["text"] === "string" &&
     (value["canEdit"] === undefined || typeof value["canEdit"] === "boolean") &&
+    (value["minimapEnabled"] === undefined || typeof value["minimapEnabled"] === "boolean") &&
     (value["readOnlyReason"] === undefined || typeof value["readOnlyReason"] === "string") &&
     Number.isSafeInteger(value["documentVersion"]) &&
     typeof value["documentVersion"] === "number" &&

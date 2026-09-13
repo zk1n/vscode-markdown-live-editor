@@ -9,7 +9,8 @@ const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "
 const fixtureWorkspace = path.join(projectRoot, "tests", "extension-host", "fixtures");
 const executablePath = process.env.VSCODE_TEST_EXECUTABLE;
 const version = process.env.VSCODE_TEST_VERSION ?? "1.120.0";
-const testBundle = process.argv.includes("--v02") ? "v02.cjs" : "index.cjs";
+const u4Links = process.argv.includes("--u4-links");
+const testBundle = process.argv.includes("--v02") || u4Links ? "v02.cjs" : "index.cjs";
 
 const userDataDirectory = await mkdtemp(
   path.join(os.tmpdir(), "markdown-live-editor-vscode-test-"),
@@ -17,7 +18,7 @@ const userDataDirectory = await mkdtemp(
 let developmentPath = projectRoot;
 
 try {
-  if (process.argv.includes("--v02")) {
+  if (process.argv.includes("--v02") || u4Links) {
     // VS Code requires a contribution as well as runtime provider registration.
     // Stage test IDs with the exact runtime payload, never into the shipped manifest.
     developmentPath = path.join(userDataDirectory, "test-extension");
@@ -26,6 +27,7 @@ try {
       "vscodeMarkdownLiveEditor.v02WebviewFindWidgetProbe",
       "vscodeMarkdownLiveEditor.v02ImageLifecycle",
       "vscodeMarkdownLiveEditor.v02Interaction",
+      "vscodeMarkdownLiveEditor.u4LinkProbe",
     ])
       manifest.contributes.customEditors.push({
         viewType,
@@ -35,10 +37,12 @@ try {
       });
     await mkdir(developmentPath, { recursive: true });
     await writeFile(path.join(developmentPath, "package.json"), JSON.stringify(manifest));
+    if (u4Links) process.env["U4_LINKS_ONLY"] = "1";
     for (const file of [
       "dist/extension.cjs",
       "dist/webview.js",
       "dist/interaction-probe.js",
+      "dist/u4-link-probe.js",
       "package.nls.json",
       "package.nls.ja.json",
       "l10n/bundle.l10n.json",
