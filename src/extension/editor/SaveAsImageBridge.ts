@@ -136,12 +136,20 @@ export class SaveAsImageBridge {
       !session.panel.active ||
       session.controller === undefined ||
       session.report?.documentVersion !== session.document.version ||
+      !session.report.focused ||
       session.report.composing ||
       session.report.recoveryActive ||
       session.report.barrierActive
     )
       return;
     this.pending = undefined;
+    if (
+      session.report.selectionAnchor !== pending.request.anchor ||
+      session.report.selectionHead !== pending.request.head
+    ) {
+      vscode.window.setStatusBarMessage("挿入位置が変わったため画像挿入を取り消しました。", 4000);
+      return;
+    }
     if (session.document.getText().replace(/\r\n/gu, "\n") !== pending.text) {
       vscode.window.setStatusBarMessage("本文が変わったため画像挿入を取り消しました。", 4000);
       return;

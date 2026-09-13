@@ -145,6 +145,33 @@ beforeEach(() => {
 });
 
 describe("MarkdownResourceSession", () => {
+  it("keeps webview options unchanged for an image covered by an existing allowed root", async () => {
+    const fixture = await createFixture("![a](image.png)");
+    await writeFile(
+      path.join(fixture.root, "notes", "image.png"),
+      Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]),
+    );
+    const options = { localResourceRoots: [fake.file(fixture.root)] };
+    Object.defineProperty(fixture.webview, "options", {
+      configurable: true,
+      get: () => options,
+      set: () => {
+        throw new Error("unnecessary Webview reload");
+      },
+    });
+    const session = new MarkdownResourceSession(
+      fixture.document as unknown as VSCode.TextDocument,
+      fixture.webview,
+      () => true,
+    );
+    await session.receive(request("image-resolve", "image.png"));
+    expect(lastMessage(fixture.postMessage)).toMatchObject({ ok: true });
+    session.invalidateImages();
+    await session.receive(request("image-resolve", "image.png"));
+    expect(lastMessage(fixture.postMessage)).toMatchObject({ ok: true });
+    expect(fixture.webview.options).toBe(options);
+    session.dispose();
+  });
   it("invalidates actual image resources, prunes removed images and disposes all watchers", async () => {
     const fixture = await createFixture("![a](image.png)\n![b](image.png)");
     const imagePath = path.join(fixture.root, "notes", "image.png");

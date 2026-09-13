@@ -103,6 +103,7 @@ export async function runV02Stability(
       const row = table?.rows[1];
       check(row !== undefined, "data row missing");
       const unchanged = view.state.doc.toString();
+      check(editTable(view, "source", row.from), "explicit source mode failed");
       for (let position = row.from; position <= row.to; position += 1) {
         view.dispatch({ selection: { anchor: position } });
         await measure(view);

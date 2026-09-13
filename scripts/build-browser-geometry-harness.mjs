@@ -1,4 +1,5 @@
 import * as esbuild from "esbuild";
+import { searchWorkerDefine } from "./search-worker-build.mjs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 
@@ -6,6 +7,7 @@ const scriptDirectory = path.dirname(fileURLToPath(import.meta.url));
 const projectRoot = path.resolve(scriptDirectory, "..");
 
 await esbuild.build({
+  define: await searchWorkerDefine(),
   absWorkingDir: projectRoot,
   entryPoints: [path.join(projectRoot, "tests/browser/geometry-harness.ts")],
   bundle: true,

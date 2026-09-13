@@ -13,8 +13,7 @@ import {
 } from "../../src/core/sync/documentSyncCoordinator.js";
 import { PROTOCOL_VERSION, type HostToWebviewMessage } from "../../src/protocol/messages.js";
 import { VscodeDocumentPort } from "../../src/extension/sync/VscodeDocumentPort.js";
-import { verifyV02NativeSearch } from "./v02NativeSearch.js";
-import { verifyV02WebviewFindWidgetProbe } from "./v02WebviewFindProbe.js";
+import { verifyV02Interaction } from "./v02Interaction.js";
 import { verifyV02ImageLifecycle } from "./v02ImageLifecycle.js";
 
 const VIEW_TYPE = "vscodeMarkdownLiveEditor.editor";
@@ -32,9 +31,12 @@ export async function run(): Promise<void> {
   const extension = vscode.extensions.getExtension(EXTENSION_ID);
   assert.ok(extension, `Extension '${EXTENSION_ID}' was not found.`);
   await extension.activate();
+  if (process.env["V02_INTERACTION_ONLY"] === "1") {
+    await verifyV02Interaction(workspaceFolder.uri);
+    return;
+  }
   await verifyV02TextDocumentBoundary(workspaceFolder.uri);
-  await verifyV02NativeSearch(workspaceFolder.uri);
-  await verifyV02WebviewFindWidgetProbe(workspaceFolder.uri);
+  await verifyV02Interaction(workspaceFolder.uri);
   await verifyV02ImageLifecycle(workspaceFolder.uri);
 }
 

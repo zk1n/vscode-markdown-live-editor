@@ -298,7 +298,13 @@ export class MarkdownResourceSession {
         throw new Error("画像の表示先が変更されました。");
       const uri = vscode.Uri.file(fileReal);
       const roots = this.webview.options.localResourceRoots ?? [];
-      if (!roots.some((candidate) => candidate.toString() === uri.toString()))
+      // A file already covered by an allowed root needs no new grant. Updating
+      // options here reloads some hosts and can interrupt the pending Paste.
+      if (
+        !roots.some(
+          (candidate) => candidate.scheme === "file" && isWithin(candidate.fsPath, fileReal),
+        )
+      )
         this.webview.options = { ...this.webview.options, localResourceRoots: [...roots, uri] };
       this.watchImage(resolved.path, target);
       if (fileReal !== resolved.path) this.watchImage(fileReal, target);

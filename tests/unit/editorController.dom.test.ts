@@ -557,6 +557,42 @@ describe("MarkdownWebviewController M10 presentation controls", () => {
     expect(view.state.selection.main).toMatchObject({ anchor: 3, head: 3 });
   });
 
+  it("does not move focus from another input after a history acknowledgement", async () => {
+    const { view } = await createController("abc", "off");
+    const identity = latestControllerIdentity();
+    view.focus();
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        data: {
+          kind: "editor-command",
+          protocolVersion: PROTOCOL_VERSION,
+          ...identity,
+          requestId: "history-input",
+          documentVersion: 1,
+          command: "redo",
+        },
+      }),
+    );
+    const input = document.createElement("input");
+    document.body.append(input);
+    input.focus();
+    acknowledge("redo", 1, 2, "abcd");
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        data: {
+          kind: "restore-history-focus",
+          protocolVersion: PROTOCOL_VERSION,
+          ...identity,
+          requestId: "history-input",
+          documentVersion: 2,
+          operation: "redo",
+        },
+      }),
+    );
+    expect(document.activeElement).toBe(input);
+    expect(view.state.doc.toString()).toBe("abcd");
+  });
+
   it("restores a blurred Redo selection only after its matching acknowledgement", async () => {
     const { content, view } = await createController("abc", "off");
     const identity = latestControllerIdentity();

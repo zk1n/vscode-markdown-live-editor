@@ -69,6 +69,65 @@ function press(
 }
 
 describe("table editing in the main CodeMirror content DOM", () => {
+  it("protects multiple cell carets and composition input without changing table shape", () => {
+    const source = "| h | v |\n| --- | --- |\n| a | b |";
+    const view = createView(source);
+    const a = source.lastIndexOf("a");
+    const b = source.lastIndexOf("b");
+    view.dispatch({
+      selection: EditorSelection.create([
+        EditorSelection.cursor(a + 1),
+        EditorSelection.cursor(b + 1),
+      ]),
+    });
+    view.dispatch({ ...view.state.replaceSelection("|"), userEvent: "input.type.compose" });
+    expect(view.state.doc.toString()).toBe(
+      source.replace(" a ", " a\\| ").replace(" b ", " b\\| "),
+    );
+    const before = view.state.doc.toString();
+    view.dispatch({
+      changes: { from: a, to: view.state.doc.length, insert: "" },
+      userEvent: "delete.selection",
+    });
+    expect(view.state.doc.toString()).toBe(before);
+    expect(findTables(before)[0]?.rows[1]?.cells).toHaveLength(2);
+    view.dispatch({ ...view.state.replaceSelection("\n"), userEvent: "input" });
+    expect(findTables(view.state.doc.toString())[0]?.rows).toHaveLength(2);
+    expect(view.state.doc.lines).toBe(3);
+  });
+  it("protects delimiters after deletion and owns pipe escaping during input", () => {
+    const source = "| a | b |\n| :--- | ---: |\n| text | keep `code` [link](a.md) |\n\nafter";
+    const view = createView(source, source.indexOf("text"));
+    const start = view.state.selection.main.head;
+    view.dispatch({ changes: { from: start - 1, to: start }, userEvent: "delete.backward" });
+    expect(view.state.doc.toString()).toBe(source);
+    view.dispatch({
+      changes: { from: start, to: start + 4, insert: "" },
+      selection: { anchor: start },
+      userEvent: "delete.selection",
+    });
+    expect(table(view.state.doc.toString()).columns).toBe(2);
+    view.dispatch({ ...view.state.replaceSelection("a|b"), userEvent: "input.type" });
+    expect(view.state.doc.toString()).toContain("a\\|b");
+    const escape = view.state.doc.toString().indexOf("\\|");
+    view.dispatch({ selection: { anchor: escape + 1 } });
+    view.dispatch({ changes: { from: escape, to: escape + 1 }, userEvent: "delete.backward" });
+    expect(table(view.state.doc.toString()).columns).toBe(2);
+    expect(view.state.doc.toString()).toContain("keep `code` [link](a.md)");
+  });
+  it("appends a column at the active row and a row at the first column", () => {
+    const source = "| a | b |\n| --- | --- |\n| c | d |\n\nafter";
+    const view = createView(source, source.indexOf("d |"));
+    expect(editTable(view, "column-append")).toBe(true);
+    expect(view.state.selection.main.head).toBe(
+      table(view.state.doc.toString()).rows[1]?.cells[2]?.contentFrom,
+    );
+    expect(editTable(view, "row-append")).toBe(true);
+    expect(view.state.selection.main.head).toBe(
+      table(view.state.doc.toString()).rows[2]?.cells[0]?.contentFrom,
+    );
+    expect(view.hasFocus).toBe(true);
+  });
   it("keeps a one-column table recognized when removing a column without outer pipes", () => {
     const source = "a | b\n--- | ---\n c | d\n\nafter";
     const view = createView(source, source.indexOf("d\n"));
@@ -76,15 +135,17 @@ describe("table editing in the main CodeMirror content DOM", () => {
     expect(table(view.state.doc.toString()).columns).toBe(1);
     expect(view.state.doc.toString()).toBe("|a |\n|--- |\n| c |\n\nafter");
   });
-  it("keeps only the directly edited row raw, including inline syntax and padding", () => {
+  it("keeps ordinary pipe and padding navigation in table form until explicit source editing", () => {
     const source = "| **h** | b |\n| --- | --- |\n| `code` | [l](a.md) |\n\nafter";
     const view = createView(source);
     const row = table(source).rows[1];
     if (row === undefined) throw new Error("Missing row");
     view.dispatch({ selection: { anchor: row.from } });
     view.dispatch({ selection: { anchor: row.cells[1]?.contentFrom ?? 0 } });
+    expect(view.contentDOM.querySelectorAll(".cm-table-row")).toHaveLength(2);
+    expect(editTable(view, "source")).toBe(true);
     expect(view.contentDOM.textContent).toContain("| `code` | [l](a.md) |");
-    expect(view.contentDOM.querySelectorAll(".cm-table-row")).toHaveLength(1);
+    expect(editTable(view, "source")).toBe(true);
     view.dispatch({ selection: { anchor: source.length } });
     expect(view.contentDOM.querySelectorAll(".cm-table-row")).toHaveLength(2);
     expect(view.state.doc.toString()).toBe(source);
@@ -185,7 +246,7 @@ describe("table editing in the main CodeMirror content DOM", () => {
     expect(view.contentDOM.querySelector(".cm-table-cell")).not.toBeNull();
   });
 
-  it("reveals raw source when a hidden pipe is selected and supports an empty-cell widget", async () => {
+  it("keeps hidden pipe selection in table form and supports an empty-cell widget", async () => {
     const source = "| a | b |\n| --- | --- |\n|| value |";
     const parsed = table(source);
     const view = createView(source);
@@ -204,8 +265,7 @@ describe("table editing in the main CodeMirror content DOM", () => {
 
     const pipe = source.indexOf("|");
     view.dispatch({ selection: { anchor: pipe, head: pipe + 1 } });
-    expect(view.contentDOM.querySelectorAll(".cm-table-row")).toHaveLength(1);
-    expect(view.contentDOM.textContent).toContain("| a | b |");
+    expect(view.contentDOM.querySelectorAll(".cm-table-row")).toHaveLength(2);
     expect(view.state.doc.toString()).toBe(source);
   });
 

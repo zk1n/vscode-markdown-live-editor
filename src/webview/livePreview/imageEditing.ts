@@ -110,6 +110,7 @@ export function imageEditing(actions: ImageActions): Extension {
           return true;
         }
         view.dispatch({ selection: { anchor: position } });
+        view.focus();
         void insertImage(view, actions, file);
         return true;
       },
@@ -304,13 +305,16 @@ export async function insertImage(
   }
   const snapshot = view.state.doc;
   const selection = view.state.selection.main;
+  const connected = (): boolean => view.dom.isConnected;
+  const focus = imageFocusLease(view);
   try {
     if (!(await actions.synchronize())) return;
     const data = file === undefined ? undefined : await fileBase64(file);
     if (
       view.state.doc !== snapshot ||
       !view.state.selection.main.eq(selection) ||
-      !actions.isEditable()
+      !actions.isEditable() ||
+      !connected()
     ) {
       actions.notify("文書または選択位置が変わったため画像挿入を取り消しました。");
       return;
@@ -335,24 +339,84 @@ export async function insertImage(
     if (
       view.state.doc !== snapshot ||
       !view.state.selection.main.eq(selection) ||
-      !actions.isEditable()
+      !actions.isEditable() ||
+      !connected()
     ) {
       actions.notify(
         "文書または選択位置が変わったため挿入を取り消しました。取り込んだ添付ファイルは保持しています。",
       );
       return;
     }
+    const insertion = imageInsertion(
+      snapshot.toString(),
+      selection.from,
+      selection.to,
+      response.markdown,
+    );
     view.dispatch({
-      changes: { from: selection.from, to: selection.to, insert: response.markdown },
-      selection: { anchor: selection.from + response.markdown.length },
+      changes: { from: selection.from, to: selection.to, insert: insertion.text },
+      ...(focus.current() ? { selection: { anchor: insertion.caret } } : {}),
       userEvent: "input.image",
-      scrollIntoView: true,
+      scrollIntoView: focus.current(),
     });
-    view.focus();
+    // Reconcile native selection after the input event/DOM update, only while the
+    // original user focus intent is still current. Never wait for image load.
+    await Promise.resolve();
+    if (focus.current() && view.state.selection.main.head === insertion.caret) view.focus();
     actions.notify("画像を挿入しました。Undoでは添付ファイルを削除しません。");
   } catch {
     actions.notify("画像の取り込みに失敗しました。画像データまたは対応形式を確認してください。");
+  } finally {
+    focus.dispose();
   }
+}
+
+/** A standalone image leaves a real text line; existing blank lines are reused. */
+export function imageInsertion(
+  source: string,
+  from: number,
+  to: number,
+  markdown: string,
+): { text: string; caret: number } {
+  const start = source.lastIndexOf("\n", Math.max(0, from - 1)) + 1;
+  const end = source.indexOf("\n", to);
+  const lineEnd = end < 0 ? source.length : end;
+  const standalone =
+    source.slice(start, from).trim() === "" && source.slice(to, lineEnd).trim() === "";
+  if (!standalone) return { text: markdown, caret: from + markdown.length };
+  const following = end < 0 ? undefined : source.indexOf("\n", end + 1);
+  const nextLine =
+    end < 0 ? undefined : source.slice(end + 1, following === -1 ? source.length : following);
+  if (nextLine?.trim() === "")
+    return { text: markdown, caret: from + markdown.length + (lineEnd - to) + 1 };
+  return { text: markdown + "\n", caret: from + markdown.length + 1 };
+}
+
+function imageFocusLease(view: EditorView): { current(): boolean; dispose(): void } {
+  let retained = view.hasFocus;
+  const moved = (event: Event): void => {
+    if (event.target instanceof Node && !view.contentDOM.contains(event.target)) retained = false;
+  };
+  const left = (): void => {
+    retained = false;
+  };
+  const hidden = (): void => {
+    if (document.visibilityState === "hidden") left();
+  };
+  document.addEventListener("pointerdown", moved, true);
+  document.addEventListener("focusin", moved, true);
+  window.addEventListener("blur", left);
+  document.addEventListener("visibilitychange", hidden);
+  return {
+    current: () =>
+      retained && view.hasFocus && view.dom.isConnected && document.visibilityState !== "hidden",
+    dispose: () => {
+      document.removeEventListener("pointerdown", moved, true);
+      document.removeEventListener("focusin", moved, true);
+      window.removeEventListener("blur", left);
+      document.removeEventListener("visibilitychange", hidden);
+    },
+  };
 }
 function fileBase64(file: File): Promise<string> {
   return new Promise((resolve, reject) => {

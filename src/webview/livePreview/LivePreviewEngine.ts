@@ -2,6 +2,7 @@ import { deleteCharBackward, deleteCharForward } from "@codemirror/commands";
 import { markdownLanguage } from "@codemirror/lang-markdown";
 import { EditorState, type Extension, type Range, StateField } from "@codemirror/state";
 import { Decoration, type DecorationSet, EditorView, WidgetType } from "@codemirror/view";
+import { searchReveal } from "./searchReveal.js";
 import { tableSourceSelectionRanges } from "./tableEditing.js";
 
 import {
@@ -298,9 +299,11 @@ class CodeMirrorDecorationLivePreviewEngine implements LivePreviewEngine {
 
 function buildDecorations(state: EditorState): DecorationSet {
   const documentText = state.doc.toString();
+  const match = state.field(searchReveal, false);
   const selections = [
     ...state.selection.ranges.map(({ from, to }) => ({ from, to })),
     ...tableSourceSelectionRanges(state),
+    ...(match === undefined ? [] : [match]),
   ];
   const unorderedMarkerDepths = findUnorderedMarkerDepths(documentText);
   const decorations = buildStructuralLineDecorations(state, selections);

@@ -63,6 +63,7 @@ import {
   refreshImages,
   type ImageActions,
 } from "./livePreview/imageEditing.js";
+import { createFloatingSearch } from "./search/floatingSearch.js";
 import { linkPreview } from "./livePreview/linkPreview.js";
 import type { NativeSearchRequest } from "../protocol/nativeSearchMessages.js";
 import { decodeSaveAsImage, type SaveAsImageRequest } from "../protocol/saveAsImageMessages.js";
@@ -183,6 +184,13 @@ class MarkdownWebviewController {
     string,
     { readonly operation: "undo" | "redo"; readonly documentVersion: number }
   >();
+  private readonly floatingSearch = createFloatingSearch({
+    isReady: () => this.isSourceReady(),
+    isEditable: () => this.isTabEditable(),
+    save: () => {
+      this.requestBarrier("save");
+    },
+  });
   private nativeSearchPending = false;
   private readonly richClient: RichClient;
   private readonly imageActions: ImageActions;
@@ -308,6 +316,7 @@ class MarkdownWebviewController {
         headingInputAssistance(() => this.isTabEditable()),
         tableEditing(() => this.isTabEditable()),
         imageEditing(this.imageActions),
+        this.floatingSearch.extension,
         linkPreview(this.imageActions),
         Prec.highest(
           keymap.of([
@@ -616,7 +625,10 @@ class MarkdownWebviewController {
       this.composition.isActive ||
       this.inFlightSequence !== undefined ||
       this.pendingEdits.hasPending ||
-      this.barriers.isFrozen
+      this.barriers.isFrozen ||
+      !document.hasFocus() ||
+      (document.activeElement !== document.body &&
+        !this.view.contentDOM.contains(document.activeElement))
     ) {
       return;
     }
@@ -866,10 +878,11 @@ class MarkdownWebviewController {
     }
     if (!this.controllerReady || this.composition.isActive || this.view.composing) {
       if (command === "find" || command === "replace")
-        this.showRichNotice("入力の変換を確定してから標準検索を開いてください。");
+        this.showRichNotice("入力の変換を確定してから検索を開いてください。");
       return;
     }
-    if (command === "find" || command === "replace") void this.openNativeSearch(command);
+    if (command === "find" || command === "replace")
+      this.floatingSearch.open(this.view, command === "replace");
     else if (command === "insert-table" && contextToken === undefined && this.isTabEditable())
       editTable(this.view, "insert");
     else if (command === "insert-image") {
@@ -885,25 +898,6 @@ class MarkdownWebviewController {
       this.showRichNotice(
         "対象のセル・画像を選び直してください。文書や対象が変わった場合は操作を取り消します。",
       );
-  }
-
-  private async openNativeSearch(mode: "find" | "replace"): Promise<void> {
-    const selection = this.view.state.selection.main;
-    if (!(await this.synchronizeRichAction(true)) || !this.view.state.selection.main.eq(selection))
-      return;
-    this.nativeSearchPending = true;
-    this.view.dispatch({ effects: this.editable.reconfigure(EditorView.editable.of(false)) });
-    this.vscode.postMessage({
-      kind: "native-search",
-      protocolVersion: PROTOCOL_VERSION,
-      documentUri: this.bootstrap.documentUri,
-      sessionId: this.bootstrap.sessionId,
-      controllerId: this.controllerId,
-      documentVersion: this.documentVersion,
-      mode,
-      anchor: selection.anchor,
-      head: selection.head,
-    });
   }
 
   private showRichNotice(note: string): void {

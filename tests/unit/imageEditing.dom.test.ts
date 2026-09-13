@@ -5,7 +5,11 @@ import { EditorView } from "@codemirror/view";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { RichClient } from "../../src/webview/richClient.js";
-import { imageEditing, type ImageActions } from "../../src/webview/livePreview/imageEditing.js";
+import {
+  imageEditing,
+  imageInsertion,
+  type ImageActions,
+} from "../../src/webview/livePreview/imageEditing.js";
 
 const views: EditorView[] = [];
 const png = Uint8Array.from([137, 80, 78, 71, 13, 10, 26, 10, 1]);
@@ -36,6 +40,7 @@ function imageFile(name = "image.png", type = "image/png"): File {
 function createView(
   text: string,
   selection = 0,
+  defer?: (reply: () => void) => void,
 ): {
   readonly view: EditorView;
   readonly notices: string[];
@@ -45,7 +50,7 @@ function createView(
   const requested: string[] = [];
   const client = new RichClient((request): void => {
     requested.push(request.operation);
-    queueMicrotask(() => {
+    const reply = (): void => {
       client.receive({
         kind: "rich-response",
         protocolVersion: 2,
@@ -59,7 +64,9 @@ function createView(
           ? { markdown: "![image](attachments/image.png)" }
           : {}),
       });
-    });
+    };
+    if (defer && request.operation === "image-import") defer(reply);
+    else queueMicrotask(reply);
   });
   const actions: ImageActions = {
     client,
@@ -88,6 +95,58 @@ async function settle(): Promise<void> {
 }
 
 describe("image paste and drop", () => {
+  it("does not reclaim focus after a pending paste moves to another UI or window", async () => {
+    for (const departure of ["control", "window", "blur"] as const) {
+      let reply: (() => void) | undefined;
+      const { view } = createView("before\n\n", 8, (next) => {
+        reply = next;
+      });
+      view.focus();
+      view.contentDOM.dispatchEvent(eventWithTransfer("paste", dataTransfer(imageFile())));
+      await settle();
+      const outside = document.createElement("button");
+      document.body.append(outside);
+      if (departure === "window") window.dispatchEvent(new Event("blur"));
+      if (departure === "blur") view.contentDOM.blur();
+      else outside.focus();
+      reply?.();
+      await settle();
+      if (departure !== "blur") expect(document.activeElement).toBe(outside);
+      expect(view.hasFocus).toBe(false);
+      expect(view.state.doc.toString()).toContain("![image]");
+    }
+  });
+  it("cancels pending insertion after a selection move or disposal", async () => {
+    for (const disposal of [false, true]) {
+      let reply: (() => void) | undefined;
+      const { view } = createView("before", 3, (next) => {
+        reply = next;
+      });
+      view.focus();
+      view.contentDOM.dispatchEvent(eventWithTransfer("paste", dataTransfer(imageFile())));
+      await settle();
+      if (disposal) {
+        view.destroy();
+        view.dom.remove();
+        views.splice(views.indexOf(view), 1);
+      } else view.dispatch({ selection: { anchor: 0 } });
+      reply?.();
+      await settle();
+      expect(view.state.doc.toString()).toBe("before");
+    }
+  });
+  it("uses an existing blank line after a standalone image and adds only a needed newline", () => {
+    expect(imageInsertion("before\n\nafter", 7, 7, "![](x)")).toEqual({
+      text: "![](x)\n",
+      caret: 14,
+    });
+    expect(imageInsertion("before\n\n\nafter", 7, 7, "![](x)")).toEqual({
+      text: "![](x)",
+      caret: 14,
+    });
+    expect(imageInsertion("before\n", 7, 7, "![](x)")).toEqual({ text: "![](x)\n", caret: 14 });
+    expect(imageInsertion("inline", 3, 3, "![](x)")).toEqual({ text: "![](x)", caret: 9 });
+  });
   it("retains the loaded DOM while following each image's current source position", async () => {
     const { view, requested } = createView(
       "before\n![alt](assets/image.png)\n\n![alt](assets/image.png)\n\nafter",
@@ -108,6 +167,7 @@ describe("image paste and drop", () => {
   });
   it("accepts an OS file clipboard image whose MIME type is unavailable, without consuming plain text paste", async () => {
     const { view, requested } = createView("before", 3);
+    view.focus();
     const imagePaste = eventWithTransfer("paste", dataTransfer(imageFile("screenshot.PNG", "")));
 
     view.contentDOM.dispatchEvent(imagePaste);

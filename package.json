@@ -178,13 +178,13 @@
         "command": "vscodeMarkdownLiveEditor.find",
         "key": "ctrl+f",
         "mac": "cmd+f",
-        "when": "activeCustomEditorId == vscodeMarkdownLiveEditor.editor"
+        "when": "activeCustomEditorId == vscodeMarkdownLiveEditor.editor && webviewFocus"
       },
       {
         "command": "vscodeMarkdownLiveEditor.replace",
         "key": "ctrl+h",
         "mac": "cmd+alt+f",
-        "when": "activeCustomEditorId == vscodeMarkdownLiveEditor.editor"
+        "when": "activeCustomEditorId == vscodeMarkdownLiveEditor.editor && webviewFocus"
       }
     ],
     "menus": {
@@ -304,7 +304,8 @@
     "package:vsix": "npm run build && node ./scripts/package-vsix.mjs",
     "package:vsix:review": "npm run build && node ./scripts/package-vsix.mjs --review",
     "package:vsix:ux-review": "npm run build && node ./scripts/package-vsix.mjs --ux-review",
-    "package:vsix:ux-stability-review": "npm run build && node ./scripts/package-vsix.mjs --ux-stability-review"
+    "package:vsix:ux-stability-review": "npm run build && node ./scripts/package-vsix.mjs --ux-stability-review",
+    "package:vsix:ux-interaction-review": "npm run build && node ./scripts/package-vsix.mjs --ux-interaction-review"
   },
   "dependencies": {
     "@codemirror/commands": "6.11.0",

@@ -115,9 +115,25 @@ const view = new EditorView({
 // requestMeasure frame. The runner releases this loopback request as soon as
 // it receives the result beacon.
 void fetch("/__geometry-harness-hold").catch(() => undefined);
-void runGeometryHarness(view).catch((error: unknown) => {
-  void publishResult({ error: String(error) });
-});
+const run = (): void => {
+  void runGeometryHarness(view).catch((error: unknown) => {
+    void publishResult({ error: String(error) });
+  });
+};
+if (new URLSearchParams(window.location.search).has("manual")) {
+  const start = document.createElement("button");
+  start.textContent = "表示中browserで検証開始";
+  start.addEventListener(
+    "click",
+    () => {
+      start.remove();
+      view.focus();
+      run();
+    },
+    { once: true },
+  );
+  document.body.prepend(start);
+} else run();
 
 async function runGeometryHarness(editor: EditorView): Promise<void> {
   await animationFrame();
