@@ -88,6 +88,24 @@ async function settle(): Promise<void> {
 }
 
 describe("image paste and drop", () => {
+  it("retains the loaded DOM while following each image's current source position", async () => {
+    const { view, requested } = createView(
+      "before\n![alt](assets/image.png)\n\n![alt](assets/image.png)\n\nafter",
+    );
+    await settle();
+    const originals = [...view.dom.querySelectorAll(".cm-image-preview img")];
+    for (let index = 0; index < 5; index += 1)
+      view.dispatch({ changes: { from: 0, insert: "x" }, selection: { anchor: 1 } });
+    expect([...view.dom.querySelectorAll(".cm-image-preview img")]).toEqual(originals);
+    expect(requested.filter((operation) => operation === "image-resolve")).toHaveLength(2);
+    const second = view.dom.querySelectorAll<HTMLElement>(".cm-image-preview")[1];
+    const from = view.state.doc.toString().lastIndexOf("![alt]");
+    expect(second?.dataset["imageFrom"]).toBe(String(from));
+    second
+      ?.querySelector("img")
+      ?.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true }));
+    expect(view.state.selection.main.from).toBe(from);
+  });
   it("accepts an OS file clipboard image whose MIME type is unavailable, without consuming plain text paste", async () => {
     const { view, requested } = createView("before", 3);
     const imagePaste = eventWithTransfer("paste", dataTransfer(imageFile("screenshot.PNG", "")));

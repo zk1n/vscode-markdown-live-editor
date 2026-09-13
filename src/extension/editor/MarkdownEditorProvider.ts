@@ -180,6 +180,25 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
         request.controllerId === currentControllerId &&
         !lifecycle.disposed,
       allowRemoteImages,
+      () => {
+        if (currentControllerId === undefined || lifecycle.disposed) return;
+        // Re-evaluate roots when the resource scope changes; do not retain
+        // file-specific grants from an earlier workspace configuration.
+        webview.options = {
+          ...webview.options,
+          localResourceRoots: [
+            vscode.Uri.joinPath(this.options.webviewScriptPath, ".."),
+            ...resourceRootsForDocument(document),
+          ],
+        };
+        void webview.postMessage({
+          kind: "image-resources-changed",
+          protocolVersion: PROTOCOL_VERSION,
+          documentUri,
+          sessionId,
+          controllerId: currentControllerId,
+        });
+      },
     );
     let styleRevision = 1;
     let latestStyle: CustomCssSnapshot | undefined;
@@ -253,6 +272,9 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
       void customCssSession.start();
     };
     const indentationDisposable = this.indentation.subscribe(document, sendConfiguration);
+    const resourceDocumentDisposable = vscode.workspace.onDidChangeTextDocument((event) => {
+      if (event.document === document) resources.pruneImageWatches(document.getText());
+    });
     const configurationDisposable = vscode.workspace.onDidChangeConfiguration((event): void => {
       if (
         event.affectsConfiguration("editor.insertSpaces", document.uri) ||
@@ -270,9 +292,11 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
     });
     const workspaceFoldersDisposable = vscode.workspace.onDidChangeWorkspaceFolders((): void => {
       recreateCustomCssSession();
+      resources.invalidateImages();
     });
     const trustDisposable = vscode.workspace.onDidGrantWorkspaceTrust((): void => {
       recreateCustomCssSession();
+      resources.invalidateImages();
     });
     const disposeSession = (): void => {
       if (lifecycle.disposed) {
@@ -284,6 +308,7 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
       trackingDisposable.dispose();
       configurationDisposable.dispose();
       indentationDisposable.dispose();
+      resourceDocumentDisposable.dispose();
       workspaceFoldersDisposable.dispose();
       trustDisposable.dispose();
       customCssSession?.dispose();

@@ -1,6 +1,7 @@
 import {
   StateEffect,
   StateField,
+  EditorSelection,
   Prec,
   type ChangeSpec,
   type EditorState,
@@ -13,6 +14,7 @@ import {
   findTables,
   tableCellAt,
   type SourceTable,
+  type TableRow,
 } from "../../core/markdown/tableSource.js";
 
 // The cells are the main CodeMirror contentDOM: native selection, clipboard,
@@ -26,6 +28,57 @@ const rawTableField = StateField.define<number | undefined>({
     return next;
   },
 });
+// Direct pipe/delimiter editing reveals only that row and stays stable until
+// every selection leaves it. Returning to cell text cannot hide syntax mid-edit.
+const sourceRows = StateField.define<readonly number[]>({
+  create: (state) => activeSourceRows(state, []),
+  update: (value, transaction) =>
+    activeSourceRows(
+      transaction.state,
+      transaction.effects.some((effect) => effect.is(rawTable))
+        ? []
+        : value.map((position) => transaction.changes.mapPos(position)),
+    ),
+});
+function rowTouchesSelection(state: EditorState, row: TableRow): boolean {
+  return state.selection.ranges.some(
+    (selection) => selection.from <= row.to && selection.to >= row.from,
+  );
+}
+function activeSourceRows(state: EditorState, previous: readonly number[]): readonly number[] {
+  const rows: number[] = [];
+  for (const table of findTables(state.doc.toString())) {
+    for (const row of [...table.rows, table.delimiter]) {
+      if (!rowTouchesSelection(state, row)) continue;
+      if (
+        previous.includes(row.from) ||
+        row === table.delimiter ||
+        state.selection.ranges.some((selection) =>
+          row.pipes.some((pipe) =>
+            selection.empty
+              ? selection.head === pipe
+              : selection.from <= pipe && selection.to > pipe,
+          ),
+        )
+      )
+        rows.push(row.from);
+    }
+  }
+  return rows;
+}
+/** The base renderer must reveal inline markers in a row being edited as source. */
+export function tableSourceSelectionRanges(
+  state: EditorState,
+): readonly { from: number; to: number }[] {
+  const rows = state.field(sourceRows, false);
+  const tableFrom = state.field(rawTableField, false);
+  if (rows === undefined || (rows.length === 0 && tableFrom === undefined)) return [];
+  return findTables(state.doc.toString()).flatMap((table) =>
+    [...table.rows, table.delimiter].filter(
+      (row) => tableFrom === table.from || rows.includes(row.from),
+    ),
+  );
+}
 const tableDecorations = StateField.define<DecorationSet>({
   create: build,
   update(value, transaction) {
@@ -33,6 +86,7 @@ const tableDecorations = StateField.define<DecorationSet>({
     if (
       !transaction.docChanged &&
       transaction.selection === undefined &&
+      !transaction.isUserEvent("input.structural.settle") &&
       !transaction.effects.some((effect) => effect.is(rawTable))
     )
       return value;
@@ -44,8 +98,9 @@ const tableDecorations = StateField.define<DecorationSet>({
 function build(state: EditorState): DecorationSet {
   const ranges: Range<Decoration>[] = [];
   for (const table of findTables(state.doc.toString())) {
-    if (isTableSourceActive(state, table)) continue;
+    if (state.field(rawTableField) === table.from) continue;
     for (const [rowIndex, row] of table.rows.entries()) {
+      if (state.field(sourceRows).includes(row.from)) continue;
       ranges.push(
         Decoration.line({
           class: "cm-table-row",
@@ -79,28 +134,16 @@ function build(state: EditorState): DecorationSet {
 }
 
 /**
- * Table pipes and delimiter text are replaced only while the table is in its
- * presentation mode. A source selection can be created by Find / Replace,
- * keyboard navigation, or a mouse click, so it must reveal the entire table
- * rather than leaving a selected source character hidden in a replacement.
+ * Raw row editing uses ordinary editor navigation, while cell navigation keeps
+ * the existing table keymap. All source ranges remain writable.
  */
 function isTableSourceActive(state: EditorState, table: SourceTable): boolean {
   if (state.field(rawTableField) === table.from) {
     return true;
   }
-  const sourcePositions = [...table.rows.flatMap((row) => row.pipes), ...table.delimiter.pipes];
-  return state.selection.ranges.some((selection) => {
-    // A caret just before a pipe is still the preceding cell's insertion point.
-    if (selection.empty && tableCellAt(table, selection.head) !== undefined) return false;
-    return (
-      sourcePositions.some((position) =>
-        selection.empty
-          ? selection.head === position
-          : selection.from <= position && selection.to > position,
-      ) ||
-      (selection.from <= table.delimiter.to && selection.to >= table.delimiter.from)
-    );
-  });
+  return [...table.rows, table.delimiter].some(
+    (row) => state.field(sourceRows).includes(row.from) && rowTouchesSelection(state, row),
+  );
 }
 
 class EmptyCell extends WidgetType {
@@ -181,15 +224,19 @@ export function editTable(view: EditorView, action: TableAction, targetPosition?
   }
   const current = tableCellAt(table, targetPosition ?? selected.head) ?? { row: 0, column: 0 };
   let changes: ChangeSpec = [];
+  let targetRow = current.row;
+  let targetColumn = current.column;
   if (action === "row-add") {
     const row = current.row === 0 ? table.delimiter : table.rows[current.row];
     if (row === undefined) return false;
     changes = { from: row.to, insert: `\n|${"  |".repeat(table.columns)}` };
+    targetRow += 1;
   } else if (action === "row-delete") {
     if (current.row === 0) return false;
     const row = table.rows[current.row];
     if (row === undefined) return false;
     changes = { from: row.from - 1, to: row.to, insert: "" };
+    targetRow = Math.min(current.row, table.rows.length - 2);
   } else if (action === "column-add" || action === "column-delete") {
     changes = changeTableColumn(
       text,
@@ -197,22 +244,40 @@ export function editTable(view: EditorView, action: TableAction, targetPosition?
       current.column + (action === "column-add" ? 1 : 0),
       action === "column-delete",
     );
+    if (action === "column-add") targetColumn += 1;
+    else targetColumn = Math.min(current.column, table.columns - 2);
   } else {
     const cell = table.delimiter.cells[current.column];
     if (cell === undefined) return false;
     const value = action === "align-center" ? ":---:" : action === "align-right" ? "---:" : ":---";
     changes = { from: cell.contentFrom, to: cell.contentTo, insert: value };
   }
-  view.dispatch({ changes, userEvent: "input.table", scrollIntoView: true });
+  const changeSet = view.state.changes(changes);
+  if (changeSet.empty) return false;
+  const next = findTables(changeSet.apply(view.state.doc).toString()).find(
+    (candidate) => candidate.from === table.from,
+  );
+  const target = next?.rows[targetRow]?.cells[targetColumn];
+  if (target === undefined) return false;
+  const mapped = view.state.selection.map(changeSet);
+  // Keep secondary selections; only the command's primary target moves.
+  const selection = EditorSelection.create(
+    mapped.ranges.map((range, index) =>
+      index === mapped.mainIndex ? EditorSelection.cursor(target.contentFrom) : range,
+    ),
+    mapped.mainIndex,
+  );
+  view.dispatch({ changes: changeSet, selection, userEvent: "input.table", scrollIntoView: true });
   view.focus();
   return true;
 }
 
 function moveCell(view: EditorView, backwards: boolean, vertical = false): boolean {
+  if (view.state.selection.ranges.length !== 1) return false;
   const table = findTables(view.state.doc.toString()).find(
     (candidate) => tableCellAt(candidate, view.state.selection.main.head) !== undefined,
   );
-  if (table === undefined || view.state.field(rawTableField) === table.from) return false;
+  if (table === undefined || isTableSourceActive(view.state, table)) return false;
   const current = tableCellAt(table, view.state.selection.main.head);
   if (current === undefined) return false;
   const index =
@@ -225,14 +290,8 @@ function moveCell(view: EditorView, backwards: boolean, vertical = false): boole
   }
   const rowIndex = Math.floor(index / table.columns);
   if (rowIndex >= table.rows.length) {
-    const position = table.to + 1 + 2 + (index % table.columns) * 3;
-    view.dispatch({
-      changes: { from: table.to, insert: `\n|${"  |".repeat(table.columns)}` },
-      selection: { anchor: position },
-      userEvent: "input.table",
-      scrollIntoView: true,
-    });
-    return true;
+    const lastCell = table.rows.at(-1)?.cells[index % table.columns];
+    return lastCell !== undefined && editTable(view, "row-add", lastCell.contentFrom);
   }
   const target = table.rows[rowIndex]?.cells[index % table.columns];
   if (target === undefined) return false;
@@ -244,6 +303,7 @@ function moveCell(view: EditorView, backwards: boolean, vertical = false): boole
 }
 
 function leaveTable(view: EditorView): boolean {
+  if (view.state.selection.ranges.length !== 1) return false;
   const table = findTables(view.state.doc.toString()).find(
     (candidate) =>
       candidate.from <= view.state.selection.main.head &&
@@ -269,6 +329,7 @@ function leaveTable(view: EditorView): boolean {
 }
 
 function cellBoundary(view: EditorView, end: boolean, extend = false): boolean {
+  if (view.state.selection.ranges.length !== 1) return false;
   const table = findTables(view.state.doc.toString()).find(
     (candidate) => tableCellAt(candidate, view.state.selection.main.head) !== undefined,
   );
@@ -286,6 +347,7 @@ function cellBoundary(view: EditorView, end: boolean, extend = false): boolean {
 export function tableEditing(isEditable: () => boolean): Extension {
   return [
     rawTableField,
+    sourceRows,
     tableDecorations,
     Prec.highest(
       keymap.of([

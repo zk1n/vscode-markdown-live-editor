@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.0 UX stability review — 2026-09-13
+
+- 表の行・列追加直後に新しいセルへcaretとfocusを移し、パイプの直接編集は対象行のsource表示を維持。
+- 画像のcontroller起動前要求を待機し、無関係な入力では読み込み済みDOMを再利用。実資源変更と旧sessionの寿命を分離。
+- 常設の画像Markdown編集リンクを撤去。キーボード・画像クリック・context menuからのsource編集を維持。
+- Live内の標準全文検索・置換は公開APIの判断待ち。既存Text Editor bridgeを暫定保持。
+
 ## 0.2.0 — UX修正版開発レビュー
 
 - GFM表のセル編集、行列操作、配置変更、source表示切替。

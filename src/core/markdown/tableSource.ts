@@ -45,8 +45,11 @@ export function parseTableRow(text: string, from: number): TableRow {
     const right = boundaries[i];
     if (left === undefined || right === undefined) continue;
     const value = text.slice(left + 1, right);
-    const leading = value.length - value.trimStart().length;
     const contentLength = value.trim().length;
+    // A blank cell's insertion point belongs between its padding, not at
+    // the following pipe (which may be hidden in preview mode).
+    const leading =
+      contentLength === 0 ? Math.floor(value.length / 2) : value.length - value.trimStart().length;
     cells.push({
       from: from + left + 1,
       to: from + right,
@@ -123,10 +126,20 @@ export function changeTableColumn(
       const last = row.cells.at(-1);
       if (first === undefined || last === undefined)
         return { from: row.from, to: row.to, insert: text.slice(row.from, row.to) };
+      const prefix = text.slice(row.from, first.from);
+      const suffix = text.slice(last.to, row.to);
+      // A one-column table still needs a pipe to remain a table rather than
+      // being reinterpreted as a Setext heading. Cell literals are unchanged.
+      const needsOuterPipes = cells.length === 1 && !prefix.includes("|") && !suffix.includes("|");
       return {
         from: row.from,
         to: row.to,
-        insert: text.slice(row.from, first.from) + cells.join("|") + text.slice(last.to, row.to),
+        insert:
+          prefix +
+          (needsOuterPipes ? "|" : "") +
+          cells.join("|") +
+          (needsOuterPipes ? "|" : "") +
+          suffix,
       };
     })
     .sort((a, b) => a.from - b.from);

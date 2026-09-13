@@ -3,6 +3,7 @@ import { EditorView } from "@codemirror/view";
 
 import { createLivePreviewEngine } from "../../src/webview/livePreview/LivePreviewEngine.js";
 import { runV02Geometry } from "./v02-geometry.js";
+import { runV02Stability } from "./v02-stability.js";
 
 interface GeometryLineMetadata {
   readonly block: { readonly bottom: number; readonly height: number; readonly top: number };
@@ -54,6 +55,7 @@ interface GeometryPhaseResult {
 
 interface GeometryHarnessResult {
   readonly v02?: readonly Record<string, unknown>[];
+  readonly stability?: readonly Record<string, unknown>[];
   readonly documentTop: number;
   readonly geometryMatches: boolean;
   readonly hitTestsMatch: boolean;
@@ -155,8 +157,14 @@ async function runGeometryHarness(editor: EditorView): Promise<void> {
   engine.dispose();
   customMetrics.remove();
   const v02 = await runV02Geometry(parent);
+  // The preceding harness leaves its view visible for standalone inspection.
+  // Destroy it before the separate sequential stability scenarios.
+  for (const content of parent.querySelectorAll<HTMLElement>(".cm-content"))
+    EditorView.findFromDOM(content)?.destroy();
+  const stability = await runV02Stability(parent);
   await publishResult({
     v02,
+    stability,
     documentTop: round(documentTop),
     geometryMatches: phases.every(
       (phase) => phase.geometryMatches && phase.coordsMatch && phase.horizontalGutterMatches,
