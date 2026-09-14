@@ -99,9 +99,14 @@ Object.defineProperty(window, "acquireVsCodeApi", {
               kind: "rich-response",
               requestId: message["requestId"],
               ok: true,
-              ...(message["operation"] === "image-resolve"
-                ? { url: "/tests/fixtures/v02-review/assets/example.png" }
-                : { markdown: "![貼付](tests/fixtures/v02-review/assets/example.png)" }),
+              ...(message["operation"] === "link-preview"
+                ? {
+                    title: "検証リンク",
+                    text: "# プレビュー\n\n" + "読み取り専用のリンク内容。\n\n".repeat(24),
+                  }
+                : message["operation"] === "image-resolve"
+                  ? { url: "/tests/fixtures/v02-review/assets/example.png" }
+                  : { markdown: "![貼付](tests/fixtures/v02-review/assets/example.png)" }),
             });
           };
           if (hold && message["operation"] === "image-import") pending = reply;
@@ -125,6 +130,39 @@ async function start(): Promise<void> {
   const view = editor;
   const inputFrames: number[] = [];
   const scrollFrames: number[] = [];
+  const pointerEvents: {
+    type: string;
+    trusted: boolean;
+    target: string;
+    id: number;
+    buttons: number;
+    x: number;
+    y: number;
+  }[] = [];
+  for (const type of [
+    "pointerdown",
+    "pointermove",
+    "pointerup",
+    "pointercancel",
+    "gotpointercapture",
+    "lostpointercapture",
+  ] as const)
+    view.dom.addEventListener(
+      type,
+      (event) => {
+        pointerEvents.push({
+          type,
+          trusted: event.isTrusted,
+          target: event.target instanceof HTMLElement ? event.target.className : "",
+          id: event.pointerId,
+          buttons: event.buttons,
+          x: event.clientX,
+          y: event.clientY,
+        });
+        if (pointerEvents.length > 80) pointerEvents.shift();
+      },
+      true,
+    );
   view.contentDOM.addEventListener("beforeinput", () => {
     const start = performance.now();
     requestAnimationFrame(() => {
@@ -140,6 +178,39 @@ async function start(): Promise<void> {
     });
   });
   currentView = view;
+  document.getElementById("geometry-fixture")?.addEventListener("change", (event) => {
+    if (!(event.target instanceof HTMLSelectElement)) return;
+    const table =
+      "| 名前 | 説明 |\n| --- | --- |\n| 日本語 | 折り返し確認 abcdefghijklmnopqrstuvwxyz abcdefghijklmnopqrstuvwxyz |\n| 最後 | 内容 |\n";
+    const after = "\nafter alpha\nafter bravo\nafter charlie\nafter delta\n";
+    const fixtures: Record<string, string> = {
+      initial,
+      plain: `before alpha\nbefore bravo\n${after}${after.replaceAll("after", "second")}`,
+      one: `before alpha\nbefore bravo\n\n${table}${after}`,
+      two: `before alpha\nbefore bravo\n\n${table}${after}\n${table}${after.replaceAll("after", "second")}`,
+      short: Array.from({ length: 20 }, (_, i) => `line ${String(i + 1)} alpha bravo`).join("\n"),
+      medium: Array.from({ length: 100 }, (_, i) => `line ${String(i + 1)} alpha bravo`).join("\n"),
+      long: Array.from(
+        { length: 200 },
+        (_, i) => `# Section ${String(i)}\n\n${table}${after}`,
+      ).join("\n"),
+    };
+    const set = (text: string): void => {
+      view.dispatch({
+        changes: { from: 0, to: view.state.doc.length, insert: text },
+        selection: { anchor: 0 },
+        userEvent: "input.fixture",
+      });
+      view.scrollDOM.scrollTop = 0;
+      inputFrames.length = scrollFrames.length = 0;
+    };
+    const text = fixtures[event.target.value];
+    if (text !== undefined) set(text);
+    else if (event.target.value === "fifth")
+      void fetch("/tests/fixtures/v02-ux-fifth-review/review-lf.md")
+        .then((response) => response.text())
+        .then(set);
+  });
   document.getElementById("reset")?.addEventListener("click", () => {
     window.location.reload();
   });
@@ -204,6 +275,51 @@ async function start(): Promise<void> {
         },
         scrollTop: view.scrollDOM.scrollTop,
         contentHeight: view.contentHeight,
+        documentTop: view.documentTop,
+        scrollHeight: view.scrollDOM.scrollHeight,
+        clientHeight: view.scrollDOM.clientHeight,
+        devicePixelRatio: window.devicePixelRatio,
+        pointerEvents,
+        domLines: Array.from(view.contentDOM.querySelectorAll<HTMLElement>(".cm-line")).map(
+          (line) => {
+            const from = view.posAtDOM(line);
+            const bounds = line.getBoundingClientRect();
+            const walker = document.createTreeWalker(line, NodeFilter.SHOW_TEXT);
+            const characters = [];
+            for (let node = walker.nextNode(); node !== null; node = walker.nextNode()) {
+              const text = node.textContent ?? "";
+              for (let index = 0; index < text.length; index++) {
+                const range = document.createRange();
+                range.setStart(node, index);
+                range.setEnd(node, index + 1);
+                const rect = range.getBoundingClientRect();
+                if (rect.width <= 0 || rect.height <= 0) continue;
+                const position = view.posAtDOM(node, index);
+                characters.push({
+                  text: text[index],
+                  position,
+                  x: rect.left + Math.min(1, rect.width / 4),
+                  y: (rect.top + rect.bottom) / 2,
+                  hit: view.posAtCoords({
+                    x: rect.left + Math.min(1, rect.width / 4),
+                    y: (rect.top + rect.bottom) / 2,
+                  }),
+                  caret: view.coordsAtPos(position),
+                });
+              }
+            }
+            return {
+              from,
+              text: line.textContent,
+              top: bounds.top,
+              bottom: bounds.bottom,
+              height: bounds.height,
+              margin: getComputedStyle(line).marginBottom,
+              block: view.lineBlockAt(from),
+              characters,
+            };
+          },
+        ),
         viewport: view.viewport,
         blocks: view.viewportLineBlocks.map(({ from, to, top, bottom }) => ({
           from,
@@ -225,6 +341,7 @@ async function start(): Promise<void> {
       }),
       write: (measurement) => {
         element("metrics-output").textContent = JSON.stringify(measurement);
+        element("metrics-output").hidden = true;
       },
     });
   });

@@ -49,6 +49,9 @@ export const minimap: Extension = [
       private viewportTop = 0;
       private viewportHeight = 1;
       private dragOffset: number | undefined;
+      private pointerId: number | undefined;
+      private scrollRange = 0;
+      private travel = 0;
       private destroyed = false;
       private paints = 0;
       constructor(private readonly view: EditorView) {
@@ -84,24 +87,34 @@ export const minimap: Extension = [
       private readonly down = (event: PointerEvent): void => {
         if (event.button !== 0) return;
         event.preventDefault(); // Scrolling preserves editor selection and the current focus owner.
+        event.stopPropagation();
         const y = event.clientY - this.dom.getBoundingClientRect().top;
-        this.dragOffset =
-          event.target === this.viewport ? y - this.viewportTop : this.viewportHeight / 2;
+        const onThumb = event.target === this.viewport;
+        this.dragOffset = onThumb ? y - this.viewportTop : this.viewportHeight / 2;
+        this.pointerId = event.pointerId;
         this.dom.setPointerCapture(event.pointerId);
-        this.scroll(y);
+        // Grabbing any point on the thumb preserves the current scroll exactly.
+        if (!onThumb) this.scroll(y);
       };
       private readonly move = (event: PointerEvent): void => {
-        if (this.dragOffset === undefined) return;
+        if (this.dragOffset === undefined || event.pointerId !== this.pointerId) return;
         this.scroll(event.clientY - this.dom.getBoundingClientRect().top);
       };
-      private readonly up = (): void => {
+      private readonly up = (event: PointerEvent): void => {
+        if (event.pointerId !== this.pointerId) return;
+        const id = this.pointerId;
+        this.pointerId = undefined;
         this.dragOffset = undefined;
+        if (this.dom.hasPointerCapture(id)) this.dom.releasePointerCapture(id);
       };
       private scroll(y: number): void {
-        this.view.scrollDOM.scrollTop = Math.max(
-          0,
-          ((y - (this.dragOffset ?? 0)) / this.height) * this.contentHeight,
-        );
+        this.view.scrollDOM.scrollTop =
+          this.travel <= 0
+            ? 0
+            : Math.min(
+                this.scrollRange,
+                Math.max(0, ((y - (this.dragOffset ?? 0)) / this.travel) * this.scrollRange),
+              );
       }
       private readonly key = (event: KeyboardEvent): void => {
         const scroller = this.view.scrollDOM;
@@ -153,6 +166,7 @@ export const minimap: Extension = [
               total,
               top: scroller.scrollTop,
               visible: scroller.clientHeight,
+              lineHeight: view.defaultLineHeight,
               lines: this.lines.map((line) => ({
                 ...line,
                 y: padding + view.lineBlockAt(line.from).top,
@@ -177,8 +191,11 @@ export const minimap: Extension = [
           write: (data) => {
             if (this.destroyed || data.width <= 0 || data.height <= 0) return;
             this.contentHeight = data.total;
-            this.height = data.height;
-            const scale = data.height / data.total;
+            // Cap ordinary text at a two-pixel overview pitch. Short documents
+            // remain top-aligned; long documents still cover the full source.
+            const scale = Math.min(data.height / data.total, 2 / Math.max(1, data.lineHeight));
+            this.height = data.total * scale;
+            this.scrollRange = Math.max(0, data.total - data.visible);
             const ratio = Math.min(2, window.devicePixelRatio || 1);
             const width = Math.round(data.width * ratio),
               height = Math.round(data.height * ratio);
@@ -216,8 +233,10 @@ export const minimap: Extension = [
               for (const y of data.matches) context.fillRect(data.width - 6, y * scale, 6, 2);
               if (data.current) context.fillRect(0, data.currentY * scale, data.width, 2);
             }
-            this.viewportTop = data.top * scale;
-            this.viewportHeight = Math.min(data.height, data.visible * scale);
+            this.viewportHeight = Math.min(this.height, Math.max(12, data.visible * scale));
+            this.travel = Math.max(0, this.height - this.viewportHeight);
+            this.viewportTop =
+              this.scrollRange === 0 ? 0 : Math.min(1, data.top / this.scrollRange) * this.travel;
             this.viewport.style.top = `${String(this.viewportTop)}px`;
             this.viewport.style.height = `${String(this.viewportHeight)}px`;
             this.dom.setAttribute("aria-valuemin", "0");
@@ -226,6 +245,8 @@ export const minimap: Extension = [
             this.dom.dataset["matches"] = String(data.matches.length);
             this.dom.dataset["selections"] = String(data.selection.length);
             this.dom.dataset["paints"] = String(++this.paints);
+            this.dom.dataset["extent"] = String(this.height);
+            this.dom.dataset["scale"] = String(scale);
           },
         });
       };
@@ -245,6 +266,10 @@ export const minimap: Extension = [
       }
       destroy(): void {
         this.destroyed = true;
+        const id = this.pointerId;
+        this.pointerId = undefined;
+        this.dragOffset = undefined;
+        if (id !== undefined && this.dom.hasPointerCapture(id)) this.dom.releasePointerCapture(id);
         this.observer.disconnect();
         this.resize.disconnect();
         this.view.scrollDOM.removeEventListener("scroll", this.measure);

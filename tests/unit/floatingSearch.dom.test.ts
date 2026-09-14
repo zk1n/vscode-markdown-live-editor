@@ -174,4 +174,81 @@ describe("floating full-source search", () => {
     key(field("query"), "Escape");
     expect(view.hasFocus).toBe(true);
   });
+  it("uses one shared input column for Find and Replace", async () => {
+    const { open } = create("needle middle needle");
+    open();
+    input("query", "needle");
+    await settle();
+    const queryBox = field("query").parentElement;
+    const replacementBox = field("replacement").parentElement;
+    expect(queryBox?.className).toBe("cm-search-query-box");
+    expect(replacementBox?.className).toContain("cm-search-query-box");
+    expect(queryBox?.parentElement?.children[1]).toBe(queryBox);
+    expect(replacementBox?.parentElement?.children[1]).toBe(replacementBox);
+  });
+  it("returns to the current match only when Escape starts in the search form", async () => {
+    const { view, open } = create("needle middle needle");
+    open();
+    input("query", "needle");
+    await settle();
+    key(field("query"), "Escape");
+    expect(view.state.selection.main.from).toBe(6);
+    expect(view.hasFocus).toBe(true);
+  });
+  it("closes from editor focus without restoring an old match or stealing another focus", async () => {
+    const { view, open } = create("needle middle needle");
+    open();
+    input("query", "needle");
+    await settle();
+    view.focus();
+    await settle();
+    view.dispatch({ selection: { anchor: 7 } });
+    const escape = key(view.contentDOM, "Escape");
+    expect(escape.defaultPrevented).toBe(true);
+    expect(document.querySelector(".cm-floating-search")).toBeNull();
+    expect(view.state.selection.main.from).toBe(7);
+    expect(view.hasFocus).toBe(true);
+  });
+  it("leaves the search open while IME is composing and ignores delayed results after close", async () => {
+    let resolve: ((result: SearchResult) => void) | undefined;
+    const { view, open } = create(
+      "needle",
+      () =>
+        new Promise((complete) => {
+          resolve = complete;
+        }),
+    );
+    open();
+    input("query", "needle");
+    key(field("query"), "Escape", { isComposing: true });
+    expect(document.querySelector(".cm-floating-search")).not.toBeNull();
+    key(field("query"), "Escape");
+    resolve?.({ matches: [{ from: 0, to: 6, insert: "" }] });
+    await settle();
+    expect(document.querySelector(".cm-floating-search")).toBeNull();
+    expect(view.dom.querySelectorAll(".cm-source-search-match")).toHaveLength(0);
+  });
+  it("closes search before the table Escape keymap and keeps the current cell", async () => {
+    const { view, open } = create("| a | b |\n| --- | --- |\n| c | d |\n\nafter");
+    open();
+    view.focus();
+    view.dispatch({ selection: { anchor: 2 } });
+    await settle();
+    const selection = view.state.selection;
+    key(view.contentDOM, "Escape");
+    expect(document.querySelector(".cm-floating-search")).toBeNull();
+    expect(view.state.selection.eq(selection)).toBe(true);
+  });
+  it("handles Escape in sibling editor UI without stealing focus or changing selection", () => {
+    const { view, open } = create("before after");
+    open();
+    const sibling = document.createElement("button");
+    view.dom.append(sibling);
+    sibling.focus();
+    const selection = view.state.selection;
+    key(sibling, "Escape");
+    expect(document.querySelector(".cm-floating-search")).toBeNull();
+    expect(document.activeElement).toBe(sibling);
+    expect(view.state.selection.eq(selection)).toBe(true);
+  });
 });

@@ -10,21 +10,25 @@ const artifactDirectory = path.join(repositoryRoot, "artifacts");
 const stabilityReview = process.argv.includes("--ux-stability-review");
 const interactionReview = process.argv.includes("--ux-interaction-review");
 const fourthReview = process.argv.includes("--ux-fourth-review");
+const fifthReview = process.argv.includes("--ux-fifth-review");
 const reviewBuild =
+  fifthReview ||
   fourthReview ||
   interactionReview ||
   stabilityReview ||
   process.argv.includes("--review") ||
   process.argv.includes("--ux-review");
-const reviewSuffix = fourthReview
-  ? "-ux-fourth-review"
-  : interactionReview
-    ? "-ux-interaction-review"
-    : stabilityReview
-      ? "-ux-stability-review"
-      : process.argv.includes("--ux-review")
-        ? "-ux-review"
-        : "-initial-review";
+const reviewSuffix = fifthReview
+  ? "-ux-fifth-review"
+  : fourthReview
+    ? "-ux-fourth-review"
+    : interactionReview
+      ? "-ux-interaction-review"
+      : stabilityReview
+        ? "-ux-stability-review"
+        : process.argv.includes("--ux-review")
+          ? "-ux-review"
+          : "-initial-review";
 const artifactPath = path.join(
   artifactDirectory,
   `${packageJson.name}-${packageJson.version}${reviewBuild ? reviewSuffix : ""}.vsix`,
