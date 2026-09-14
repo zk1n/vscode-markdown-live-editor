@@ -1,4 +1,5 @@
 import { EditorView } from "@codemirror/view";
+import { findTables } from "../../src/core/markdown/tableSource.js";
 
 declare function acquireVsCodeApi(): {
   postMessage(value: unknown): void;
@@ -81,6 +82,58 @@ function paste(view: EditorView, text: string): void {
     new ClipboardEvent("paste", { clipboardData: data, bubbles: true, cancelable: true }),
   );
 }
+function pointer(
+  type: string,
+  button: HTMLButtonElement,
+  options: {
+    readonly button: number;
+    readonly buttons: number;
+    readonly x: number;
+    readonly y: number;
+  },
+): void {
+  button.dispatchEvent(
+    new PointerEvent(type, {
+      pointerId: 41,
+      pointerType: "mouse",
+      isPrimary: true,
+      bubbles: true,
+      cancelable: true,
+      button: options.button,
+      buttons: options.buttons,
+      clientX: options.x,
+      clientY: options.y,
+    }),
+  );
+}
+function textPosition(
+  view: EditorView,
+  value: string,
+  expectedFrom: number,
+): { readonly node: Text; readonly offset: number } | undefined {
+  const walker = document.createTreeWalker(view.contentDOM, NodeFilter.SHOW_TEXT);
+  for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+    let offset = node.textContent?.indexOf(value) ?? -1;
+    while (offset >= 0) {
+      if (view.posAtDOM(node, offset) === expectedFrom) return { node: node as Text, offset };
+      offset = node.textContent?.indexOf(value, offset + 1) ?? -1;
+    }
+  }
+  return undefined;
+}
+function visibleParagraphAfterTable(
+  view: EditorView,
+  table: { readonly to: number },
+): { readonly from: number; readonly text: string; readonly node: Text; readonly offset: number } {
+  const document = view.state.doc;
+  for (let number = document.lineAt(table.to).number + 1; number <= document.lines; number++) {
+    const line = document.line(number);
+    if (!line.text.trim()) continue;
+    const position = textPosition(view, line.text, line.from);
+    if (position) return { from: line.from, text: line.text, ...position };
+  }
+  throw new Error("no visible source paragraph after first table");
+}
 async function run(): Promise<void> {
   await import("../../src/webview/editor.js");
   const content = document.querySelector<HTMLElement>(".cm-content");
@@ -113,7 +166,7 @@ async function run(): Promise<void> {
   press(view.contentDOM, "Tab");
   paste(view, "NEWROW");
   check(view.state.doc.toString().includes("| NEWROW |  |"), "last Tab/new-row input failed");
-  for (const action of ["column-append", "row-append"]) {
+  for (const action of ["column-append", "row-append"] as const) {
     await new Promise<void>((resolve) =>
       requestAnimationFrame(() =>
         requestAnimationFrame(() => {
@@ -123,17 +176,109 @@ async function run(): Promise<void> {
     );
     const button = view.dom.querySelector<HTMLButtonElement>(`[data-table-add="${action}"]`);
     check(button, "plus missing");
-    button.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true }));
-    button.click();
-    paste(view, action === "column-append" ? "COLUMN" : "ROW");
+    const bounds = button.getBoundingClientRect();
+    const point = { x: bounds.left + bounds.width / 2, y: bounds.top + bounds.height / 2 };
+    const before = view.state.doc.toString();
+    const beforeTable = findTables(before)[0];
+    check(beforeTable, "table source missing before append");
+    const beforeColumns = beforeTable.rows[0]?.cells.length;
+    check(beforeColumns !== undefined, "table has no columns before append");
+
+    // Synthetic DOM evidence only: the control must reject a context click and a dragged release.
+    pointer("pointerdown", button, { button: 2, buttons: 2, ...point });
+    pointer("pointerup", button, { button: 2, buttons: 0, ...point });
+    check(view.state.doc.toString() === before, "right-click changed source");
+    pointer("pointerdown", button, { button: 0, buttons: 1, ...point });
+    pointer("pointermove", button, { button: 0, buttons: 1, x: point.x + 8, y: point.y + 8 });
+    pointer("pointerup", button, { button: 0, buttons: 0, ...point });
+    button.dispatchEvent(
+      new MouseEvent("click", { button: 0, detail: 1, bubbles: true, cancelable: true, ...point }),
+    );
+    check(view.state.doc.toString() === before, "dragged table control changed source");
+
+    pointer("pointerdown", button, { button: 0, buttons: 1, ...point });
+    check(view.state.doc.toString() === before, "pointerdown changed source");
+    pointer("pointerup", button, { button: 0, buttons: 0, ...point });
+    button.dispatchEvent(
+      new MouseEvent("click", { button: 0, detail: 1, bubbles: true, cancelable: true, ...point }),
+    );
+    await wait(() => {
+      const after = findTables(view.state.doc.toString())[0];
+      return action === "column-append"
+        ? after?.rows.every((row) => row.cells.length === beforeColumns + 1) === true
+        : after?.rows.length === beforeTable.rows.length + 1;
+    }, `${action} did not append expected source shape`);
     check(view.hasFocus, "plus lost focus");
   }
   const tableSource = view.state.doc.toString();
+  const firstTable = findTables(tableSource)[0];
+  check(firstTable, "first table missing after table actions");
+  const visibleAfter = visibleParagraphAfterTable(view, firstTable);
+  const range = document.createRange();
+  range.setStart(visibleAfter.node, visibleAfter.offset);
+  range.setEnd(visibleAfter.node, visibleAfter.offset + visibleAfter.text.length);
+  const rangeBounds = range.getBoundingClientRect();
+  const sourcePosition = view.posAtDOM(visibleAfter.node, visibleAfter.offset);
+  const lineBlock = view.lineBlockAt(visibleAfter.from);
+  const sourceCaret = view.coordsAtPos(visibleAfter.from);
+  check(
+    sourcePosition === visibleAfter.from,
+    "visible paragraph maps to the wrong source position",
+  );
+  check(
+    lineBlock.from <= visibleAfter.from && lineBlock.to >= visibleAfter.from,
+    "line block misses paragraph",
+  );
+  check(
+    rangeBounds.height > 0 && sourceCaret && sourceCaret.bottom > sourceCaret.top,
+    "post-table paragraph has no measurable range/caret",
+  );
   stage("table complete");
+
+  press(view.contentDOM, "f", true);
+  const searchQuery = view.dom.querySelector<HTMLInputElement>("[data-search-input=query]");
+  check(searchQuery, "Ctrl+F did not open floating UI");
+  const latestCell = view.contentDOM.querySelector<HTMLElement>("[data-table-cell]");
+  check(latestCell, "table cell missing for search Escape");
+  const latestBounds = latestCell.getBoundingClientRect();
+  latestCell.dispatchEvent(
+    new MouseEvent("mousedown", {
+      button: 0,
+      clientX: latestBounds.left + 4,
+      clientY: latestBounds.top + 4,
+      bubbles: true,
+      cancelable: true,
+    }),
+  );
+  latestCell.dispatchEvent(new MouseEvent("click", { button: 0, bubbles: true, cancelable: true }));
+  await new Promise<void>((resolve) =>
+    requestAnimationFrame(() => {
+      resolve();
+    }),
+  );
+  const latestSelection = view.state.selection.main;
+  // The selection update can replace cell spans. Keys arrive at the live
+  // contenteditable, never at a detached span captured before the click.
+  press(view.contentDOM, "Escape");
+  check(view.dom.querySelector(".cm-floating-search") === null, "content Escape left search open");
+  check(
+    view.state.selection.main.eq(latestSelection) && view.state.doc.toString() === tableSource,
+    "content Escape did not preserve the latest table selection/source",
+  );
+
   press(view.contentDOM, "h", true);
   const query = view.dom.querySelector<HTMLInputElement>("[data-search-input=query]");
   const replacement = view.dom.querySelector<HTMLInputElement>("[data-search-input=replacement]");
   check(query && replacement, "Ctrl+H did not open floating UI");
+  const queryBounds = query.parentElement?.getBoundingClientRect();
+  const replacementBounds = replacement.parentElement?.getBoundingClientRect();
+  check(queryBounds && replacementBounds, "search input frames missing");
+  check(
+    Math.abs(queryBounds.left - replacementBounds.left) < 0.5 &&
+      Math.abs(queryBounds.right - replacementBounds.right) < 0.5 &&
+      Math.abs(queryBounds.width - replacementBounds.width) < 0.5,
+    `search input frames differ: ${JSON.stringify({ queryBounds, replacementBounds })}`,
+  );
   query.value = "needle";
   query.dispatchEvent(new InputEvent("input", { bubbles: true }));
   await wait(
@@ -223,6 +368,20 @@ async function run(): Promise<void> {
     text: view.state.doc.toString(),
     focused: view.hasFocus,
     caret,
+    synthetic: true,
+    tableSourceGeometry: {
+      text: visibleAfter.text,
+      from: visibleAfter.from,
+      sourcePosition,
+      lineBlock: {
+        from: lineBlock.from,
+        to: lineBlock.to,
+        top: lineBlock.top,
+        bottom: lineBlock.bottom,
+      },
+      rangeBounds,
+      sourceCaret,
+    },
     rows: view.dom.querySelectorAll(".cm-table-row").length,
   });
 }

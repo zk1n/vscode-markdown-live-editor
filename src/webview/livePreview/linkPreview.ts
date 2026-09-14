@@ -1,6 +1,12 @@
 import { markdown } from "@codemirror/lang-markdown";
-import { EditorState, type Extension } from "@codemirror/state";
-import { EditorView, hoverTooltip, closeHoverTooltips, hasHoverTooltips } from "@codemirror/view";
+import { EditorState, Prec, type Extension } from "@codemirror/state";
+import {
+  EditorView,
+  hoverTooltip,
+  closeHoverTooltips,
+  hasHoverTooltips,
+  repositionTooltips,
+} from "@codemirror/view";
 import { findMarkdownLinks, type MarkdownLink } from "../../core/markdown/markdownLinks.js";
 import type { RichClient } from "../richClient.js";
 import { createLivePreviewEngine } from "./LivePreviewEngine.js";
@@ -24,6 +30,16 @@ export function linkPreview(actions: LinkActions): Extension {
         const response = await actions.client.request("link-preview", { target: link.target });
         if (view.state.doc !== snapshot || response === undefined || !view.dom.isConnected)
           return null;
+        // Resolve the first size before CM chooses a side. Its chosen side is
+        // retained until it no longer fits, even when content later shrinks.
+        const heightFor = (anchor: { top: number; bottom: number }): number => {
+          const above = anchor.top - 14 - 8;
+          const below = window.innerHeight - anchor.bottom - 14 - 8;
+          return Math.max(0, Math.min(400, window.innerHeight * 0.65, above >= 64 ? above : below));
+        };
+        const initialAnchor = view.coordsAtPos(link.from);
+        if (!initialAnchor) return null;
+        const initialHeight = heightFor(initialAnchor);
         return {
           pos: link.from,
           end: link.to,
@@ -31,6 +47,7 @@ export function linkPreview(actions: LinkActions): Extension {
           create() {
             const dom = document.createElement("div");
             dom.className = "cm-link-preview";
+            dom.style.maxHeight = `${String(initialHeight)}px`;
             const heading = document.createElement("div");
             heading.className = "cm-link-preview-title";
             heading.textContent = response.title ?? link.label;
@@ -38,11 +55,45 @@ export function linkPreview(actions: LinkActions): Extension {
             hint.className = "cm-link-preview-hint";
             hint.textContent = "Ctrl+クリックで開く · Escで閉じる";
             dom.append(heading, hint);
+            let destroyed = false;
+            const fit = (): void => {
+              if (destroyed) return;
+              view.requestMeasure({
+                key: dom,
+                read() {
+                  const anchor = view.coordsAtPos(link.from);
+                  if (!anchor) return undefined;
+                  return heightFor(anchor);
+                },
+                write(height) {
+                  if (destroyed || height === undefined) return;
+                  const value = `${String(height)}px`;
+                  if (dom.style.maxHeight !== value) {
+                    dom.style.maxHeight = value;
+                    repositionTooltips(view);
+                  }
+                },
+              });
+            };
+            const placement = {
+              offset: { x: 0, y: 14 },
+              mount() {
+                fit();
+                view.scrollDOM.addEventListener("scroll", fit);
+                window.addEventListener("resize", fit);
+              },
+              update: fit,
+              destroy() {
+                destroyed = true;
+                view.scrollDOM.removeEventListener("scroll", fit);
+                window.removeEventListener("resize", fit);
+              },
+            };
             if (!response.ok) {
               const error = document.createElement("p");
               error.textContent = response.note ?? "リンク先を確認できません。";
               dom.append(error);
-              return { dom };
+              return { dom, ...placement };
             }
             const preview = createLivePreviewEngine();
             const nested = new EditorView({
@@ -59,7 +110,11 @@ export function linkPreview(actions: LinkActions): Extension {
             });
             return {
               dom,
+              ...placement,
+              // Keep the preview clear of an enlarged pointer while preserving
+              // CodeMirror's viewport-aware side selection and resize behavior.
               destroy() {
+                placement.destroy();
                 nested.destroy();
                 preview.dispose();
               },
@@ -69,29 +124,39 @@ export function linkPreview(actions: LinkActions): Extension {
       },
       { hoverTime: 450, hideOnChange: true },
     ),
-    EditorView.domEventHandlers({
-      keydown(event, view) {
-        if (event.key !== "Escape" || event.isComposing || !hasHoverTooltips(view.state))
-          return false;
-        view.dispatch({ effects: closeHoverTooltips });
-        event.preventDefault();
-        return true;
-      },
-      mousedown(event, view) {
-        if (event.button !== 0 || !(event.ctrlKey || event.metaKey)) return false;
-        const position = view.posAtCoords({ x: event.clientX, y: event.clientY });
-        if (position === null) return false;
-        const link = findMarkdownLinks(view.state.doc.toString()).find(
-          (candidate) => !candidate.image && candidate.from <= position && candidate.to >= position,
-        );
-        if (link === undefined) return false;
-        event.preventDefault();
-        void openMarkdownLink(view, link, actions);
-        return true;
-      },
-    }),
+    Prec.highest(
+      EditorView.domEventHandlers({
+        keydown(event, view) {
+          if (
+            event.key !== "Escape" ||
+            event.isComposing ||
+            view.composing ||
+            view.compositionStarted ||
+            !hasHoverTooltips(view.state)
+          )
+            return false;
+          view.dispatch({ effects: closeHoverTooltips });
+          event.preventDefault();
+          return true;
+        },
+        mousedown(event, view) {
+          if (event.button !== 0 || !(event.ctrlKey || event.metaKey)) return false;
+          const position = view.posAtCoords({ x: event.clientX, y: event.clientY });
+          if (position === null) return false;
+          const link = findMarkdownLinks(view.state.doc.toString()).find(
+            (candidate) =>
+              !candidate.image && candidate.from <= position && candidate.to >= position,
+          );
+          if (link === undefined) return false;
+          event.preventDefault();
+          void openMarkdownLink(view, link, actions);
+          return true;
+        },
+      }),
+    ),
     EditorView.baseTheme({
       ".cm-link-preview": {
+        boxSizing: "border-box",
         width: "min(480px, 80vw)",
         maxHeight: "min(400px, 65vh)",
         overflow: "auto",

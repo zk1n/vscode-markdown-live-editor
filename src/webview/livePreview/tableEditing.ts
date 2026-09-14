@@ -6,6 +6,7 @@ import {
   StateField,
   EditorSelection,
   Prec,
+  MapMode,
   type ChangeSpec,
   type EditorState,
   type Extension,
@@ -20,6 +21,7 @@ import {
   ViewPlugin,
   type ViewUpdate,
   type DecorationSet,
+  type MouseSelectionStyle,
 } from "@codemirror/view";
 import {
   changeTableColumn,
@@ -29,6 +31,7 @@ import {
 } from "../../core/markdown/tableSource.js";
 
 import { searchReveal, revealSearchMatch } from "./searchReveal.js";
+import { createControlledTooltip } from "../controlledTooltip.js";
 
 // The cells are the main CodeMirror contentDOM: native selection, clipboard,
 // IME, Save and history all retain the same source and controller owner.
@@ -117,8 +120,28 @@ function build(state: EditorState): DecorationSet {
       ranges.push(Decoration.line({ class: "cm-table-delimiter" }).range(table.delimiter.from));
       ranges.push(Decoration.replace({}).range(table.delimiter.from, table.delimiter.to));
     }
+    if (!sourceRows(state).includes(table.rows[table.rows.length - 1]?.from ?? table.to))
+      ranges.push(
+        Decoration.widget({ widget: new TableAppendSpace(), block: true, side: 1 }).range(table.to),
+      );
   }
   return Decoration.set(ranges, true);
+}
+
+/** A measured, non-editable block; line margins are absent from CM's height map. */
+class TableAppendSpace extends WidgetType {
+  public override eq(): boolean {
+    return true;
+  }
+  public override get estimatedHeight(): number {
+    return 22;
+  }
+  public override toDOM(): HTMLElement {
+    const dom = document.createElement("div");
+    dom.className = "cm-table-append-space";
+    dom.setAttribute("aria-hidden", "true");
+    return dom;
+  }
 }
 
 /**
@@ -457,32 +480,39 @@ function cellBoundary(view: EditorView, end: boolean, extend = false): boolean {
   return true;
 }
 
-function clickCell(event: MouseEvent, view: EditorView): boolean {
+function tablePointerSelection(view: EditorView, event: MouseEvent): MouseSelectionStyle | null {
   if (
     event.button !== 0 ||
-    event.shiftKey ||
-    event.ctrlKey ||
-    event.metaKey ||
+    event.detail > 1 ||
     view.composing ||
-    view.compositionStarted
+    view.compositionStarted ||
+    findTables(view.state.doc.toString()).length === 0
   )
-    return false;
-  const element =
-    event.target instanceof Element ? event.target.closest<HTMLElement>("[data-table-cell]") : null;
-  if (element === null) return false;
-  const position = Number(element.dataset["tableCell"]);
-  const table = findTables(view.state.doc.toString()).find((table) => tableCellAt(table, position));
-  const cell = table === undefined ? undefined : tableCellAt(table, position)?.cell;
-  if (cell === undefined) return false;
-  const hit = view.posAtCoords({ x: event.clientX, y: event.clientY });
-  // Let CodeMirror start native dragging whenever its hit belongs to this cell.
-  // The selection filter clamps a collapsed padding hit, while ranges retain source semantics.
-  if (hit !== null && hit >= cell.from && hit <= cell.to) return false;
-  const anchor = Math.max(cell.contentFrom, Math.min(cell.contentTo, hit ?? cell.contentFrom));
-  event.preventDefault();
-  view.dispatch({ selection: { anchor } });
-  view.focus();
-  return true;
+    return null;
+  const hit = (event: MouseEvent): number => {
+    const element = view.dom.ownerDocument.elementFromPoint(event.clientX, event.clientY);
+    // CSS table-cell fragments do not have inline source order. Use the browser's
+    // text hit test for those fragments, through CM's own mouse-selection lifecycle.
+    if (element?.closest("[data-table-cell]") && view.contentDOM.contains(element))
+      return (
+        cellPositionAtCoords(view, event.clientX, event.clientY) ?? view.state.selection.main.head
+      );
+    return view.posAtCoords({ x: event.clientX, y: event.clientY }, false);
+  };
+  let start = hit(event);
+  let selection = view.state.selection;
+  return {
+    get(current, extend, multiple) {
+      const range = EditorSelection.range(extend ? selection.main.anchor : start, hit(current));
+      return multiple ? selection.addRange(range) : EditorSelection.create([range]);
+    },
+    update(update) {
+      if (update.docChanged) {
+        start = update.changes.mapPos(start);
+        selection = selection.map(update.changes);
+      }
+    },
+  };
 }
 
 /** Only normal cell input is protected. Explicit source edits and search replacement stay literal. */
@@ -557,116 +587,245 @@ function protectCells(transaction: Transaction): Transaction | readonly Transact
 function tableControls(isEditable: () => boolean): Extension {
   return ViewPlugin.fromClass(
     class {
-      private readonly row = document.createElement("button");
-      private readonly column = document.createElement("button");
-      private hovered: number | undefined;
-      private target: number | undefined;
+      private readonly tooltip;
+      private controls = new Map<
+        number,
+        {
+          row: HTMLButtonElement;
+          column: HTMLButtonElement;
+          bounds?: { left: number; right: number; top: number; bottom: number };
+        }
+      >();
+      private pointer: { x: number; y: number } | undefined;
+      private pressed:
+        | {
+            button: HTMLButtonElement;
+            id: number;
+            x: number;
+            y: number;
+            doc: EditorState["doc"];
+            ready: boolean;
+          }
+        | undefined;
+      private destroyed = false;
       constructor(private readonly view: EditorView) {
+        this.tooltip = createControlledTooltip(view.dom);
+        view.dom.addEventListener("pointermove", this.over);
+        view.dom.addEventListener("pointerleave", this.leave);
+        view.dom.ownerDocument.addEventListener("pointerdown", this.cancel, true);
+        view.dom.ownerDocument.addEventListener("pointermove", this.track, true);
+        view.dom.ownerDocument.addEventListener("pointerup", this.release, true);
+        view.dom.ownerDocument.addEventListener("pointercancel", this.cancel, true);
+        view.scrollDOM.addEventListener("scroll", this.measure);
+        this.measure();
+      }
+      private create(from: number): { row: HTMLButtonElement; column: HTMLButtonElement } {
+        const row = document.createElement("button"),
+          column = document.createElement("button");
         for (const [button, action, label] of [
-          [this.row, "row-append", "末尾に行を追加"],
-          [this.column, "column-append", "末尾に列を追加"],
+          [row, "row-append", "末尾に行を追加"],
+          [column, "column-append", "末尾に列を追加"],
         ] as const) {
           button.type = "button";
           button.className = "cm-table-add";
           button.dataset["tableAdd"] = action;
+          button.dataset["tableFrom"] = String(from);
           button.textContent = "+";
-          button.title = label;
           button.setAttribute("aria-label", label);
-          button.hidden = true;
+          this.tooltip.attach(button, label);
+          button.addEventListener("pointerdown", (event) => {
+            if (event.button !== 0 || !isEditable()) return;
+            event.preventDefault();
+            this.pressed = {
+              button,
+              id: event.pointerId,
+              x: event.clientX,
+              y: event.clientY,
+              doc: this.view.state.doc,
+              ready: false,
+            };
+          });
           button.addEventListener("mousedown", (event) => {
             event.preventDefault();
           });
-          button.addEventListener("click", () => {
-            if (isEditable() && this.target !== undefined) editTable(view, action, this.target);
+          button.addEventListener("click", (event) => {
+            const keyboard =
+              event.detail === 0 && this.view.dom.ownerDocument.activeElement === button;
+            const pointer =
+              event.button === 0 &&
+              this.pressed?.button === button &&
+              this.pressed.ready &&
+              this.pressed.doc === this.view.state.doc;
+            this.pressed = undefined;
+            if ((keyboard || pointer) && !button.hidden && isEditable())
+              editTable(this.view, action, Number(button.dataset["tableFrom"]));
           });
-          view.dom.append(button);
+          this.view.dom.append(button);
         }
-        view.dom.addEventListener("mouseover", this.over);
-        view.dom.addEventListener("mouseleave", this.leave);
-        view.scrollDOM.addEventListener("scroll", this.measure);
-        this.measure();
+        return { row, column };
       }
-      private readonly over = (event: MouseEvent): void => {
-        const element =
-          event.target instanceof Element
-            ? event.target.closest<HTMLElement>("[data-table-from]")
-            : null;
-        if (element !== null) this.hovered = Number(element.dataset["tableFrom"]);
-        else if (event.target !== this.row && event.target !== this.column)
-          this.hovered = undefined;
-        this.measure();
+      private readonly cancel = (): void => {
+        this.pressed = undefined;
+      };
+      private readonly track = (event: PointerEvent): void => {
+        const press = this.pressed;
+        if (
+          press &&
+          (press.id !== event.pointerId ||
+            Math.hypot(event.clientX - press.x, event.clientY - press.y) > 4)
+        )
+          this.cancel();
+      };
+      private readonly release = (event: PointerEvent): void => {
+        const press = this.pressed;
+        if (press?.id !== event.pointerId) return;
+        const rect = press.button.getBoundingClientRect();
+        if (
+          event.button === 0 &&
+          event.target === press.button &&
+          event.clientX >= rect.left &&
+          event.clientX < rect.right &&
+          event.clientY >= rect.top &&
+          event.clientY < rect.bottom
+        )
+          press.ready = true;
+        else this.cancel();
+      };
+      private readonly over = (event: PointerEvent): void => {
+        this.pointer = { x: event.clientX, y: event.clientY };
+        this.highlight();
       };
       private readonly leave = (): void => {
-        this.hovered = undefined;
-        this.measure();
+        this.pointer = undefined;
+        this.highlight();
       };
+      private highlight(): void {
+        for (const pair of this.controls.values()) {
+          const p = this.pointer,
+            b = pair.bounds;
+          const active = !!(
+            p &&
+            b &&
+            p.x >= b.left &&
+            p.x < b.right + 22 &&
+            p.y >= b.top &&
+            p.y < b.bottom + 22
+          );
+          for (const button of [pair.row, pair.column])
+            button.toggleAttribute("data-active", active);
+        }
+      }
       private readonly measure = (): void => {
+        if (this.destroyed) return;
         this.view.requestMeasure({
           key: this,
           read: (view) => {
-            const tables = findTables(view.state.doc.toString());
-            const table =
-              tables.find((table) => this.hovered === table.from) ??
-              tables.find((table) => tableCellAt(table, view.state.selection.main.head));
-            if (table === undefined || isTableSourceActive(view.state, table)) return undefined;
-            const rows = view.contentDOM.querySelectorAll<HTMLElement>(
-              `[data-table-from="${String(table.from)}"]`,
-            );
-            const first = rows[0]?.getBoundingClientRect();
-            const last = rows[rows.length - 1]?.getBoundingClientRect();
             const root = view.dom.getBoundingClientRect();
-            if (
-              first === undefined ||
-              last === undefined ||
-              last.bottom < root.top ||
-              first.top > root.bottom
-            )
-              return undefined;
+            const scroll = view.scrollDOM.getBoundingClientRect();
             return {
-              first,
-              last,
               root,
-              target: tableCellAt(table, view.state.selection.main.head)
-                ? view.state.selection.main.head
-                : table.rows[0]?.cells[0]?.contentFrom,
+              scroll,
+              tables: findTables(view.state.doc.toString()).flatMap((table) => {
+                if (isTableSourceActive(view.state, table)) return [];
+                const rows = view.contentDOM.querySelectorAll<HTMLElement>(
+                  `[data-table-from="${String(table.from)}"]`,
+                );
+                const first = rows[0]?.getBoundingClientRect();
+                const last = rows[rows.length - 1]?.getBoundingClientRect();
+                if (!first || !last || last.bottom + 22 < scroll.top || first.top > scroll.bottom)
+                  return [];
+                return [{ from: table.from, first, last }];
+              }),
             };
           },
-          write: (bounds) => {
-            this.target = bounds?.target;
-            for (const button of [this.row, this.column]) {
-              button.hidden = bounds === undefined;
-              button.disabled = !isEditable();
+          write: ({ root, scroll, tables }) => {
+            if (this.destroyed) return;
+            const live = new Set(tables.map((table) => table.from));
+            for (const [from, pair] of this.controls)
+              if (!live.has(from)) {
+                pair.row.remove();
+                pair.column.remove();
+                this.tooltip.hide();
+                this.controls.delete(from);
+                if (this.pressed?.button === pair.row || this.pressed?.button === pair.column)
+                  this.cancel();
+              }
+            for (const { from, first, last } of tables) {
+              let pair = this.controls.get(from);
+              if (!pair) {
+                pair = this.create(from);
+                this.controls.set(from, pair);
+              }
+              pair.bounds = {
+                left: first.left,
+                right: first.right,
+                top: first.top,
+                bottom: last.bottom,
+              };
+              const left = Math.max(first.left, scroll.left);
+              const right = Math.min(first.right, scroll.right);
+              const top = Math.max(first.top, scroll.top);
+              const bottom = Math.min(last.bottom, scroll.bottom);
+              for (const button of [pair.row, pair.column]) {
+                button.dataset["tableFrom"] = String(from);
+                button.disabled = !isEditable();
+              }
+              Object.assign(pair.row.style, {
+                left: `${String(left - root.left)}px`,
+                top: `${String(last.bottom + 2 - root.top)}px`,
+                width: `${String(Math.max(0, right - left))}px`,
+              });
+              Object.assign(pair.column.style, {
+                left: `${String(first.right + 2 - root.left)}px`,
+                top: `${String(top - root.top)}px`,
+                height: `${String(Math.max(0, bottom - top))}px`,
+              });
+              pair.row.hidden =
+                last.bottom + 20 > scroll.bottom || last.bottom < scroll.top || right <= left;
+              pair.column.hidden =
+                first.right + 20 > scroll.right || first.right < scroll.left || bottom <= top;
             }
-            if (bounds === undefined) return;
-            const { first, last, root } = bounds;
-            const scroll = this.view.scrollDOM.getBoundingClientRect();
-            const left = Math.max(first.left, scroll.left);
-            const right = Math.min(first.right, scroll.right - 22);
-            const top = Math.max(first.top, scroll.top);
-            const bottom = Math.min(last.bottom, scroll.bottom);
-            this.column.style.left = `${String(right - root.left)}px`;
-            this.column.style.top = `${String(top - root.top)}px`;
-            this.column.style.height = `${String(Math.max(0, bottom - top))}px`;
-            this.row.style.left = `${String(left - root.left)}px`;
-            this.row.style.width = `${String(Math.max(0, right - left))}px`;
-            this.row.style.top = `${String(last.bottom - root.top)}px`;
-            this.row.hidden = last.bottom > scroll.bottom || last.bottom < scroll.top;
-            this.column.hidden =
-              first.right + 22 > scroll.right || first.right < scroll.left || bottom <= top;
+            this.highlight();
+            this.tooltip.reposition();
           },
         });
       };
       update(update: ViewUpdate): void {
-        if (update.docChanged && this.hovered !== undefined)
-          this.hovered = update.changes.mapPos(this.hovered);
-        this.measure();
+        if (update.docChanged) {
+          this.cancel();
+          const mapped: typeof this.controls = new Map();
+          for (const [from, pair] of this.controls) {
+            const next = update.changes.mapPos(from, 1, MapMode.TrackAfter);
+            if (next === null || mapped.has(next)) {
+              pair.row.remove();
+              pair.column.remove();
+              this.tooltip.hide();
+            } else mapped.set(next, pair);
+          }
+          this.controls = mapped;
+        }
+        if (
+          update.docChanged ||
+          update.geometryChanged ||
+          update.viewportChanged ||
+          update.transactions.some((tr) => tr.effects.length)
+        )
+          this.measure();
       }
       destroy(): void {
-        this.view.dom.removeEventListener("mouseover", this.over);
-        this.view.dom.removeEventListener("mouseleave", this.leave);
+        this.destroyed = true;
+        this.tooltip.destroy();
+        this.view.dom.removeEventListener("pointermove", this.over);
+        this.view.dom.removeEventListener("pointerleave", this.leave);
+        this.view.dom.ownerDocument.removeEventListener("pointerdown", this.cancel, true);
+        this.view.dom.ownerDocument.removeEventListener("pointermove", this.track, true);
+        this.view.dom.ownerDocument.removeEventListener("pointerup", this.release, true);
+        this.view.dom.ownerDocument.removeEventListener("pointercancel", this.cancel, true);
         this.view.scrollDOM.removeEventListener("scroll", this.measure);
-        this.row.remove();
-        this.column.remove();
+        for (const pair of this.controls.values()) {
+          pair.row.remove();
+          pair.column.remove();
+        }
       }
     },
   );
@@ -679,7 +838,7 @@ export function tableEditing(isEditable: () => boolean): Extension {
     drawSelection(),
     State.transactionFilter.of(protectCells),
     tableControls(isEditable),
-    EditorView.domEventHandlers({ mousedown: clickCell }),
+    EditorView.mouseSelectionStyle.of(tablePointerSelection),
     tableDecorations,
     Prec.highest(
       keymap.of([
@@ -707,8 +866,9 @@ export function tableEditing(isEditable: () => boolean): Extension {
       ".cm-table-add": {
         position: "absolute",
         zIndex: "5",
-        width: "22px",
-        height: "22px",
+        width: "18px",
+        height: "18px",
+        boxSizing: "border-box",
         padding: "0",
         cursor: "pointer",
         margin: "0",
@@ -718,7 +878,7 @@ export function tableEditing(isEditable: () => boolean): Extension {
         borderRadius: "3px",
       },
       ".cm-table-add[hidden]": { display: "none" },
-      ".cm-table-add:hover, .cm-table-add:focus-visible": {
+      ".cm-table-add[data-active], .cm-table-add:hover, .cm-table-add:focus-visible": {
         color: "var(--vscode-editor-foreground, currentColor)",
         background: "var(--vscode-toolbar-hoverBackground, #80808044)",
         borderColor: "var(--vscode-contrastBorder, transparent)",
@@ -735,7 +895,7 @@ export function tableEditing(isEditable: () => boolean): Extension {
       },
       // Always reserve the append band's space. It must never cover the
       // next source line, and hovering must not change the height map.
-      ".cm-line.cm-table-last-row": { marginBottom: "22px" },
+      ".cm-table-append-space": { height: "22px", pointerEvents: "none" },
       ".cm-table-cell": {
         display: "table-cell",
         boxSizing: "border-box",

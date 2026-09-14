@@ -6,7 +6,16 @@ import {
   type Text,
   type SelectionRange,
 } from "@codemirror/state";
-import { Decoration, EditorView, ViewPlugin, keymap, type ViewUpdate } from "@codemirror/view";
+import {
+  Decoration,
+  EditorView,
+  ViewPlugin,
+  hasHoverTooltips,
+  closeHoverTooltips,
+  keymap,
+  type ViewUpdate,
+} from "@codemirror/view";
+import { createControlledTooltip, type ControlledTooltip } from "../controlledTooltip.js";
 import { executeSearch, type SearchExecutor } from "./searchExecutor.js";
 import type { SearchMatch, SearchOptions, SearchResult } from "./searchPlan.js";
 import {
@@ -122,6 +131,7 @@ export function createFloatingSearch(options: {
     private readonly toggles = new Map<keyof SearchOptions | "scope", HTMLButtonElement>();
     private readonly replaceButtons: HTMLButtonElement[] = [];
     private readonly expand: HTMLButtonElement;
+    private readonly tooltip: ControlledTooltip;
     private readonly text = document.documentElement.lang.startsWith("ja") ? labels.ja : labels.en;
     private abort: AbortController | undefined;
     private snapshot: Text | undefined;
@@ -130,12 +140,14 @@ export function createFloatingSearch(options: {
     private scope: { from: number; to: number } | undefined;
     private current = -1;
     private opened = false;
+    private selectionMovedOutsideForm = false;
     private destroyed = false;
     private generation = 0;
     constructor(readonly view: EditorView) {
       instances.set(view, this);
       this.saved = view.state.selection.main;
       this.dom.className = "cm-floating-search";
+      this.tooltip = createControlledTooltip(this.view.dom);
       this.dom.setAttribute("role", "search");
       this.dom.setAttribute("aria-label", this.text.find);
       this.query.type = this.replacement.type = "text";
@@ -146,21 +158,21 @@ export function createFloatingSearch(options: {
       this.query.dataset["searchInput"] = "query";
       this.replacement.dataset["searchInput"] = "replacement";
       const row = document.createElement("div");
-      row.className = "cm-floating-search-row";
+      row.className = "cm-floating-search-row cm-search-input-row";
       this.expand = this.button("", `${this.text.replace} / ${this.text.find}`, () => {
         this.setExpanded(this.replaceRow.hidden !== false);
       });
       this.expand.className = "cm-search-expand";
-      row.append(
-        this.expand,
-        this.query,
+      const navigation = document.createElement("div");
+      navigation.className = "cm-search-actions";
+      navigation.append(
         this.button("↑", this.text.previous, () => this.navigate(-1)),
         this.button("↓", this.text.next, () => this.navigate(1)),
         this.button("×", this.text.close, () => {
-          this.close();
+          this.close(true);
         }),
       );
-      this.replaceRow.className = "cm-floating-search-row";
+      this.replaceRow.className = "cm-floating-search-row cm-search-input-row";
       const one = this.button(this.text.one, this.text.one, () => {
         this.replace(false);
       });
@@ -168,9 +180,9 @@ export function createFloatingSearch(options: {
         this.replace(true);
       });
       this.replaceButtons.push(one, all);
-      this.replaceRow.append(this.replacement, one, all);
-      const controls = document.createElement("div");
-      controls.className = "cm-floating-search-options";
+      const replaceActions = document.createElement("div");
+      replaceActions.className = "cm-search-actions";
+      replaceActions.append(one, all);
       for (const [key, display, label] of [
         ["caseSensitive", "Aa", this.text.case],
         ["wholeWord", "ab", this.text.word],
@@ -186,7 +198,6 @@ export function createFloatingSearch(options: {
         });
         button.setAttribute("aria-pressed", "false");
         this.toggles.set(key, button);
-        controls.append(button);
       }
       this.status.setAttribute("role", "status");
       this.status.setAttribute("aria-live", "polite");
@@ -202,9 +213,17 @@ export function createFloatingSearch(options: {
       if (scopeButton) {
         scopeButton.textContent = "";
         scopeButton.className = "cm-search-scope";
-        row.insertBefore(scopeButton, row.lastChild);
+        navigation.prepend(scopeButton);
       }
-      row.insertBefore(this.status, queryBox.nextSibling);
+      const replacementBox = document.createElement("div");
+      replacementBox.className = "cm-search-query-box cm-search-replacement-box";
+      this.replacement.replaceWith(replacementBox);
+      replacementBox.append(this.replacement);
+      navigation.prepend(this.status);
+      row.append(this.expand, queryBox, navigation);
+      const spacer = document.createElement("span");
+      spacer.className = "cm-search-row-spacer";
+      this.replaceRow.append(spacer, replacementBox, replaceActions);
       this.dom.append(row, this.replaceRow);
       this.dom.addEventListener("focusin", () => {
         if (!this.view.state.field(searchPresentation))
@@ -222,7 +241,9 @@ export function createFloatingSearch(options: {
         if (event.isComposing || Reflect.get(event, "keyCode") === 229) return;
         if (event.key === "Escape") {
           event.preventDefault();
-          this.close();
+          if (hasHoverTooltips(this.view.state))
+            this.view.dispatch({ effects: closeHoverTooltips });
+          else this.close(true);
         } else if (event.key === "Enter" || event.key === "F3") {
           event.preventDefault();
           this.navigate(event.shiftKey ? -1 : 1);
@@ -248,7 +269,26 @@ export function createFloatingSearch(options: {
           }
         }
       });
+      // Scope Escape to this editor, including sibling UI such as the minimap.
+      // Capture precedes CM's table keymap; form handling retains its restore policy.
+      this.view.dom.addEventListener("keydown", this.escapeOutsideForm, true);
     }
+    private readonly escapeOutsideForm = (event: KeyboardEvent): void => {
+      if (
+        !this.opened ||
+        event.key !== "Escape" ||
+        (event.target instanceof Node && this.dom.contains(event.target)) ||
+        event.isComposing ||
+        Reflect.get(event, "keyCode") === 229 ||
+        this.view.composing ||
+        this.view.compositionStarted
+      )
+        return;
+      if (hasHoverTooltips(this.view.state)) this.view.dispatch({ effects: closeHoverTooltips });
+      else this.close(false);
+      event.preventDefault();
+      event.stopPropagation();
+    };
     private setExpanded(expanded: boolean): void {
       this.replaceRow.hidden = !expanded;
       this.expand.setAttribute("aria-expanded", String(expanded));
@@ -257,8 +297,8 @@ export function createFloatingSearch(options: {
       const button = document.createElement("button");
       button.type = "button";
       button.textContent = display;
-      button.title = label;
       button.setAttribute("aria-label", label);
+      this.tooltip.attach(button, label);
       button.addEventListener("click", run);
       return button;
     }
@@ -273,6 +313,7 @@ export function createFloatingSearch(options: {
         if (selected && !selected.includes("\n")) this.query.value = selected;
         this.view.dom.append(this.dom);
         this.opened = true;
+        this.selectionMovedOutsideForm = false;
       }
       const scope = this.toggles.get("scope");
       if (scope) scope.disabled = this.scope === undefined;
@@ -281,19 +322,23 @@ export function createFloatingSearch(options: {
       this.query.select();
       this.refresh();
     }
-    private close(): void {
-      const owned = this.dom.contains(document.activeElement);
+    close(fromForm: boolean): boolean {
+      if (!this.opened) return false;
+      const owned = fromForm && this.dom.contains(document.activeElement);
       const match = this.result.matches[this.current];
       const selection =
-        this.snapshot === this.view.state.doc && match
+        owned && !this.selectionMovedOutsideForm && this.snapshot === this.view.state.doc && match
           ? EditorSelection.single(match.to)
-          : EditorSelection.single(this.saved.anchor, this.saved.head);
+          : owned
+            ? EditorSelection.single(this.saved.anchor, this.saved.head)
+            : undefined;
       this.opened = false;
       this.generation++;
       this.abort?.abort();
+      this.tooltip.hide();
       this.dom.remove();
       this.view.dispatch({
-        selection,
+        ...(selection ? { selection } : {}),
         effects: [
           setMatches.of([]),
           revealSearchMatch.of(undefined),
@@ -302,6 +347,7 @@ export function createFloatingSearch(options: {
         scrollIntoView: owned,
       });
       if (owned) this.view.focus();
+      return true;
     }
     private enabled(key: keyof SearchOptions | "scope"): boolean {
       return this.toggles.get(key)?.getAttribute("aria-pressed") === "true";
@@ -435,17 +481,23 @@ export function createFloatingSearch(options: {
     update(update: ViewUpdate): void {
       if (!this.opened) return;
       if (update.focusChanged && update.view.hasFocus) {
-        queueMicrotask(() => {
+        requestAnimationFrame(() => {
           if (!this.destroyed && this.opened && this.view.hasFocus) {
             this.saved = this.view.state.selection.main;
+            this.selectionMovedOutsideForm = true;
             this.view.dispatch({ effects: setSearchPresentation.of(false) });
           }
         });
       }
-      if (update.selectionSet && !update.docChanged && this.view.hasFocus)
+      if (update.selectionSet && !update.docChanged && this.view.hasFocus) {
         this.saved = this.view.state.selection.main;
+        this.selectionMovedOutsideForm = true;
+      }
       if (update.docChanged) {
-        this.saved = this.saved.map(update.changes);
+        this.saved = this.view.hasFocus
+          ? this.view.state.selection.main
+          : this.saved.map(update.changes);
+        if (this.view.hasFocus) this.selectionMovedOutsideForm = true;
         if (this.scope)
           this.scope = {
             from: update.changes.mapPos(this.scope.from, -1),
@@ -462,7 +514,9 @@ export function createFloatingSearch(options: {
     }
     destroy(): void {
       this.destroyed = true;
+      this.view.dom.removeEventListener("keydown", this.escapeOutsideForm, true);
       this.abort?.abort();
+      this.tooltip.destroy();
       this.dom.remove();
       instances.delete(this.view);
     }
@@ -504,13 +558,21 @@ export function createFloatingSearch(options: {
           background: "var(--vscode-editorWidget-background, #252526)",
           border: "1px solid var(--vscode-editorWidget-border, #888)",
           boxShadow: "0 2px 8px var(--vscode-widget-shadow, #0005)",
+          display: "grid",
+          gridTemplateColumns: "auto minmax(72px, 1fr) minmax(0, max-content)",
+          columnGap: "4px",
+          rowGap: "4px",
         },
-        ".cm-floating-search-row, .cm-floating-search-options": {
+        ".cm-search-input-row": { display: "contents" },
+        ".cm-search-expand, .cm-search-row-spacer": { gridColumn: "1" },
+        ".cm-search-actions": {
+          gridColumn: "3",
           display: "flex",
           gap: "4px",
-          marginBottom: "4px",
           alignItems: "center",
-          flexWrap: "nowrap",
+          justifyContent: "flex-end",
+          flexWrap: "wrap",
+          minWidth: "0",
         },
         ".cm-floating-search [hidden]": { display: "none" },
         ".cm-search-expand::before": {
@@ -525,17 +587,19 @@ export function createFloatingSearch(options: {
         },
         ".cm-search-expand[aria-expanded=true]::before": { transform: "rotate(45deg)" },
         ".cm-search-query-box": {
+          gridColumn: "2",
           display: "flex",
-          flex: "1 1 160px",
-          minWidth: "65px",
+          minWidth: "0",
+          width: "100%",
           alignItems: "center",
           border: "1px solid var(--vscode-input-border, transparent)",
           background: "var(--vscode-input-background, #80808022)",
         },
         ".cm-search-query-box:focus-within": { borderColor: "var(--vscode-focusBorder, #168bdd)" },
         ".cm-search-query-box input": {
-          width: "40px",
-          minWidth: "20px",
+          flex: "1 1 auto",
+          width: "0",
+          minWidth: "0",
           border: "none",
           outline: "none",
           background: "transparent",
@@ -556,9 +620,8 @@ export function createFloatingSearch(options: {
             "repeating-linear-gradient(to bottom, transparent 0 2px, currentColor 2px 3px, transparent 3px 4px)",
         },
         ".cm-floating-search input": {
-          flex: "1 1 100px",
-          minWidth: "50px",
-          width: "100px",
+          minWidth: "0",
+          width: "100%",
           padding: "4px",
           color: "var(--vscode-input-foreground, inherit)",
           background: "var(--vscode-input-background, #333)",

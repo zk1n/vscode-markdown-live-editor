@@ -354,6 +354,59 @@ describe("table editing in the main CodeMirror content DOM", () => {
     expect(view.state.doc.toString()).toBe("| h2 |\n| --- |\n| b |");
   });
 
+  it("removes every old append control when replacing a document with two tables", async () => {
+    const source = [
+      "before",
+      "",
+      "| one | two |",
+      "| --- | --- |",
+      "| a | b |",
+      "",
+      "between",
+      "",
+      "| three | four |",
+      "| --- | --- |",
+      "| c | d |",
+      "",
+      "after",
+    ].join("\n");
+    const replacement = "| only | table |\n| --- | --- |\n| retained | row |";
+    const view = createView(source);
+
+    await new Promise<void>((resolve) =>
+      requestAnimationFrame(() => {
+        resolve();
+      }),
+    );
+    expect(view.dom.querySelectorAll<HTMLButtonElement>("[data-table-add]")).toHaveLength(4);
+
+    view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: replacement } });
+    await new Promise<void>((resolve) =>
+      requestAnimationFrame(() => {
+        resolve();
+      }),
+    );
+
+    const replacementTable = table(replacement);
+    const controls = view.dom.querySelectorAll<HTMLButtonElement>("[data-table-add]");
+    expect(controls).toHaveLength(2);
+    expect(
+      [...controls].every(
+        (button) => button.dataset["tableFrom"] === String(replacementTable.from),
+      ),
+    ).toBe(true);
+    expect(
+      view.dom.querySelector(
+        `[data-table-add][data-table-from="${String(source.indexOf("| one | two |"))}"]`,
+      ),
+    ).toBeNull();
+    expect(
+      view.dom.querySelector(
+        `[data-table-add][data-table-from="${String(source.indexOf("| three | four |"))}"]`,
+      ),
+    ).toBeNull();
+  });
+
   it("does not claim an editing path for malformed source", () => {
     const source = "| h | x |\n| --- |\n| a | b |";
     const view = createView(source, source.indexOf("a"));
