@@ -93,6 +93,26 @@ afterEach(() => {
 });
 
 describe("v0.2 through the actual webview controller", () => {
+  it("moves across the full source document with Mod-Home and Mod-End", async () => {
+    const text = Array.from({ length: 10_000 }, (_, index) => `line ${String(index)}`).join("\n");
+    const view = await create(text);
+    view.dispatch({ selection: { anchor: 315 } });
+    press(view, "End", { ctrlKey: true });
+    expect(view.state.selection.main).toMatchObject({ anchor: text.length, head: text.length });
+    press(view, "Home", { ctrlKey: true });
+    expect(view.state.selection.main).toMatchObject({ anchor: 0, head: 0 });
+
+    press(view, "End", { ctrlKey: true, shiftKey: true });
+    expect(view.state.selection.main).toMatchObject({ anchor: 0, head: text.length });
+    press(view, "Home", { ctrlKey: true, shiftKey: true });
+    expect(view.state.selection.main).toMatchObject({ anchor: 0, head: 0 });
+
+    view.dispatch({ selection: { anchor: 315 } });
+    view.contentDOM.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
+    press(view, "End", { ctrlKey: true, isComposing: true });
+    expect(view.state.selection.main.head).toBe(315);
+    view.contentDOM.dispatchEvent(new CompositionEvent("compositionend", { bubbles: true }));
+  });
   it("refreshes image and table source positions after composition without recreating the image", async () => {
     const text = "before\n\n| h | b |\n| --- | --- |\n| c | d |\n\n![alt](image.png)\n\nafter";
     const view = await create(text);
@@ -195,6 +215,7 @@ describe("v0.2 through the actual webview controller", () => {
   it("waits for prior edits before picking an image, then inserts one acknowledged result", async () => {
     const view = await create("text");
     view.dispatch({ changes: { from: 4, insert: "!" }, selection: { anchor: 5 } });
+    view.focus();
     command("insert-image");
     await Promise.resolve();
     expect(request("image-pick")).toBeUndefined();
@@ -217,6 +238,7 @@ describe("v0.2 through the actual webview controller", () => {
   it("cancels a late image insertion after selection-only movement", async () => {
     const view = await create("before after");
     view.dispatch({ selection: { anchor: 0, head: 6 } });
+    view.focus();
     command("insert-image");
     await Promise.resolve();
     await Promise.resolve();
@@ -236,6 +258,7 @@ describe("v0.2 through the actual webview controller", () => {
   });
   it("cancels a late image insertion after edits and rejects a response for a foreign controller", async () => {
     const view = await create("text");
+    view.focus();
     command("insert-image");
     await Promise.resolve();
     await Promise.resolve();
@@ -257,6 +280,19 @@ describe("v0.2 through the actual webview controller", () => {
     expect(document.querySelector(".markdown-rich-notice")?.textContent).toContain(
       "挿入を取り消しました",
     );
+  });
+  it("does not run a table shortcut inside the floating search input", async () => {
+    const view = await create("text");
+    view.focus();
+    command("find");
+    const query = view.dom.querySelector<HTMLInputElement>("[data-search-input=query]");
+    query?.focus();
+    command("insert-table");
+    command("insert-image");
+    await Promise.resolve();
+    expect(view.state.doc.toString()).toBe("text");
+    expect(edits()).toHaveLength(0);
+    expect(request("image-pick")).toBeUndefined();
   });
   it("keeps source unchanged during image reveal, structural selection and native Find", async () => {
     const text = "# heading\n\n![alt](image.png)\n\nbody";

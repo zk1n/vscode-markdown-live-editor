@@ -1,5 +1,6 @@
 import { markdown } from "@codemirror/lang-markdown";
 import { indentUnit } from "@codemirror/language";
+import { cursorDocEnd, cursorDocStart, selectDocEnd, selectDocStart } from "@codemirror/commands";
 import {
   Annotation,
   Compartment,
@@ -55,8 +56,19 @@ import {
   settleStructuralComposition,
 } from "./structuralSpacing.js";
 import { RichNotice } from "./richNotice.js";
-import { createCompactSpacing } from "./livePreview/compactSpacing.js";
-import { editTable, tableEditing } from "./livePreview/tableEditing.js";
+import { compactSpacingEnabled, createCompactSpacing } from "./livePreview/compactSpacing.js";
+import {
+  editTable,
+  returnTableToLive,
+  tableEditing,
+  tableSourceSelectionRanges,
+} from "./livePreview/tableEditing.js";
+import {
+  normalizeEditorPreferences,
+  type EditorPreferences,
+} from "../protocol/editorPreferences.js";
+import { editorPreferences } from "./editorPreferences.js";
+import { sourceLineNumbers, sourceLineSelection } from "./sourceLines.js";
 import {
   imageEditing,
   insertImage,
@@ -105,6 +117,7 @@ interface WebviewBootstrap {
   readonly text: string;
   readonly canEdit?: boolean;
   readonly minimapEnabled?: boolean;
+  readonly preferences?: EditorPreferences;
   readonly readOnlyReason?: string;
 }
 
@@ -146,6 +159,7 @@ class MarkdownWebviewController {
   private readonly editable = new Compartment();
   private readonly tabSizeConfiguration = new Compartment();
   private readonly minimapConfiguration = new Compartment();
+  private readonly preferencesConfiguration = new Compartment();
   private readonly livePreview: LivePreviewEngine | undefined;
   private readonly diagnostics: DiagnosticTrace;
   private readonly view: EditorView;
@@ -306,6 +320,13 @@ class MarkdownWebviewController {
     }
     if (this.livePreview !== undefined) {
       extensions.push(
+        this.preferencesConfiguration.of(this.presentationPreferences(bootstrap.preferences)),
+        sourceLineSelection,
+        EditorView.theme({
+          "&": { height: "100%", minHeight: "0", overflow: "hidden" },
+          "& > .cm-scroller": { minHeight: "0", flex: "1 1 auto" },
+          "& > .cm-scroller > .cm-content": { minWidth: "0" },
+        }),
         this.livePreview.extension,
         createCompactSpacing(
           () => this.composition.isActive || this.view.composing || this.view.compositionStarted,
@@ -315,10 +336,31 @@ class MarkdownWebviewController {
         tableEditing(() => this.isTabEditable()),
         imageEditing(this.imageActions),
         this.floatingSearch.extension,
-        this.minimapConfiguration.of(bootstrap.minimapEnabled === false ? [] : minimap),
-        linkPreview(this.imageActions),
+        this.minimapConfiguration.of(
+          (bootstrap.preferences?.minimapEnabled ?? bootstrap.minimapEnabled) === false
+            ? []
+            : minimap,
+        ),
+        linkPreview({
+          ...this.imageActions,
+          onPreviewEvent: (event) => {
+            this.diagnostics.record(`link-preview.${event}`, { time: performance.now() });
+          },
+        }),
         Prec.highest(
           keymap.of([
+            {
+              key: "Mod-Home",
+              run: (view) => this.runDocumentNavigation(view, cursorDocStart),
+              shift: (view) => this.runDocumentNavigation(view, selectDocStart),
+              preventDefault: true,
+            },
+            {
+              key: "Mod-End",
+              run: (view) => this.runDocumentNavigation(view, cursorDocEnd),
+              shift: (view) => this.runDocumentNavigation(view, selectDocEnd),
+              preventDefault: true,
+            },
             {
               key: "Mod-f",
               run: () => {
@@ -398,6 +440,14 @@ class MarkdownWebviewController {
       restoredState: this.restoredState !== undefined,
     });
     this.persistState();
+  }
+
+  private runDocumentNavigation(
+    view: EditorView,
+    command: (target: { state: EditorState; dispatch: EditorView["dispatch"] }) => boolean,
+  ): boolean {
+    if (this.composition.isActive || view.composing || view.compositionStarted) return false;
+    return command(view);
   }
 
   public receive(value: unknown): void {
@@ -573,7 +623,14 @@ class MarkdownWebviewController {
               EditorState.tabSize.of(this.tabSize),
               indentUnit.of(this.insertSpaces ? " ".repeat(this.indentSize) : "\t"),
             ]),
-            this.minimapConfiguration.reconfigure(message.minimapEnabled === false ? [] : minimap),
+            this.preferencesConfiguration.reconfigure(
+              this.presentationPreferences(message.preferences),
+            ),
+            this.minimapConfiguration.reconfigure(
+              (message.preferences?.minimapEnabled ?? message.minimapEnabled) === false
+                ? []
+                : minimap,
+            ),
           ],
         });
         this.reportEditorState();
@@ -863,6 +920,19 @@ class MarkdownWebviewController {
     }
   }
 
+  private presentationPreferences(value: unknown): Extension {
+    const preferences = normalizeEditorPreferences(value);
+    return [
+      editorPreferences.of(preferences),
+      compactSpacingEnabled.of(preferences.compactSpacing),
+      ...(preferences.wordWrap ? [EditorView.lineWrapping] : []),
+      ...(preferences.lineNumbers ? [sourceLineNumbers(tableSourceSelectionRanges)] : []),
+      EditorView.editorAttributes.of({
+        style: `--cm-structural-gap: ${String(preferences.structuralGap)}px; --cm-table-band: ${String(preferences.tableBandSize)}px; --cm-table-min-width: ${String(preferences.tableMinWidth)}em; --cm-table-max-width: ${String(preferences.tableMaxWidth)}em;`,
+      }),
+    ];
+  }
+
   private runRichCommand(
     command: RichCommand,
     contextToken?: string,
@@ -873,6 +943,7 @@ class MarkdownWebviewController {
       command !== "find" &&
       command !== "replace" &&
       command !== "image-source" &&
+      command !== "return-to-live" &&
       command !== "table-source"
     ) {
       this.showRichNotice(this.bootstrap.readOnlyReason ?? "この文書は読み取り専用です。");
@@ -883,6 +954,17 @@ class MarkdownWebviewController {
         this.showRichNotice("入力の変換を確定してから検索を開いてください。");
       return;
     }
+    if (command === "return-to-live") {
+      returnTableToLive(this.view);
+      return;
+    }
+    if (
+      contextToken === undefined &&
+      command !== "find" &&
+      command !== "replace" &&
+      !this.view.contentDOM.contains(this.view.dom.ownerDocument.activeElement)
+    )
+      return;
     if (command === "find" || command === "replace")
       this.floatingSearch.open(this.view, command === "replace");
     else if (command === "insert-table" && contextToken === undefined && this.isTabEditable())

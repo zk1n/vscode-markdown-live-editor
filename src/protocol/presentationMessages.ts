@@ -1,5 +1,6 @@
 import { PROTOCOL_VERSION, type ProtocolDecodeResult } from "./messages.js";
 import type { RichCommandMessage } from "./richMessages.js";
+import { normalizeEditorPreferences, type EditorPreferences } from "./editorPreferences.js";
 
 interface EditorIdentity {
   readonly protocolVersion: typeof PROTOCOL_VERSION;
@@ -34,6 +35,7 @@ export interface EditorConfigurationMessage extends EditorIdentity {
   readonly tabSize: number;
   readonly indentSize?: number;
   readonly minimapEnabled?: boolean;
+  readonly preferences?: EditorPreferences;
 }
 
 /** A presentation-only cursor move requested by extension-owned status UI. */
@@ -190,6 +192,9 @@ export function decodeHostPresentationMessage(
       const revision = readNonNegativeInteger(value["revision"], "revision");
       const tabSize = readPositiveInteger(value["tabSize"], "tabSize");
       const indentSize = value["indentSize"];
+      const preferences = value["preferences"];
+      if (preferences !== undefined && !isEditorPreferences(preferences))
+        return { ok: false, error: "preferences are invalid." };
       if (indentSize !== undefined && !isIndentSize(indentSize))
         return { ok: false, error: "indentSize is invalid." };
       if (!revision.ok) return revision;
@@ -209,6 +214,7 @@ export function decodeHostPresentationMessage(
           tabSize: tabSize.value,
           ...(indentSize === undefined ? {} : { indentSize }),
           ...(minimapEnabled === undefined ? {} : { minimapEnabled }),
+          ...(preferences === undefined ? {} : { preferences }),
         },
       };
     }
@@ -296,6 +302,14 @@ export function decodeHostPresentationMessage(
     default:
       return { ok: false, error: "Presentation message kind is invalid." };
   }
+}
+
+function isEditorPreferences(value: unknown): value is EditorPreferences {
+  if (typeof value !== "object" || value === null) return false;
+  const normalized = normalizeEditorPreferences(value);
+  return Object.entries(normalized).every(
+    ([key, expected]) => Reflect.get(value, key) === expected,
+  );
 }
 
 function isIndentSize(value: unknown): value is number {

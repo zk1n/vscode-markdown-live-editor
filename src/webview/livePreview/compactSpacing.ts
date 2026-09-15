@@ -27,9 +27,10 @@ function build(state: EditorState): DecorationSet {
       ),
   );
 }
-function removeSeparator(view: EditorView, backwards: boolean): boolean {
+function crossSeparator(view: EditorView, backwards: boolean): boolean {
   if (
     !view.state.facet(compactSpacingEnabled) ||
+    view.state.field(searchReveal, false) !== undefined ||
     view.composing ||
     view.compositionStarted ||
     view.state.readOnly ||
@@ -42,11 +43,11 @@ function removeSeparator(view: EditorView, backwards: boolean): boolean {
     (item) => (backwards ? item.to : item.from) === caret,
   );
   if (gap === undefined) return false;
-  // Consume just the extra separator, retaining the newline between real lines.
+  // A single-caret delete crosses presentation structure without deleting source.
+  // Explicit range deletion, source mode and search replacement remain literal.
   view.dispatch({
-    changes: { from: gap.from + 1, to: gap.to },
-    selection: { anchor: backwards ? gap.from + 1 : gap.from },
-    userEvent: "delete.structural",
+    selection: { anchor: backwards ? gap.from : gap.to },
+    userEvent: "select.structural",
   });
   return true;
 }
@@ -55,7 +56,24 @@ export function createCompactSpacing(isComposing: () => boolean = () => false): 
     compactLines,
     EditorState.transactionFilter.of((tr) => {
       if (
+        tr.docChanged &&
+        tr.startState.facet(compactSpacingEnabled) &&
+        tr.startState.selection.ranges.length === 1 &&
+        tr.startState.selection.main.empty &&
+        tr.isUserEvent("delete") &&
+        !isComposing() &&
+        tr.startState.field(searchReveal, false) === undefined
+      ) {
+        const protectedRanges = structuralBlanks(tr.startState);
+        const touched: boolean[] = [];
+        tr.changes.iterChangedRanges((from, to) => {
+          touched.push(protectedRanges.some((gap) => from < gap.to && to > gap.from));
+        });
+        if (touched.some(Boolean)) return [];
+      }
+      if (
         !tr.state.facet(compactSpacingEnabled) ||
+        tr.state.field(searchReveal, false) !== undefined ||
         isComposing() ||
         tr.isUserEvent("input.type.compose") ||
         tr.newSelection.ranges.length !== 1 ||
@@ -70,15 +88,15 @@ export function createCompactSpacing(isComposing: () => boolean = () => false): 
     }),
     Prec.high(
       keymap.of([
-        { key: "Backspace", run: (view) => removeSeparator(view, true) },
-        { key: "Delete", run: (view) => removeSeparator(view, false) },
+        { key: "Backspace", run: (view) => crossSeparator(view, true) },
+        { key: "Delete", run: (view) => crossSeparator(view, false) },
       ]),
     ),
     EditorView.baseTheme({
       ".cm-line.cm-structural-gap": {
-        height: "0.4em",
-        minHeight: "4px",
-        lineHeight: "0.4em",
+        height: "var(--cm-structural-gap, 6px)",
+        minHeight: "2px",
+        lineHeight: "var(--cm-structural-gap, 6px)",
         padding: "0",
       },
     }),

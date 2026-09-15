@@ -14,6 +14,8 @@ export interface RichRequest extends RichIdentity {
   readonly requestId: number;
   readonly operation: RichOperation;
   readonly documentVersion: number;
+  /** Optional cached revision of a linked Markdown target. */
+  readonly targetVersion?: string;
   readonly target?: string;
   readonly name?: string;
   readonly data?: string;
@@ -22,6 +24,10 @@ export interface RichResponse extends RichIdentity {
   readonly kind: "rich-response";
   readonly requestId: number;
   readonly documentVersion: number;
+  /** Revision of the resolved linked Markdown target, when applicable. */
+  readonly targetVersion?: string;
+  /** The request target matches targetVersion and has no replacement payload. */
+  readonly unchanged?: boolean;
   readonly ok: boolean;
   readonly note?: string;
   readonly url?: string;
@@ -43,7 +49,8 @@ export type RichCommand =
   | "table-align-center"
   | "table-align-right"
   | "table-source"
-  | "image-source";
+  | "image-source"
+  | "return-to-live";
 export interface RichCommandMessage extends RichIdentity {
   readonly kind: "rich-command";
   readonly documentVersion?: number;
@@ -73,7 +80,9 @@ export function decodeRichRequest(value: unknown): RichRequest | undefined {
     !isRichIdentity(value) ||
     value["kind"] !== "rich-request" ||
     !integer(value["requestId"]) ||
-    !integer(value["documentVersion"])
+    !integer(value["documentVersion"]) ||
+    (value["targetVersion"] !== undefined &&
+      (typeof value["targetVersion"] !== "string" || value["targetVersion"].length !== 64))
   )
     return undefined;
   const operation = value["operation"];
@@ -109,6 +118,9 @@ export function decodeRichRequest(value: unknown): RichRequest | undefined {
     controllerId: value.controllerId,
     requestId: value["requestId"],
     documentVersion: value["documentVersion"],
+    ...(typeof value["targetVersion"] === "string"
+      ? { targetVersion: value["targetVersion"] }
+      : {}),
     operation,
     ...(typeof target === "string" ? { target } : {}),
     ...(typeof name === "string" ? { name } : {}),
@@ -121,6 +133,9 @@ export function decodeRichResponse(value: unknown): RichResponse | undefined {
     value["kind"] !== "rich-response" ||
     !integer(value["requestId"]) ||
     !integer(value["documentVersion"]) ||
+    (value["targetVersion"] !== undefined &&
+      (typeof value["targetVersion"] !== "string" || value["targetVersion"].length !== 64)) ||
+    (value["unchanged"] !== undefined && typeof value["unchanged"] !== "boolean") ||
     typeof value["ok"] !== "boolean"
   )
     return undefined;
@@ -136,6 +151,10 @@ export function decodeRichResponse(value: unknown): RichResponse | undefined {
     controllerId: value.controllerId,
     requestId: value["requestId"],
     documentVersion: value["documentVersion"],
+    ...(typeof value["targetVersion"] === "string"
+      ? { targetVersion: value["targetVersion"] }
+      : {}),
+    ...(typeof value["unchanged"] === "boolean" ? { unchanged: value["unchanged"] } : {}),
     ok: value["ok"],
     ...(typeof value["note"] === "string" ? { note: value["note"] } : {}),
     ...(typeof value["url"] === "string" ? { url: value["url"] } : {}),
@@ -161,7 +180,8 @@ export function decodeRichCommand(value: unknown): RichCommandMessage | undefine
     command !== "table-align-center" &&
     command !== "table-align-right" &&
     command !== "table-source" &&
-    command !== "image-source"
+    command !== "image-source" &&
+    command !== "return-to-live"
   )
     return undefined;
   const token = value["contextToken"];

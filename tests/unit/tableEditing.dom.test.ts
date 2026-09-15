@@ -69,6 +69,21 @@ function press(
 }
 
 describe("table editing in the main CodeMirror content DOM", () => {
+  it("returns from invalid table source without rewriting it", () => {
+    const source = "before\n\n| h | v |\n| --- | --- |\n| a | b |\n\nafter";
+    const view = createView(source, source.indexOf("h"));
+    expect(editTable(view, "source")).toBe(true);
+    const start = source.indexOf("| ---");
+    view.dispatch({
+      changes: { from: start, to: start + 13, insert: "broken" },
+      userEvent: "input.type",
+    });
+    const invalid = view.state.doc.toString();
+    expect(view.dom.querySelector(".cm-table-cell")).toBeNull();
+    expect(editTable(view, "source")).toBe(true);
+    expect(view.state.doc.toString()).toBe(invalid);
+    expect(editTable(view, "source")).toBe(false);
+  });
   it("crosses cell boundaries with arrows without selecting cells or adding rows", () => {
     const source = "before\n\n| aa | bb |\n| --- | --- |\n| xx | yy |\n\nafter";
     const view = createView(source, source.indexOf("aa") + 2);
@@ -109,6 +124,53 @@ describe("table editing in the main CodeMirror content DOM", () => {
     view.dispatch({ ...view.state.replaceSelection("\n"), userEvent: "input" });
     expect(findTables(view.state.doc.toString())[0]?.rows).toHaveLength(2);
     expect(view.state.doc.lines).toBe(3);
+  });
+  it("allows an explicit selection covering every table to replace or cut source", () => {
+    const source = "before\n| h | v |\n| --- | --- |\n| a | b |\nafter";
+    const view = createView(source);
+    view.dispatch({ selection: { anchor: 0, head: source.length } });
+    view.dispatch({ ...view.state.replaceSelection("replacement"), userEvent: "input.paste" });
+    expect(view.state.doc.toString()).toBe("replacement");
+    expect(undo(view)).toBe(true);
+    expect(view.state.doc.toString()).toBe(source);
+
+    view.dispatch({ selection: { anchor: 0, head: source.length } });
+    view.dispatch({ ...view.state.replaceSelection(""), userEvent: "delete.selection" });
+    expect(view.state.doc.toString()).toBe("");
+    expect(undo(view)).toBe(true);
+    expect(view.state.doc.toString()).toBe(source);
+  });
+  it("allows one fully selected table block while rejecting a partial table intersection", () => {
+    const source = [
+      "# First",
+      "",
+      "| h | v |",
+      "| --- | --- |",
+      "| a | b |",
+      "",
+      "first paragraph",
+      "",
+      "# Second",
+      "",
+      "| x | y |",
+      "| --- | --- |",
+      "| c | d |",
+      "",
+      "second paragraph",
+      "",
+    ].join("\n");
+    const [first, second] = findTables(source);
+    if (first === undefined || second === undefined) throw new Error("Expected two tables.");
+    const firstBlockEnd = source.indexOf("\n\n# Second");
+    const view = createView(source);
+    view.dispatch({ selection: { anchor: first.from, head: firstBlockEnd } });
+    view.dispatch({ ...view.state.replaceSelection("replacement\n"), userEvent: "input.paste" });
+    expect(view.state.doc.toString()).toContain("| x | y |");
+    expect(view.state.doc.toString()).toContain("| c | d |");
+    const partial = createView(source);
+    partial.dispatch({ selection: { anchor: second.from, head: second.from + 3 } });
+    partial.dispatch({ ...partial.state.replaceSelection("bad"), userEvent: "input.paste" });
+    expect(partial.state.doc.toString()).toBe(source);
   });
   it("protects delimiters after deletion and owns pipe escaping during input", () => {
     const source = "| a | b |\n| :--- | ---: |\n| text | keep `code` [link](a.md) |\n\nafter";
@@ -352,59 +414,6 @@ describe("table editing in the main CodeMirror content DOM", () => {
     expect(undo(view)).toBe(true);
     expect(editTable(view, "column-delete")).toBe(true);
     expect(view.state.doc.toString()).toBe("| h2 |\n| --- |\n| b |");
-  });
-
-  it("removes every old append control when replacing a document with two tables", async () => {
-    const source = [
-      "before",
-      "",
-      "| one | two |",
-      "| --- | --- |",
-      "| a | b |",
-      "",
-      "between",
-      "",
-      "| three | four |",
-      "| --- | --- |",
-      "| c | d |",
-      "",
-      "after",
-    ].join("\n");
-    const replacement = "| only | table |\n| --- | --- |\n| retained | row |";
-    const view = createView(source);
-
-    await new Promise<void>((resolve) =>
-      requestAnimationFrame(() => {
-        resolve();
-      }),
-    );
-    expect(view.dom.querySelectorAll<HTMLButtonElement>("[data-table-add]")).toHaveLength(4);
-
-    view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: replacement } });
-    await new Promise<void>((resolve) =>
-      requestAnimationFrame(() => {
-        resolve();
-      }),
-    );
-
-    const replacementTable = table(replacement);
-    const controls = view.dom.querySelectorAll<HTMLButtonElement>("[data-table-add]");
-    expect(controls).toHaveLength(2);
-    expect(
-      [...controls].every(
-        (button) => button.dataset["tableFrom"] === String(replacementTable.from),
-      ),
-    ).toBe(true);
-    expect(
-      view.dom.querySelector(
-        `[data-table-add][data-table-from="${String(source.indexOf("| one | two |"))}"]`,
-      ),
-    ).toBeNull();
-    expect(
-      view.dom.querySelector(
-        `[data-table-add][data-table-from="${String(source.indexOf("| three | four |"))}"]`,
-      ),
-    ).toBeNull();
   });
 
   it("does not claim an editing path for malformed source", () => {

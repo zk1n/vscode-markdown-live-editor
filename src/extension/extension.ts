@@ -126,6 +126,7 @@ export function activate(context: vscode.ExtensionContext): void {
       "table-align-right",
       "table-source",
       "image-source",
+      "return-to-live",
     ] as const
   ).map((command: RichCommand) =>
     vscode.commands.registerCommand(`vscodeMarkdownLiveEditor.${command}`, (context: unknown) => {
@@ -197,8 +198,31 @@ export function activate(context: vscode.ExtensionContext): void {
 
   context.subscriptions.push(
     nativeSearch,
-    vscode.commands.registerCommand("vscodeMarkdownLiveEditor.returnToLive", () =>
-      nativeSearch.returnToLive(),
+    vscode.commands.registerCommand("vscodeMarkdownLiveEditor.returnToLive", () => {
+      const active = editorSessions.activeStatusSession;
+      if (active !== undefined)
+        void active.handle.postPresentationMessage?.({
+          kind: "rich-command",
+          protocolVersion: PROTOCOL_VERSION,
+          documentUri: active.handle.documentUri,
+          sessionId: active.handle.sessionId,
+          controllerId: active.controllerId,
+          documentVersion: active.editorState.documentVersion,
+          command: "return-to-live",
+        });
+      else void nativeSearch.returnToLive();
+    }),
+    vscode.commands.registerCommand("vscodeMarkdownLiveEditor.openSettings", () =>
+      vscode.commands.executeCommand(
+        "workbench.action.openSettings",
+        "@ext:zcw.vscode-markdown-live-editor",
+      ),
+    ),
+    vscode.commands.registerCommand("vscodeMarkdownLiveEditor.openKeyboardShortcuts", () =>
+      vscode.commands.executeCommand(
+        "workbench.action.openGlobalKeybindings",
+        "@ext:zcw.vscode-markdown-live-editor",
+      ),
     ),
     disposable,
     copyDiagnostics,

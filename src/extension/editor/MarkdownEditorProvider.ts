@@ -46,6 +46,8 @@ import { decodeNativeSearchRequest } from "../../protocol/nativeSearchMessages.j
 import { SaveAsImageBridge } from "./SaveAsImageBridge.js";
 import { decodeSaveAsImage } from "../../protocol/saveAsImageMessages.js";
 import { getDocumentWriteCapability } from "./documentCapabilities.js";
+import { resolveEditorPreferences } from "./editorPreferences.js";
+import type { EditorPreferences } from "../../protocol/editorPreferences.js";
 
 interface MarkdownEditorBootstrap {
   readonly diagnosticMode: DiagnosticMode;
@@ -56,6 +58,7 @@ interface MarkdownEditorBootstrap {
   readonly text: string;
   readonly canEdit?: boolean;
   readonly minimapEnabled?: boolean;
+  readonly preferences?: EditorPreferences;
   readonly readOnlyReason?: string;
 }
 
@@ -241,9 +244,8 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
         controllerId: currentControllerId,
         revision: allocatePresentationRevision(),
         ...configuration,
-        minimapEnabled: vscode.workspace
-          .getConfiguration("editor", document.uri)
-          .get<boolean>("minimap.enabled", true),
+        preferences: resolveEditorPreferences(document),
+        minimapEnabled: resolveEditorPreferences(document).minimapEnabled,
       });
     };
     const sendLatestStyle = (): void => {
@@ -301,7 +303,9 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
         event.affectsConfiguration("editor.insertSpaces", document.uri) ||
         event.affectsConfiguration("editor.indentSize", document.uri) ||
         event.affectsConfiguration("editor.tabSize", document.uri) ||
-        event.affectsConfiguration("editor.minimap.enabled", document.uri)
+        event.affectsConfiguration("editor.minimap.enabled", document.uri) ||
+        event.affectsConfiguration("editor.wordWrap", document.uri) ||
+        event.affectsConfiguration("vscodeMarkdownLiveEditor", document.uri)
       ) {
         sendConfiguration();
       }
@@ -370,9 +374,8 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
       nextSequence: 1,
       text: opened.snapshot.text,
       canEdit: capability.writable,
-      minimapEnabled: vscode.workspace
-        .getConfiguration("editor", document.uri)
-        .get<boolean>("minimap.enabled", true),
+      preferences: resolveEditorPreferences(document),
+      minimapEnabled: resolveEditorPreferences(document).minimapEnabled,
       ...(capability.reason === undefined ? {} : { readOnlyReason: capability.reason }),
     };
     receiveDisposable = webview.onDidReceiveMessage((value: unknown) => {
@@ -555,9 +558,8 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
       sessionId,
       nextSequence: 1,
       text: toProtocolText(document.getText()),
-      minimapEnabled: vscode.workspace
-        .getConfiguration("editor", document.uri)
-        .get<boolean>("minimap.enabled", true),
+      preferences: resolveEditorPreferences(document),
+      minimapEnabled: resolveEditorPreferences(document).minimapEnabled,
     };
     let trackingDisposable = vscode.Disposable.from();
     let receiveDisposable = vscode.Disposable.from();

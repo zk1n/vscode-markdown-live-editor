@@ -8,6 +8,28 @@ import {
 } from "../../src/webview/livePreview/compactSpacing.js";
 
 const views: EditorView[] = [];
+it("protects separator deletion through both keys and transactions, while allowing explicit ranges", () => {
+  const source = "# h\n\nbody";
+  const view = new EditorView({
+    parent: document.body,
+    state: EditorState.create({
+      doc: source,
+      selection: { anchor: 5 },
+      extensions: [createCompactSpacing()],
+    }),
+  });
+  views.push(view);
+  view.contentDOM.dispatchEvent(
+    new KeyboardEvent("keydown", { key: "Backspace", bubbles: true, cancelable: true }),
+  );
+  expect(view.state.doc.toString()).toBe(source);
+  expect(view.state.selection.main.head).toBe(3);
+  view.dispatch({ changes: { from: 3, to: 4 }, userEvent: "delete.forward" });
+  expect(view.state.doc.toString()).toBe(source);
+  view.dispatch({ selection: { anchor: 0, head: 5 } });
+  view.dispatch({ ...view.state.replaceSelection(""), userEvent: "delete.cut" });
+  expect(view.state.doc.toString()).toBe("body");
+});
 afterEach(() => {
   views.splice(0).forEach((view) => {
     view.destroy();

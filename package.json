@@ -63,7 +63,101 @@
           "default": "",
           "scope": "window",
           "restricted": true,
+          "editPresentation": "multilineText",
           "markdownDescription": "%configuration.customCss.markdownDescription%"
+        },
+        "vscodeMarkdownLiveEditor.wordWrap": {
+          "type": "string",
+          "enum": [
+            "on",
+            "off",
+            "follow"
+          ],
+          "default": "on",
+          "scope": "resource",
+          "markdownDescription": "%configuration.wordWrap.markdownDescription%"
+        },
+        "vscodeMarkdownLiveEditor.lineNumbers": {
+          "type": "boolean",
+          "default": true,
+          "scope": "resource",
+          "markdownDescription": "%configuration.lineNumbers.markdownDescription%"
+        },
+        "vscodeMarkdownLiveEditor.minimapEnabled": {
+          "type": [
+            "boolean",
+            "string"
+          ],
+          "enum": [
+            true,
+            false,
+            "follow"
+          ],
+          "default": "follow",
+          "scope": "resource",
+          "markdownDescription": "%configuration.minimapEnabled.markdownDescription%"
+        },
+        "vscodeMarkdownLiveEditor.minimapSlider": {
+          "type": "string",
+          "enum": [
+            "mouseover",
+            "always"
+          ],
+          "default": "mouseover",
+          "scope": "resource",
+          "markdownDescription": "%configuration.minimapSlider.markdownDescription%"
+        },
+        "vscodeMarkdownLiveEditor.linkHoverDelay": {
+          "type": "number",
+          "minimum": 100,
+          "maximum": 2000,
+          "default": 500,
+          "scope": "resource",
+          "markdownDescription": "%configuration.linkHoverDelay.markdownDescription%"
+        },
+        "vscodeMarkdownLiveEditor.tableMinWidth": {
+          "type": "number",
+          "minimum": 3,
+          "maximum": 16,
+          "default": 4.75,
+          "scope": "resource",
+          "markdownDescription": "%configuration.tableMinWidth.markdownDescription%"
+        },
+        "vscodeMarkdownLiveEditor.tableMaxWidth": {
+          "type": "number",
+          "minimum": 8,
+          "maximum": 100,
+          "default": 32,
+          "scope": "resource",
+          "markdownDescription": "%configuration.tableMaxWidth.markdownDescription%"
+        },
+        "vscodeMarkdownLiveEditor.tableBandSize": {
+          "type": "number",
+          "minimum": 10,
+          "maximum": 28,
+          "default": 18,
+          "scope": "resource",
+          "markdownDescription": "%configuration.tableBandSize.markdownDescription%"
+        },
+        "vscodeMarkdownLiveEditor.compactSpacing": {
+          "type": "boolean",
+          "default": true,
+          "scope": "resource",
+          "markdownDescription": "%configuration.compactSpacing.markdownDescription%"
+        },
+        "vscodeMarkdownLiveEditor.structuralGap": {
+          "type": "number",
+          "minimum": 2,
+          "maximum": 32,
+          "default": 6,
+          "scope": "resource",
+          "markdownDescription": "%configuration.structuralGap.markdownDescription%"
+        },
+        "vscodeMarkdownLiveEditor.imageKeepHeight": {
+          "type": "boolean",
+          "default": true,
+          "scope": "resource",
+          "markdownDescription": "%configuration.imageKeepHeight.markdownDescription%"
         },
         "vscodeMarkdownLiveEditor.allowRemoteImages": {
           "type": "boolean",
@@ -118,6 +212,14 @@
       {
         "command": "vscodeMarkdownLiveEditor.returnToLive",
         "title": "%command.returnToLive%"
+      },
+      {
+        "command": "vscodeMarkdownLiveEditor.openSettings",
+        "title": "%command.openSettings%"
+      },
+      {
+        "command": "vscodeMarkdownLiveEditor.openKeyboardShortcuts",
+        "title": "%command.openKeyboardShortcuts%"
       },
       {
         "command": "vscodeMarkdownLiveEditor.table-row-add",
@@ -209,26 +311,6 @@
       ],
       "webview/context": [
         {
-          "command": "vscodeMarkdownLiveEditor.table-row-add",
-          "when": "webviewId == vscodeMarkdownLiveEditor.editor && webviewSection == markdown-table && markdownContextEditable",
-          "group": "markdown@0"
-        },
-        {
-          "command": "vscodeMarkdownLiveEditor.table-row-delete",
-          "when": "webviewId == vscodeMarkdownLiveEditor.editor && webviewSection == markdown-table && markdownContextEditable && markdownCanDeleteRow",
-          "group": "markdown@1"
-        },
-        {
-          "command": "vscodeMarkdownLiveEditor.table-column-add",
-          "when": "webviewId == vscodeMarkdownLiveEditor.editor && webviewSection == markdown-table && markdownContextEditable",
-          "group": "markdown@2"
-        },
-        {
-          "command": "vscodeMarkdownLiveEditor.table-column-delete",
-          "when": "webviewId == vscodeMarkdownLiveEditor.editor && webviewSection == markdown-table && markdownContextEditable && markdownCanDeleteColumn",
-          "group": "markdown@3"
-        },
-        {
           "command": "vscodeMarkdownLiveEditor.table-align-left",
           "when": "webviewId == vscodeMarkdownLiveEditor.editor && webviewSection == markdown-table && markdownContextEditable",
           "group": "markdown@4"
@@ -307,7 +389,8 @@
     "package:vsix:ux-stability-review": "npm run build && node ./scripts/package-vsix.mjs --ux-stability-review",
     "package:vsix:ux-interaction-review": "npm run build && node ./scripts/package-vsix.mjs --ux-interaction-review",
     "package:vsix:ux-fourth-review": "npm run build && node ./scripts/package-vsix.mjs --ux-fourth-review",
-    "package:vsix:ux-fifth-review": "npm run build && node ./scripts/package-vsix.mjs --ux-fifth-review"
+    "package:vsix:ux-fifth-review": "npm run build && node ./scripts/package-vsix.mjs --ux-fifth-review",
+    "package:vsix:ux-sixth-review": "npm run build && node ./scripts/package-vsix.mjs --ux-sixth-review"
   },
   "dependencies": {
     "@codemirror/commands": "6.11.0",

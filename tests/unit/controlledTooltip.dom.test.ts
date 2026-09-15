@@ -82,4 +82,23 @@ describe("controlled tooltip", () => {
     expect(element.hidden).toBe(true);
     tooltip.destroy();
   });
+
+  it("does not retain a pointer tooltip because its button received click focus", () => {
+    const host = document.createElement("div");
+    const target = document.createElement("button");
+    host.append(target);
+    document.body.append(host);
+    target.getBoundingClientRect = () => rect(30, 100, 20, 20);
+    const tooltip = createControlledTooltip(host);
+    const element = host.querySelector<HTMLElement>(".cm-controlled-tooltip");
+    if (!element) throw new Error("tooltip missing");
+    element.getBoundingClientRect = () => rect(0, 0, 40, 20);
+    tooltip.attach(target, "説明");
+
+    target.dispatchEvent(new Event("pointerenter"));
+    target.focus();
+    target.dispatchEvent(new Event("pointerleave"));
+    expect(element.hidden).toBe(true);
+    tooltip.destroy();
+  });
 });

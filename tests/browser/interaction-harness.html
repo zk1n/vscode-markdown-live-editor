@@ -14,6 +14,12 @@
         --vscode-editor-background: #1e1e1e;
         --vscode-editor-foreground: #ddd;
         --vscode-editorWidget-background: #252526;
+        --vscode-editorHoverWidget-background: var(--vscode-editorWidget-background);
+        --vscode-editorHoverWidget-foreground: var(--vscode-editor-foreground);
+        --vscode-editorHoverWidget-border: #777;
+        --vscode-descriptionForeground: var(--vscode-editor-foreground);
+        --vscode-font-size: 14px;
+        --vscode-font-family: sans-serif;
         --vscode-editorCursor-foreground: #fff;
         --vscode-focusBorder: #168bdd;
       }
@@ -65,6 +71,12 @@
       #editor-status {
         display: none;
       }
+      #link-timing {
+        height: 20px;
+        white-space: nowrap;
+        overflow: auto;
+        font: 12px monospace;
+      }
     </style>
   </head>
   <body>
@@ -92,10 +104,30 @@
       <option value="medium">100行</option>
       <option value="long">長文</option>
       <option value="fifth">第五レビュー</option>
+      <option value="sixth">第六レビュー</option>
+      <option value="sixth-long">第六長文</option>
     </select>
+    <label
+      >表示設定
+      <select id="u6-preferences">
+        <option value="default">既定</option>
+        <option value="nowrap">折り返しOFF</option>
+        <option value="nogutter">行番号OFF</option>
+        <option value="small">最小寸法</option>
+        <option value="source">コンパクトOFF</option>
+        <option value="always">ミニマップ枠always</option>
+      </select></label
+    >
+    <button id="u6-table-source">表source切替</button
+    ><button id="u6-return-live">Liveへ戻る</button> <button id="link-delay">リンク応答:即時</button
+    ><output id="link-timing" aria-label="リンク時間"></output>
     <main id="editor-root"></main>
     <div id="editor-status"></div>
     <div id="result" role="status">起動中</div>
+    <details>
+      <summary>開発診断</summary>
+      <pre id="editor-diagnostics"></pre>
+    </details>
     <pre id="metrics-output" aria-label="表示計測"></pre>
     <pre id="source-output" aria-label="現在のMarkdown"></pre>
     <script src="/dist/interaction-harness.js"></script>

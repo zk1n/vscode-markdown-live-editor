@@ -2,6 +2,7 @@ import { type Extension, type Text } from "@codemirror/state";
 import { EditorView, ViewPlugin, type ViewUpdate } from "@codemirror/view";
 import { searchMatches } from "./search/floatingSearch.js";
 import { searchReveal } from "./livePreview/searchReveal.js";
+import { editorPreferences } from "./editorPreferences.js";
 
 interface SummaryLine {
   from: number;
@@ -92,6 +93,7 @@ export const minimap: Extension = [
         const onThumb = event.target === this.viewport;
         this.dragOffset = onThumb ? y - this.viewportTop : this.viewportHeight / 2;
         this.pointerId = event.pointerId;
+        this.dom.setAttribute("data-dragging", "");
         this.dom.setPointerCapture(event.pointerId);
         // Grabbing any point on the thumb preserves the current scroll exactly.
         if (!onThumb) this.scroll(y);
@@ -105,6 +107,7 @@ export const minimap: Extension = [
         const id = this.pointerId;
         this.pointerId = undefined;
         this.dragOffset = undefined;
+        this.dom.removeAttribute("data-dragging");
         if (this.dom.hasPointerCapture(id)) this.dom.releasePointerCapture(id);
       };
       private scroll(y: number): void {
@@ -190,6 +193,10 @@ export const minimap: Extension = [
           },
           write: (data) => {
             if (this.destroyed || data.width <= 0 || data.height <= 0) return;
+            this.dom.toggleAttribute(
+              "data-slider-always",
+              this.view.state.facet(editorPreferences).minimapSlider === "always",
+            );
             this.contentHeight = data.total;
             // Cap ordinary text at a two-pixel overview pitch. Short documents
             // remain top-aligned; long documents still cover the full source.
@@ -278,7 +285,7 @@ export const minimap: Extension = [
     },
   ),
   EditorView.baseTheme({
-    "&.cm-has-minimap .cm-scroller": { marginRight: "clamp(36px, 8vw, 72px)" },
+    "&.cm-has-minimap > .cm-scroller": { marginRight: "clamp(36px, 8vw, 72px)", minHeight: "0" },
     ".cm-minimap": {
       position: "absolute",
       right: "0",
@@ -299,7 +306,10 @@ export const minimap: Extension = [
       cursor: "grab",
       background: "var(--vscode-minimapSlider-background, #80808033)",
       border: "1px solid var(--vscode-contrastBorder, #80808055)",
+      opacity: "0",
     },
+    ".cm-minimap:hover .cm-minimap-viewport, .cm-minimap[data-dragging] .cm-minimap-viewport, .cm-minimap:focus-visible .cm-minimap-viewport, .cm-minimap[data-slider-always] .cm-minimap-viewport":
+      { opacity: "1" },
     ".cm-minimap-viewport:hover": {
       background: "var(--vscode-minimapSlider-hoverBackground, #80808055)",
     },

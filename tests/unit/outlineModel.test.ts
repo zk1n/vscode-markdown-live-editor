@@ -173,7 +173,7 @@ describe("outline model", () => {
       from: line0.from,
       to: line0.to,
       contentFrom: line0.from + marker0,
-      contentTo: line0.to,
+      contentTo: line0.from + lineText0.indexOf("  ###"),
       navigationOffset: line0.from + marker0,
     });
     expect(child0).toMatchObject({
@@ -189,7 +189,7 @@ describe("outline model", () => {
       from: line2.from,
       to: line2.to,
       contentFrom: line2.from + marker2,
-      contentTo: line2.to,
+      contentTo: line2.from + lineText2.lastIndexOf(" ###"),
       navigationOffset: line2.from + marker2,
     });
   });

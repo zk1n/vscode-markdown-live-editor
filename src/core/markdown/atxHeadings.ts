@@ -6,6 +6,7 @@ export interface AtxHeadingRange {
   readonly contentTo: number;
   readonly markerFrom: number;
   readonly markerTo: number;
+  readonly closingFrom?: number;
 }
 
 /**
@@ -14,7 +15,7 @@ export interface AtxHeadingRange {
  * responsibility because presentation parses other syntax in the same pass.
  */
 export function parseAtxHeadingLine(line: string, offset: number): AtxHeadingRange | undefined {
-  const match = /^( {0,3})(#{1,6})(?:[ \t]+)(?=\S)/.exec(line);
+  const match = /^( {0,3})(#{1,6})(?:[ \t]+|$)/.exec(line.replace(/\r$/u, ""));
   if (match === null) {
     return undefined;
   }
@@ -26,14 +27,18 @@ export function parseAtxHeadingLine(line: string, offset: number): AtxHeadingRan
 
   const markerFrom = offset + indentation.length;
   const markerTo = offset + match[0].length;
+  const end = line.endsWith("\r") ? line.length - 1 : line.length;
+  const closing = /(?:^|[ \t]+)#+[ \t]*$/u.exec(line.slice(match[0].length, end));
+  const closingFrom = closing === null ? undefined : markerTo + closing.index;
   return {
     level: marker.length,
     from: offset,
     to: offset + line.length,
     contentFrom: markerTo,
-    contentTo: offset + line.length,
+    contentTo: closingFrom ?? offset + end,
     markerFrom,
     markerTo,
+    ...(closingFrom === undefined ? {} : { closingFrom }),
   };
 }
 

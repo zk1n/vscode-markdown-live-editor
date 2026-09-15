@@ -9,6 +9,7 @@ import { Decoration, EditorView, WidgetType, type DecorationSet } from "@codemir
 import { findMarkdownLinks, type MarkdownLink } from "../../core/markdown/markdownLinks.js";
 import { MAX_IMAGE_BYTES } from "../../protocol/richMessages.js";
 import type { RichClient } from "../richClient.js";
+import { imageSourceHeight } from "./imageSourceHeight.js";
 import {
   searchReveal,
   searchPresentation,
@@ -105,6 +106,7 @@ export function imageEditing(actions: ImageActions): Extension {
     return Decoration.set(ranges, true);
   }
   return [
+    imageSourceHeight,
     imageRevision,
     images,
     EditorView.domEventHandlers({

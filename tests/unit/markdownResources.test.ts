@@ -24,6 +24,7 @@ vi.mock("node:fs/promises", async (importOriginal) => {
 import { findMarkdownLinks, headingOffset } from "../../src/core/markdown/markdownLinks.js";
 import {
   isWithin,
+  linkedDocumentRevision,
   localMarkdownTarget,
   storeAttachment,
 } from "../../src/extension/editor/markdownResources.js";
@@ -187,6 +188,8 @@ describe("rich protocol validation", () => {
       target: "image.png",
     };
     expect(decodeRichRequest(request)).toEqual(request);
+    const targetVersion = "a".repeat(64);
+    expect(decodeRichRequest({ ...request, targetVersion })).toEqual({ ...request, targetVersion });
     expect(decodeRichRequest({ ...request, operation: "execute" })).toBeUndefined();
     expect(decodeRichRequest({ ...request, target: 1 })).toBeUndefined();
     expect(decodeRichRequest({ ...request, controllerId: "" })).toBeUndefined();
@@ -197,6 +200,17 @@ describe("rich protocol validation", () => {
         data: "a".repeat(MAX_IMAGE_BYTES * 2),
       }),
     ).toBeUndefined();
+    expect(
+      decodeRichResponse({
+        ...identity,
+        kind: "rich-response",
+        requestId: 1,
+        documentVersion: 1,
+        targetVersion,
+        unchanged: true,
+        ok: true,
+      }),
+    ).toMatchObject({ targetVersion, unchanged: true });
     expect(
       decodeRichResponse({
         ...identity,
@@ -230,5 +244,15 @@ describe("rich protocol validation", () => {
     expect(
       decodeRichCommand({ ...command, contextToken: "not a valid token", documentVersion: 3 }),
     ).toBeUndefined();
+  });
+});
+
+describe("linked document revision", () => {
+  it("changes when external content changes even if a reopened document reports the same version", () => {
+    const document = { uri: { toString: () => "file:///workspace/target.md" }, version: 1 };
+    const first = linkedDocumentRevision(document as never, "first");
+    const reopened = linkedDocumentRevision(document as never, "second");
+    expect(first).toHaveLength(64);
+    expect(reopened).not.toBe(first);
   });
 });

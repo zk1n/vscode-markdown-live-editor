@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { mkdir, open, readFile, realpath, stat } from "node:fs/promises";
 import path from "node:path";
 import * as vscode from "vscode";
@@ -21,6 +21,17 @@ export function isWithin(root: string, target: string): boolean {
     relative === "" ||
     (!relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative))
   );
+}
+
+/** Opaque target revision that cannot collide after a close/reopen version reset. */
+export function linkedDocumentRevision(document: vscode.TextDocument, text: string): string {
+  return createHash("sha256")
+    .update(document.uri.toString())
+    .update("\0")
+    .update(String(document.version))
+    .update("\0")
+    .update(text)
+    .digest("hex");
 }
 
 /**
@@ -473,10 +484,17 @@ export class MarkdownResourceSession {
     // Uri uses the logical path so an already-open dirty TextDocument is reused.
     const targetDocument = await vscode.workspace.openTextDocument(vscode.Uri.file(resolved.path));
     const text = targetDocument.getText();
+    const targetVersion = linkedDocumentRevision(targetDocument, text);
     const offset = headingOffset(text, resolved.fragment);
     if (offset === undefined) throw new Error("指定された見出しが見つかりません。");
-    if (request.operation === "link-preview")
-      return { title: path.basename(resolved.path), text: text.slice(offset, offset + 12000) };
+    if (request.operation === "link-preview") {
+      if (request.targetVersion === targetVersion) return { targetVersion, unchanged: true };
+      return {
+        title: path.basename(resolved.path),
+        text: text.slice(offset, offset + 12000),
+        targetVersion,
+      };
+    }
     this.requireVersion(request);
     if (targetDocument.uri.toString() === this.document.uri.toString())
       return { offset: text.slice(0, offset).replace(/\r\n/gu, "\n").length };
