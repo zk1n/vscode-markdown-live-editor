@@ -6,7 +6,6 @@ import {
   StateField,
   EditorSelection,
   Prec,
-  MapMode,
   type ChangeSpec,
   type EditorState,
   type Extension,
@@ -14,12 +13,11 @@ import {
 } from "@codemirror/state";
 import {
   Decoration,
+  BlockWrapper,
   EditorView,
   WidgetType,
   keymap,
   drawSelection,
-  ViewPlugin,
-  type ViewUpdate,
   type DecorationSet,
   type MouseSelectionStyle,
 } from "@codemirror/view";
@@ -31,15 +29,27 @@ import {
 } from "../../core/markdown/tableSource.js";
 
 import { searchReveal, revealSearchMatch } from "./searchReveal.js";
-import { createControlledTooltip } from "../controlledTooltip.js";
+import { tableControls } from "./tableControls.js";
+import { editorPreferences } from "../editorPreferences.js";
+import { sourceLineSelection } from "../sourceLines.js";
+import { tableWidths, setTableWidths } from "./tableMeasurements.js";
 
 // The cells are the main CodeMirror contentDOM: native selection, clipboard,
 // IME, Save and history all retain the same source and controller owner.
-const rawTable = StateEffect.define<number | undefined>();
-const rawTableField = StateField.define<number | undefined>({
+const rawTable = StateEffect.define<{ from: number; to: number } | undefined>();
+const rawTableField = StateField.define<{ from: number; to: number } | undefined>({
   create: () => undefined,
   update(value, transaction) {
-    let next = value === undefined ? undefined : transaction.changes.mapPos(value);
+    let next =
+      value === undefined
+        ? undefined
+        : {
+            from: transaction.changes.mapPos(value.from, -1),
+            to: transaction.changes.mapPos(value.to, 1),
+          };
+    transaction.changes.iterChangedRanges((from, to) => {
+      if (value && from <= value.from && to >= value.to && from < to) next = undefined;
+    });
     for (const effect of transaction.effects) if (effect.is(rawTable)) next = effect.value;
     return next;
   },
@@ -64,13 +74,27 @@ export function tableSourceSelectionRanges(
   state: EditorState,
 ): readonly { from: number; to: number }[] {
   const rows = sourceRows(state);
-  const tableFrom = state.field(rawTableField, false);
-  if (rows.length === 0 && tableFrom === undefined) return [];
-  return findTables(state.doc.toString()).flatMap((table) =>
-    [...table.rows, table.delimiter].filter(
-      (row) => tableFrom === table.from || rows.includes(row.from),
+  const raw = state.field(rawTableField, false);
+  return [
+    ...(raw === undefined ? [] : [raw]),
+    ...findTables(state.doc.toString()).flatMap((table) =>
+      [...table.rows, table.delimiter].filter((row) => rows.includes(row.from)),
     ),
-  );
+  ];
+}
+export function returnTableToLive(view: EditorView): boolean {
+  if (
+    view.state.field(rawTableField, false) === undefined ||
+    view.composing ||
+    view.compositionStarted
+  )
+    return false;
+  view.dispatch({ effects: rawTable.of(undefined) });
+  view.focus();
+  return true;
+}
+export function tableSourceActive(state: EditorState): boolean {
+  return state.field(rawTableField, false) !== undefined;
 }
 const tableDecorations = StateField.define<DecorationSet>({
   create: build,
@@ -80,37 +104,73 @@ const tableDecorations = StateField.define<DecorationSet>({
       !transaction.docChanged &&
       transaction.selection === undefined &&
       !transaction.isUserEvent("input.structural.settle") &&
-      !transaction.effects.some((effect) => effect.is(rawTable) || effect.is(revealSearchMatch))
+      transaction.startState.facet(editorPreferences) ===
+        transaction.state.facet(editorPreferences) &&
+      !transaction.effects.some(
+        (effect) =>
+          effect.is(rawTable) || effect.is(revealSearchMatch) || effect.is(setTableWidths),
+      )
     )
       return value;
     return build(transaction.state);
   },
-  provide: (field) => EditorView.outerDecorations.from(field),
+  provide: (field) => [
+    EditorView.outerDecorations.from(field),
+    EditorView.blockWrappers.compute([field], (state) =>
+      BlockWrapper.set(
+        findTables(state.doc.toString())
+          .filter((table) => !isTableSourceActive(state, table))
+          .map((table) =>
+            BlockWrapper.create({
+              tagName: "div",
+              attributes: { class: "cm-table-scroll", "data-table-scroll": String(table.from) },
+            }).range(table.from, table.to),
+          ),
+      ),
+    ),
+  ],
 });
 
 function build(state: EditorState): DecorationSet {
   const ranges: Range<Decoration>[] = [];
   for (const table of findTables(state.doc.toString())) {
-    if (state.field(rawTableField) === table.from) continue;
+    if (state.field(rawTableField)?.from === table.from) continue;
+    ranges.push(
+      Decoration.widget({
+        widget: new TableAppendSpace(state.facet(editorPreferences).tableBandSize + 4),
+        block: true,
+        side: -1,
+      }).range(table.from),
+    );
+    const widths = Array.from({ length: table.columns }, (_, index) =>
+      Math.max(
+        0,
+        ...table.rows.map(
+          (row) => state.field(tableWidths).get(row.cells[index]?.contentFrom ?? -1) ?? 0,
+        ),
+      ),
+    );
     for (const [rowIndex, row] of table.rows.entries()) {
       if (sourceRows(state).includes(row.from)) continue;
       ranges.push(
         Decoration.line({
           class: `cm-table-row${rowIndex === table.rows.length - 1 ? " cm-table-last-row" : ""}`,
-          attributes: { "data-table-from": String(table.from) },
+          attributes: { "data-table-from": String(table.from), "data-table-row": String(rowIndex) },
         }).range(row.from),
       );
       for (const [column, cell] of row.cells.entries()) {
         const css = `cm-table-cell${rowIndex === 0 ? " cm-table-header" : ""}`;
         const attrs = {
-          style: `text-align:${table.alignments[column] ?? "left"}`,
+          style: `text-align:${table.alignments[column] ?? "left"};${(widths[column] ?? 0) > 0 ? `width:${String(widths[column])}px;min-width:${String(widths[column])}px` : ""}`,
           "data-table-cell": String(cell.contentFrom),
         };
         if (cell.from < cell.to)
           ranges.push(Decoration.mark({ class: css, attributes: attrs }).range(cell.from, cell.to));
         else
           ranges.push(
-            Decoration.widget({ widget: new EmptyCell(cell.from), side: 1 }).range(cell.from),
+            Decoration.widget({ widget: new EmptyCell(cell.from, widths[column]), side: 1 }).range(
+              cell.from,
+            ),
           );
       }
       for (const pipe of row.pipes) ranges.push(Decoration.replace({}).range(pipe, pipe + 1));
@@ -122,7 +182,11 @@ function build(state: EditorState): DecorationSet {
     }
     if (!sourceRows(state).includes(table.rows[table.rows.length - 1]?.from ?? table.to))
       ranges.push(
-        Decoration.widget({ widget: new TableAppendSpace(), block: true, side: 1 }).range(table.to),
+        Decoration.widget({
+          widget: new TableAppendSpace(state.facet(editorPreferences).tableBandSize + 4),
+          block: true,
+          side: 1,
+        }).range(table.to),
       );
   }
   return Decoration.set(ranges, true);
@@ -130,15 +194,19 @@ function build(state: EditorState): DecorationSet {
 
 /** A measured, non-editable block; line margins are absent from CM's height map. */
 class TableAppendSpace extends WidgetType {
-  public override eq(): boolean {
-    return true;
+  public constructor(private readonly height: number) {
+    super();
+  }
+  public override eq(other: TableAppendSpace): boolean {
+    return this.height === other.height;
   }
   public override get estimatedHeight(): number {
-    return 22;
+    return this.height;
   }
   public override toDOM(): HTMLElement {
     const dom = document.createElement("div");
     dom.className = "cm-table-append-space";
+    dom.style.height = `${String(this.height)}px`;
     dom.setAttribute("aria-hidden", "true");
     return dom;
   }
@@ -149,22 +217,29 @@ class TableAppendSpace extends WidgetType {
  * the existing table keymap. All source ranges remain writable.
  */
 function isTableSourceActive(state: EditorState, table: SourceTable): boolean {
-  if (state.field(rawTableField) === table.from) {
+  if (state.field(rawTableField)?.from === table.from) {
     return true;
   }
   return sourceRows(state).some((from) => from >= table.from && from <= table.to);
 }
 
 class EmptyCell extends WidgetType {
-  public constructor(private readonly position: number) {
+  public constructor(
+    private readonly position: number,
+    private readonly width?: number,
+  ) {
     super();
   }
   public override eq(other: EmptyCell): boolean {
-    return other.position === this.position;
+    return other.position === this.position && other.width === this.width;
   }
   public override toDOM(view: EditorView): HTMLElement {
     const cell = document.createElement("span");
     cell.className = "cm-table-cell";
+    if (this.width !== undefined) {
+      cell.style.width = `${String(this.width)}px`;
+      cell.style.minWidth = cell.style.width;
+    }
     cell.textContent = "\u200b";
     cell.dataset["tableCell"] = String(this.position);
     cell.addEventListener("mousedown", (event) => {
@@ -222,6 +297,7 @@ export function editTable(view: EditorView, action: TableAction, targetPosition?
     return false;
   const text = view.state.doc.toString();
   const selected = view.state.selection.main;
+  if (action === "source" && targetPosition === undefined && returnTableToLive(view)) return true;
   if (action === "insert") {
     const prefix = selected.from > 0 && text[selected.from - 1] !== "\n" ? "\n\n" : "";
     const insert = `${prefix}| 見出し | 見出し |\n| --- | --- |\n|  |  |\n\n`;
@@ -242,7 +318,11 @@ export function editTable(view: EditorView, action: TableAction, targetPosition?
   if (table === undefined) return false;
   if (action === "source") {
     view.dispatch({
-      effects: rawTable.of(view.state.field(rawTableField) === table.from ? undefined : table.from),
+      effects: rawTable.of(
+        view.state.field(rawTableField)?.from === table.from
+          ? undefined
+          : { from: table.from, to: table.to },
+      ),
     });
     view.focus();
     return true;
@@ -271,6 +351,7 @@ export function editTable(view: EditorView, action: TableAction, targetPosition?
     changes = { from: row.from - 1, to: row.to, insert: "" };
     targetRow = Math.min(current.row, table.rows.length - 2);
   } else if (action === "column-add" || action === "column-delete" || action === "column-append") {
+    if (action === "column-delete" && table.columns <= 1) return false;
     changes = changeTableColumn(
       text,
       table,
@@ -516,8 +597,34 @@ function tablePointerSelection(view: EditorView, event: MouseEvent): MouseSelect
 }
 
 /** Only normal cell input is protected. Explicit source edits and search replacement stay literal. */
+function replacesExplicitWholeTableSelection(
+  transaction: Transaction,
+  tables: readonly SourceTable[],
+): boolean {
+  const selection = transaction.startState.selection;
+  if (selection.ranges.length !== 1 || selection.main.empty) return false;
+  const selectedTables = tables.filter(
+    (table) => table.from < selection.main.to && table.to > selection.main.from,
+  );
+  if (
+    selectedTables.length === 0 ||
+    !selectedTables.every(
+      (table) => selection.main.from <= table.from && selection.main.to >= table.to,
+    )
+  )
+    return false;
+  let count = 0;
+  let matches = true;
+  transaction.changes.iterChanges((from, to) => {
+    count++;
+    if (from !== selection.main.from || to !== selection.main.to) matches = false;
+  });
+  return count === 1 && matches;
+}
 function protectCells(transaction: Transaction): Transaction | readonly TransactionSpec[] {
   const state = transaction.startState;
+  if (state.field(sourceLineSelection, false) === true && !state.selection.main.empty)
+    return transaction;
   const tables = findTables(state.doc.toString());
   if (transaction.docChanged) {
     if (!(
@@ -528,6 +635,10 @@ function protectCells(transaction: Transaction): Transaction | readonly Transact
       transaction.isUserEvent("delete")
     ))
       return transaction;
+    // Ctrl+A and an explicit table-spanning source selection are literal source
+    // operations. Do not turn a paste or cut into a no-op merely because it
+    // crosses cell delimiters; partial/multiple-cell edits remain protected.
+    if (replacesExplicitWholeTableSelection(transaction, tables)) return transaction;
     const cells = new Map<number, { from: number; to: number }>();
     const safety = { unsafe: false };
     transaction.changes.iterChanges((from, to) => {
@@ -584,260 +695,14 @@ function protectCells(transaction: Transaction): Transaction | readonly Transact
   return anchor === head ? transaction : [transaction, { selection: { anchor }, sequential: true }];
 }
 
-function tableControls(isEditable: () => boolean): Extension {
-  return ViewPlugin.fromClass(
-    class {
-      private readonly tooltip;
-      private controls = new Map<
-        number,
-        {
-          row: HTMLButtonElement;
-          column: HTMLButtonElement;
-          bounds?: { left: number; right: number; top: number; bottom: number };
-        }
-      >();
-      private pointer: { x: number; y: number } | undefined;
-      private pressed:
-        | {
-            button: HTMLButtonElement;
-            id: number;
-            x: number;
-            y: number;
-            doc: EditorState["doc"];
-            ready: boolean;
-          }
-        | undefined;
-      private destroyed = false;
-      constructor(private readonly view: EditorView) {
-        this.tooltip = createControlledTooltip(view.dom);
-        view.dom.addEventListener("pointermove", this.over);
-        view.dom.addEventListener("pointerleave", this.leave);
-        view.dom.ownerDocument.addEventListener("pointerdown", this.cancel, true);
-        view.dom.ownerDocument.addEventListener("pointermove", this.track, true);
-        view.dom.ownerDocument.addEventListener("pointerup", this.release, true);
-        view.dom.ownerDocument.addEventListener("pointercancel", this.cancel, true);
-        view.scrollDOM.addEventListener("scroll", this.measure);
-        this.measure();
-      }
-      private create(from: number): { row: HTMLButtonElement; column: HTMLButtonElement } {
-        const row = document.createElement("button"),
-          column = document.createElement("button");
-        for (const [button, action, label] of [
-          [row, "row-append", "末尾に行を追加"],
-          [column, "column-append", "末尾に列を追加"],
-        ] as const) {
-          button.type = "button";
-          button.className = "cm-table-add";
-          button.dataset["tableAdd"] = action;
-          button.dataset["tableFrom"] = String(from);
-          button.textContent = "+";
-          button.setAttribute("aria-label", label);
-          this.tooltip.attach(button, label);
-          button.addEventListener("pointerdown", (event) => {
-            if (event.button !== 0 || !isEditable()) return;
-            event.preventDefault();
-            this.pressed = {
-              button,
-              id: event.pointerId,
-              x: event.clientX,
-              y: event.clientY,
-              doc: this.view.state.doc,
-              ready: false,
-            };
-          });
-          button.addEventListener("mousedown", (event) => {
-            event.preventDefault();
-          });
-          button.addEventListener("click", (event) => {
-            const keyboard =
-              event.detail === 0 && this.view.dom.ownerDocument.activeElement === button;
-            const pointer =
-              event.button === 0 &&
-              this.pressed?.button === button &&
-              this.pressed.ready &&
-              this.pressed.doc === this.view.state.doc;
-            this.pressed = undefined;
-            if ((keyboard || pointer) && !button.hidden && isEditable())
-              editTable(this.view, action, Number(button.dataset["tableFrom"]));
-          });
-          this.view.dom.append(button);
-        }
-        return { row, column };
-      }
-      private readonly cancel = (): void => {
-        this.pressed = undefined;
-      };
-      private readonly track = (event: PointerEvent): void => {
-        const press = this.pressed;
-        if (
-          press &&
-          (press.id !== event.pointerId ||
-            Math.hypot(event.clientX - press.x, event.clientY - press.y) > 4)
-        )
-          this.cancel();
-      };
-      private readonly release = (event: PointerEvent): void => {
-        const press = this.pressed;
-        if (press?.id !== event.pointerId) return;
-        const rect = press.button.getBoundingClientRect();
-        if (
-          event.button === 0 &&
-          event.target === press.button &&
-          event.clientX >= rect.left &&
-          event.clientX < rect.right &&
-          event.clientY >= rect.top &&
-          event.clientY < rect.bottom
-        )
-          press.ready = true;
-        else this.cancel();
-      };
-      private readonly over = (event: PointerEvent): void => {
-        this.pointer = { x: event.clientX, y: event.clientY };
-        this.highlight();
-      };
-      private readonly leave = (): void => {
-        this.pointer = undefined;
-        this.highlight();
-      };
-      private highlight(): void {
-        for (const pair of this.controls.values()) {
-          const p = this.pointer,
-            b = pair.bounds;
-          const active = !!(
-            p &&
-            b &&
-            p.x >= b.left &&
-            p.x < b.right + 22 &&
-            p.y >= b.top &&
-            p.y < b.bottom + 22
-          );
-          for (const button of [pair.row, pair.column])
-            button.toggleAttribute("data-active", active);
-        }
-      }
-      private readonly measure = (): void => {
-        if (this.destroyed) return;
-        this.view.requestMeasure({
-          key: this,
-          read: (view) => {
-            const root = view.dom.getBoundingClientRect();
-            const scroll = view.scrollDOM.getBoundingClientRect();
-            return {
-              root,
-              scroll,
-              tables: findTables(view.state.doc.toString()).flatMap((table) => {
-                if (isTableSourceActive(view.state, table)) return [];
-                const rows = view.contentDOM.querySelectorAll<HTMLElement>(
-                  `[data-table-from="${String(table.from)}"]`,
-                );
-                const first = rows[0]?.getBoundingClientRect();
-                const last = rows[rows.length - 1]?.getBoundingClientRect();
-                if (!first || !last || last.bottom + 22 < scroll.top || first.top > scroll.bottom)
-                  return [];
-                return [{ from: table.from, first, last }];
-              }),
-            };
-          },
-          write: ({ root, scroll, tables }) => {
-            if (this.destroyed) return;
-            const live = new Set(tables.map((table) => table.from));
-            for (const [from, pair] of this.controls)
-              if (!live.has(from)) {
-                pair.row.remove();
-                pair.column.remove();
-                this.tooltip.hide();
-                this.controls.delete(from);
-                if (this.pressed?.button === pair.row || this.pressed?.button === pair.column)
-                  this.cancel();
-              }
-            for (const { from, first, last } of tables) {
-              let pair = this.controls.get(from);
-              if (!pair) {
-                pair = this.create(from);
-                this.controls.set(from, pair);
-              }
-              pair.bounds = {
-                left: first.left,
-                right: first.right,
-                top: first.top,
-                bottom: last.bottom,
-              };
-              const left = Math.max(first.left, scroll.left);
-              const right = Math.min(first.right, scroll.right);
-              const top = Math.max(first.top, scroll.top);
-              const bottom = Math.min(last.bottom, scroll.bottom);
-              for (const button of [pair.row, pair.column]) {
-                button.dataset["tableFrom"] = String(from);
-                button.disabled = !isEditable();
-              }
-              Object.assign(pair.row.style, {
-                left: `${String(left - root.left)}px`,
-                top: `${String(last.bottom + 2 - root.top)}px`,
-                width: `${String(Math.max(0, right - left))}px`,
-              });
-              Object.assign(pair.column.style, {
-                left: `${String(first.right + 2 - root.left)}px`,
-                top: `${String(top - root.top)}px`,
-                height: `${String(Math.max(0, bottom - top))}px`,
-              });
-              pair.row.hidden =
-                last.bottom + 20 > scroll.bottom || last.bottom < scroll.top || right <= left;
-              pair.column.hidden =
-                first.right + 20 > scroll.right || first.right < scroll.left || bottom <= top;
-            }
-            this.highlight();
-            this.tooltip.reposition();
-          },
-        });
-      };
-      update(update: ViewUpdate): void {
-        if (update.docChanged) {
-          this.cancel();
-          const mapped: typeof this.controls = new Map();
-          for (const [from, pair] of this.controls) {
-            const next = update.changes.mapPos(from, 1, MapMode.TrackAfter);
-            if (next === null || mapped.has(next)) {
-              pair.row.remove();
-              pair.column.remove();
-              this.tooltip.hide();
-            } else mapped.set(next, pair);
-          }
-          this.controls = mapped;
-        }
-        if (
-          update.docChanged ||
-          update.geometryChanged ||
-          update.viewportChanged ||
-          update.transactions.some((tr) => tr.effects.length)
-        )
-          this.measure();
-      }
-      destroy(): void {
-        this.destroyed = true;
-        this.tooltip.destroy();
-        this.view.dom.removeEventListener("pointermove", this.over);
-        this.view.dom.removeEventListener("pointerleave", this.leave);
-        this.view.dom.ownerDocument.removeEventListener("pointerdown", this.cancel, true);
-        this.view.dom.ownerDocument.removeEventListener("pointermove", this.track, true);
-        this.view.dom.ownerDocument.removeEventListener("pointerup", this.release, true);
-        this.view.dom.ownerDocument.removeEventListener("pointercancel", this.cancel, true);
-        this.view.scrollDOM.removeEventListener("scroll", this.measure);
-        for (const pair of this.controls.values()) {
-          pair.row.remove();
-          pair.column.remove();
-        }
-      }
-    },
-  );
-}
-
 export function tableEditing(isEditable: () => boolean): Extension {
   return [
     rawTableField,
+    tableWidths,
     searchReveal,
     drawSelection(),
     State.transactionFilter.of(protectCells),
-    tableControls(isEditable),
+    tableControls(isEditable, isTableSourceActive, editTable),
     EditorView.mouseSelectionStyle.of(tablePointerSelection),
     tableDecorations,
     Prec.highest(
@@ -878,11 +743,17 @@ export function tableEditing(isEditable: () => boolean): Extension {
         borderRadius: "3px",
       },
       ".cm-table-add[hidden]": { display: "none" },
-      ".cm-table-add[data-active], .cm-table-add:hover, .cm-table-add:focus-visible": {
+      ".cm-table-add:hover, .cm-table-add:focus-visible": {
         color: "var(--vscode-editor-foreground, currentColor)",
         background: "var(--vscode-toolbar-hoverBackground, #80808044)",
         borderColor: "var(--vscode-contrastBorder, transparent)",
       },
+      ".cm-table-scroll": { maxWidth: "100%", overflowX: "auto", scrollbarWidth: "thin" },
+      ".cm-table-delete:hover, .cm-table-delete:focus-visible": {
+        color: "var(--vscode-errorForeground, #d44)",
+        background: "var(--vscode-inputValidation-errorBackground, #d443)",
+      },
+      ".cm-table-add:disabled": { cursor: "not-allowed" },
       ".cm-table-add:focus-visible": { outline: "2px solid var(--vscode-focusBorder)" },
       ".cm-line.cm-table-row": {
         display: "table",
@@ -900,8 +771,8 @@ export function tableEditing(isEditable: () => boolean): Extension {
         display: "table-cell",
         boxSizing: "border-box",
         verticalAlign: "top",
-        width: "14em",
-        minWidth: "14em",
+        width: "var(--cm-table-min-width, 4.75em)",
+        minWidth: "var(--cm-table-min-width, 4.75em)",
         minHeight: "1.8em",
         whiteSpace: "pre-wrap",
         overflowWrap: "anywhere",
@@ -911,7 +782,9 @@ export function tableEditing(isEditable: () => boolean): Extension {
       },
       ".cm-table-header": {
         fontWeight: "600",
-        backgroundColor: "var(--vscode-editorWidget-background)",
+        // A translucent tint lets CM's selection layer beneath content stay visible.
+        backgroundColor:
+          "color-mix(in srgb, var(--vscode-editor-foreground, #888) 8%, transparent)",
       },
       ".cm-line.cm-table-delimiter": { fontSize: "0", lineHeight: "1px", minHeight: "1px" },
       ".cm-table-cell:focus-within": { outline: "1px solid var(--vscode-focusBorder)" },

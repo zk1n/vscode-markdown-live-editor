@@ -13,7 +13,10 @@ export class RichClient {
   >();
   public constructor(
     private readonly post: (
-      request: Pick<RichRequest, "requestId" | "operation" | "target" | "name" | "data">,
+      request: Pick<
+        RichRequest,
+        "requestId" | "operation" | "target" | "name" | "data" | "targetVersion"
+      >,
     ) => void,
     private ready = true,
   ) {}
@@ -25,7 +28,7 @@ export class RichClient {
   }
   public request(
     operation: RichOperation,
-    fields: { target?: string; name?: string; data?: string } = {},
+    fields: { target?: string; name?: string; data?: string; targetVersion?: string } = {},
     signal?: AbortSignal,
   ): Promise<RichResponse | undefined> {
     if (this.disposed || signal?.aborted === true) return Promise.resolve(undefined);

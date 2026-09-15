@@ -1,3 +1,4 @@
+import { defaultEditorPreferences } from "../../src/protocol/editorPreferences.js";
 import { EditorView } from "@codemirror/view";
 import { findTables, tableCellAt } from "../../src/core/markdown/tableSource.js";
 import { applyWireChanges } from "../../src/core/sync/documentText.js";
@@ -10,6 +11,9 @@ let version = 1;
 const past: string[] = [];
 let future: string[] = [];
 let hold = false;
+let slowLink = false;
+const linkTiming: { event: string; ms: number }[] = [];
+let linkStart = 0;
 let pending: (() => void) | undefined;
 let currentView: EditorView | undefined;
 let controller: unknown;
@@ -37,7 +41,7 @@ bootstrap.textContent = JSON.stringify({
   ...identity,
   documentVersion: 1,
   text: initial,
-  diagnosticMode: "off",
+  diagnosticMode: "preview",
   nextSequence: 1,
 });
 document.body.append(bootstrap);
@@ -51,6 +55,20 @@ Object.defineProperty(window, "acquireVsCodeApi", {
           controllerId: message["controllerId"],
           documentVersion: version,
         };
+        if (
+          message["kind"] === "diagnostic" &&
+          typeof message["event"] === "string" &&
+          message["event"].startsWith("link-preview.")
+        ) {
+          const event = message["event"].slice("link-preview.".length);
+          const details = message["details"] as { time: number };
+          if (event === "hover") {
+            linkTiming.length = 0;
+            linkStart = details.time;
+          }
+          linkTiming.push({ event, ms: Math.round(details.time - linkStart) });
+          element("link-timing").textContent = JSON.stringify(linkTiming.slice(-12));
+        }
         if (message["kind"] === "editor-ready")
           receive({ ...base, kind: "controller-ready", nextSequence: 1, text: authority });
         if (message["kind"] === "edit") {
@@ -110,6 +128,8 @@ Object.defineProperty(window, "acquireVsCodeApi", {
             });
           };
           if (hold && message["operation"] === "image-import") pending = reply;
+          else if (slowLink && message["operation"] === "link-preview")
+            window.setTimeout(reply, 1200);
           else reply();
         }
         const view = currentView;
@@ -206,8 +226,10 @@ async function start(): Promise<void> {
     };
     const text = fixtures[event.target.value];
     if (text !== undefined) set(text);
-    else if (event.target.value === "fifth")
-      void fetch("/tests/fixtures/v02-ux-fifth-review/review-lf.md")
+    else if (["fifth", "sixth", "sixth-long"].includes(event.target.value))
+      void fetch(
+        `/tests/fixtures/v02-ux-${event.target.value === "fifth" ? "fifth" : "sixth"}-review/${event.target.value === "sixth-long" ? "search-10000.md" : "review-lf.md"}`,
+      )
         .then((response) => response.text())
         .then(set);
   });
@@ -238,6 +260,42 @@ async function start(): Promise<void> {
         });
         view.scrollDOM.scrollTop = 0;
       });
+  });
+  for (const [id, command] of [
+    ["u6-table-source", "table-source"],
+    ["u6-return-live", "return-to-live"],
+  ]) {
+    const button = document.getElementById(id ?? "");
+    button?.addEventListener("mousedown", (event) => {
+      event.preventDefault();
+    });
+    button?.addEventListener("click", () => {
+      receive({ ...identity, kind: "rich-command", controllerId: controller, command });
+    });
+  }
+  document.getElementById("u6-preferences")?.addEventListener("change", (event) => {
+    if (!(event.target instanceof HTMLSelectElement)) return;
+    const mode = event.target.value;
+    receive({
+      ...identity,
+      kind: "editor-configuration",
+      controllerId: controller,
+      revision: ++configurationRevision,
+      tabSize: 4,
+      insertSpaces: true,
+      preferences: {
+        ...defaultEditorPreferences,
+        wordWrap: mode !== "nowrap",
+        lineNumbers: mode !== "nogutter",
+        compactSpacing: mode !== "source",
+        minimapSlider: mode === "always" ? "always" : "mouseover",
+        ...(mode === "small" ? { structuralGap: 0, tableBandSize: 0, tableMinWidth: 0 } : {}),
+      },
+    });
+  });
+  document.getElementById("link-delay")?.addEventListener("click", () => {
+    slowLink = !slowLink;
+    element("link-delay").textContent = slowLink ? "リンク応答:1200ms" : "リンク応答:即時";
   });
   document.getElementById("minimap-toggle")?.addEventListener("click", () => {
     minimapEnabled = !minimapEnabled;

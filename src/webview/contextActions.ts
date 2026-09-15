@@ -4,7 +4,7 @@ import { ViewPlugin, type EditorView, type ViewUpdate } from "@codemirror/view";
 import { findMarkdownLinks } from "../core/markdown/markdownLinks.js";
 import { findTables, tableCellAt } from "../core/markdown/tableSource.js";
 import type { RichCommand, RichIdentity } from "../protocol/richMessages.js";
-import { editTable, type TableAction } from "./livePreview/tableEditing.js";
+import { editTable, returnTableToLive, type TableAction } from "./livePreview/tableEditing.js";
 
 export interface ContextActionIdentity extends RichIdentity {
   readonly documentVersion: number;
@@ -258,6 +258,13 @@ class ContextActionPlugin {
         !sameIdentity(fromToken.identity, this.options.identity()))
     )
       return false;
+    if (
+      token === undefined &&
+      command === "table-source" &&
+      (this.options.isReady?.() ?? this.options.isEditable()) &&
+      returnTableToLive(this.view)
+    )
+      return true;
     const candidate = fromToken?.target ?? targetAtCaret(this.view);
     if (candidate === undefined) return false;
     const target = validTarget(this.view, candidate);

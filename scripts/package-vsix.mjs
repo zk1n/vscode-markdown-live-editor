@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { inflateRawSync } from "node:zlib";
 import { fileURLToPath } from "node:url";
@@ -11,24 +11,28 @@ const stabilityReview = process.argv.includes("--ux-stability-review");
 const interactionReview = process.argv.includes("--ux-interaction-review");
 const fourthReview = process.argv.includes("--ux-fourth-review");
 const fifthReview = process.argv.includes("--ux-fifth-review");
+const sixthReview = process.argv.includes("--ux-sixth-review");
 const reviewBuild =
+  sixthReview ||
   fifthReview ||
   fourthReview ||
   interactionReview ||
   stabilityReview ||
   process.argv.includes("--review") ||
   process.argv.includes("--ux-review");
-const reviewSuffix = fifthReview
-  ? "-ux-fifth-review"
-  : fourthReview
-    ? "-ux-fourth-review"
-    : interactionReview
-      ? "-ux-interaction-review"
-      : stabilityReview
-        ? "-ux-stability-review"
-        : process.argv.includes("--ux-review")
-          ? "-ux-review"
-          : "-initial-review";
+const reviewSuffix = sixthReview
+  ? "-ux-sixth-review"
+  : fifthReview
+    ? "-ux-fifth-review"
+    : fourthReview
+      ? "-ux-fourth-review"
+      : interactionReview
+        ? "-ux-interaction-review"
+        : stabilityReview
+          ? "-ux-stability-review"
+          : process.argv.includes("--ux-review")
+            ? "-ux-review"
+            : "-initial-review";
 const artifactPath = path.join(
   artifactDirectory,
   `${packageJson.name}-${packageJson.version}${reviewBuild ? reviewSuffix : ""}.vsix`,
@@ -180,6 +184,17 @@ function packageVsix() {
       const targetPath = path.join(stagingDirectory, target);
       mkdirSync(path.dirname(targetPath), { recursive: true });
       copyFileSync(path.join(repositoryRoot, source), targetPath);
+    }
+    if (sixthReview) {
+      for (const [file, suffix] of [
+        ["package.nls.json", " [UX6 Review]"],
+        ["package.nls.ja.json", " [第六UXレビュー]"],
+      ]) {
+        const target = path.join(stagingDirectory, file);
+        const labels = JSON.parse(readFileSync(target, "utf8"));
+        labels.displayName += suffix;
+        writeFileSync(target, `${JSON.stringify(labels, null, 2)}\n`);
+      }
     }
     rmSync(artifactPath, { force: true });
     const vsceEntrypoint = path.join(repositoryRoot, "node_modules", "@vscode", "vsce", "vsce");

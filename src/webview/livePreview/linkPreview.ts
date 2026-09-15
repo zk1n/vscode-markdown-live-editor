@@ -6,19 +6,53 @@ import {
   closeHoverTooltips,
   hasHoverTooltips,
   repositionTooltips,
+  ViewPlugin,
 } from "@codemirror/view";
 import { findMarkdownLinks, type MarkdownLink } from "../../core/markdown/markdownLinks.js";
 import type { RichClient } from "../richClient.js";
+import type { RichResponse } from "../../protocol/richMessages.js";
 import { createLivePreviewEngine } from "./LivePreviewEngine.js";
+import { editorPreferences } from "../editorPreferences.js";
+
+const TRANSIT_PX = 10;
+
+/** Local presentation measurements. No target or preview content is included. */
+export type LinkPreviewEvent =
+  "hover" | "request" | "response" | "timer" | "parseStart" | "parseEnd" | "display";
 
 export interface LinkActions {
   readonly client: RichClient;
   readonly isEditable: () => boolean;
   readonly synchronize: () => Promise<boolean>;
   readonly notify: (note: string) => void;
+  readonly previewOptions?: () => Readonly<LinkPreviewOptions> | undefined;
+  readonly onPreviewEvent?: (event: LinkPreviewEvent) => void;
+}
+
+export interface LinkPreviewOptions {
+  readonly hoverDelayMs?: number;
+  readonly maxWidthPx?: number;
+  readonly maxHeightPx?: number;
 }
 export function linkPreview(actions: LinkActions): Extension {
+  let cachedDocument: EditorState["doc"] | undefined;
+  const cache = new Map<
+    string,
+    { readonly response: RichResponse; readonly targetVersion: string }
+  >();
   return [
+    ViewPlugin.define(() => ({
+      update(update) {
+        if (update.docChanged) {
+          cache.clear();
+          cachedDocument = update.state.doc;
+        }
+      },
+      destroy() {
+        cache.clear();
+        cachedDocument = undefined;
+      },
+    })),
     hoverTooltip(
       async (view, position) => {
         if (view.composing || view.compositionStarted) return null;
@@ -27,15 +61,65 @@ export function linkPreview(actions: LinkActions): Extension {
           (candidate) => !candidate.image && candidate.from <= position && candidate.to >= position,
         );
         if (link === undefined) return null;
-        const response = await actions.client.request("link-preview", { target: link.target });
-        if (view.state.doc !== snapshot || response === undefined || !view.dom.isConnected)
-          return null;
+        if (cachedDocument !== snapshot) {
+          cachedDocument = snapshot;
+          cache.clear();
+        }
+        actions.onPreviewEvent?.("hover");
+        const cached = cache.get(link.target);
+        actions.onPreviewEvent?.("request");
+        const request = actions.client
+          .request("link-preview", {
+            target: link.target,
+            ...(cached === undefined ? {} : { targetVersion: cached.targetVersion }),
+          })
+          .catch(() => undefined)
+          .then((value) => {
+            actions.onPreviewEvent?.("response");
+            if (value?.unchanged === true) return cached?.response;
+            if (
+              value?.targetVersion !== undefined &&
+              value.ok &&
+              cachedDocument === snapshot &&
+              view.dom.isConnected
+            ) {
+              cache.set(link.target, { response: value, targetVersion: value.targetVersion });
+              if (cache.size > 32) {
+                const oldest = cache.keys().next().value;
+                if (oldest !== undefined) cache.delete(oldest);
+              }
+            }
+            return value;
+          });
+        const configured = actions.previewOptions?.();
+        await new Promise<void>((resolve) =>
+          window.setTimeout(
+            resolve,
+            Math.max(
+              0,
+              configured?.hoverDelayMs ?? view.state.facet(editorPreferences).linkHoverDelay,
+            ),
+          ),
+        );
+        actions.onPreviewEvent?.("timer");
+        if (view.state.doc !== snapshot || !view.dom.isConnected) return null;
+        const response = await Promise.race([
+          request,
+          new Promise<undefined>((resolve) => window.setTimeout(resolve, 0)),
+        ]);
         // Resolve the first size before CM chooses a side. Its chosen side is
         // retained until it no longer fits, even when content later shrinks.
         const heightFor = (anchor: { top: number; bottom: number }): number => {
           const above = anchor.top - 14 - 8;
           const below = window.innerHeight - anchor.bottom - 14 - 8;
-          return Math.max(0, Math.min(400, window.innerHeight * 0.65, above >= 64 ? above : below));
+          return Math.max(
+            0,
+            Math.min(
+              configured?.maxHeightPx ?? 400,
+              window.innerHeight * 0.65,
+              above >= 64 ? above : below,
+            ),
+          );
         };
         const initialAnchor = view.coordsAtPos(link.from);
         if (!initialAnchor) return null;
@@ -46,15 +130,23 @@ export function linkPreview(actions: LinkActions): Extension {
           above: true,
           create() {
             const dom = document.createElement("div");
-            dom.className = "cm-link-preview";
-            dom.style.maxHeight = `${String(initialHeight)}px`;
+            // This transparent box makes the pointer's 14px path to the card
+            // part of CodeMirror's hover rectangle without covering the text.
+            dom.className = "cm-link-preview-transit";
+            dom.style.maxHeight = `${String(initialHeight + TRANSIT_PX * 2)}px`;
+            const card = document.createElement("div");
+            card.className = "cm-link-preview";
+            if (configured?.maxWidthPx !== undefined)
+              card.style.maxWidth = `${String(configured.maxWidthPx)}px`;
+            card.style.maxHeight = `${String(initialHeight)}px`;
             const heading = document.createElement("div");
             heading.className = "cm-link-preview-title";
-            heading.textContent = response.title ?? link.label;
+            heading.textContent = response?.title ?? link.label;
             const hint = document.createElement("div");
             hint.className = "cm-link-preview-hint";
             hint.textContent = "Ctrl+クリックで開く · Escで閉じる";
-            dom.append(heading, hint);
+            card.append(heading, hint);
+            dom.append(card);
             let destroyed = false;
             const fit = (): void => {
               if (destroyed) return;
@@ -67,47 +159,79 @@ export function linkPreview(actions: LinkActions): Extension {
                 },
                 write(height) {
                   if (destroyed || height === undefined) return;
-                  const value = `${String(height)}px`;
+                  const value = `${String(height + TRANSIT_PX * 2)}px`;
                   if (dom.style.maxHeight !== value) {
                     dom.style.maxHeight = value;
+                    card.style.maxHeight = `${String(height)}px`;
                     repositionTooltips(view);
                   }
                 },
               });
             };
+            const cleanupPlacement = (): void => {
+              destroyed = true;
+              view.scrollDOM.removeEventListener("scroll", fit);
+              window.removeEventListener("resize", fit);
+            };
             const placement = {
-              offset: { x: 0, y: 14 },
+              // Padding bridges both above/below placements while this offset
+              // preserves the card's visible 14px separation from its link.
+              offset: { x: 0, y: 14 - TRANSIT_PX },
               mount() {
                 fit();
                 view.scrollDOM.addEventListener("scroll", fit);
                 window.addEventListener("resize", fit);
               },
               update: fit,
-              destroy() {
-                destroyed = true;
-                view.scrollDOM.removeEventListener("scroll", fit);
-                window.removeEventListener("resize", fit);
-              },
+              destroy: cleanupPlacement,
             };
-            if (!response.ok) {
-              const error = document.createElement("p");
-              error.textContent = response.note ?? "リンク先を確認できません。";
-              dom.append(error);
-              return { dom, ...placement };
+            const renderResponse = (value: Awaited<typeof request>): void => {
+              if (destroyed || value === undefined || view.state.doc !== snapshot) return;
+              card.querySelector(".cm-link-preview-body")?.remove();
+              if (!value.ok) {
+                const error = document.createElement("p");
+                error.textContent = value.note ?? "リンク先を確認できません。";
+                error.className = "cm-link-preview-body";
+                card.append(error);
+                repositionTooltips(view);
+                return;
+              }
+              actions.onPreviewEvent?.("parseStart");
+              const preview = createLivePreviewEngine();
+              const nested = new EditorView({
+                parent: card,
+                state: EditorState.create({
+                  doc: value.text ?? "",
+                  extensions: [
+                    markdown(),
+                    preview.extension,
+                    EditorState.readOnly.of(true),
+                    EditorView.editable.of(false),
+                  ],
+                }),
+              });
+              nested.dom.classList.add("cm-link-preview-body");
+              placement.destroy = () => {
+                cleanupPlacement();
+                nested.destroy();
+                preview.dispose();
+              };
+              actions.onPreviewEvent?.("parseEnd");
+              repositionTooltips(view);
+            };
+            if (response !== undefined) {
+              renderResponse(response);
+            } else {
+              const loading = document.createElement("div");
+              loading.className = "cm-link-preview-body cm-link-preview-loading";
+              loading.setAttribute("role", "status");
+              loading.textContent = "読み込み中…";
+              card.append(loading);
+              void request.then((value) => {
+                renderResponse(value);
+              });
             }
-            const preview = createLivePreviewEngine();
-            const nested = new EditorView({
-              parent: dom,
-              state: EditorState.create({
-                doc: response.text ?? "",
-                extensions: [
-                  markdown(),
-                  preview.extension,
-                  EditorState.readOnly.of(true),
-                  EditorView.editable.of(false),
-                ],
-              }),
-            });
+            actions.onPreviewEvent?.("display");
             return {
               dom,
               ...placement,
@@ -115,14 +239,12 @@ export function linkPreview(actions: LinkActions): Extension {
               // CodeMirror's viewport-aware side selection and resize behavior.
               destroy() {
                 placement.destroy();
-                nested.destroy();
-                preview.dispose();
               },
             };
           },
         };
       },
-      { hoverTime: 450, hideOnChange: true },
+      { hoverTime: 0, hideOnChange: true },
     ),
     Prec.highest(
       EditorView.domEventHandlers({
@@ -155,9 +277,15 @@ export function linkPreview(actions: LinkActions): Extension {
       }),
     ),
     EditorView.baseTheme({
+      ".cm-link-preview-transit": {
+        boxSizing: "border-box",
+        padding: `${String(TRANSIT_PX)}px 0`,
+        pointerEvents: "auto",
+      },
       ".cm-link-preview": {
         boxSizing: "border-box",
-        width: "min(480px, 80vw)",
+        width: "fit-content",
+        maxWidth: "min(560px, calc(100vw - 16px))",
         maxHeight: "min(400px, 65vh)",
         overflow: "auto",
         color: "var(--vscode-editorHoverWidget-foreground)",

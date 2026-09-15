@@ -186,6 +186,20 @@ describe("floating full-source search", () => {
     expect(queryBox?.parentElement?.children[1]).toBe(queryBox);
     expect(replacementBox?.parentElement?.children[1]).toBe(replacementBox);
   });
+  it("reserves a stable status column and exposes full counts beyond four digits", async () => {
+    const matches = Array.from({ length: 10000 }, (_, from) => ({
+      from,
+      to: from + 1,
+      insert: "",
+    }));
+    const { open } = create("x".repeat(10000), () => Promise.resolve({ matches }));
+    open();
+    input("query", "x");
+    await settle();
+    const status = document.querySelector<HTMLElement>('[role="status"]');
+    expect(status?.textContent).toBe("1 / 9999+");
+    expect(status?.getAttribute("aria-label")).toBe("1 / 10000");
+  });
   it("returns to the current match only when Escape starts in the search form", async () => {
     const { view, open } = create("needle middle needle");
     open();

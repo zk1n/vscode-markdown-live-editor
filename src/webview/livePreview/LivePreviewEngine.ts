@@ -354,9 +354,10 @@ function buildDecorations(state: EditorState): DecorationSet {
         Decoration.line({ class: lineClass }).range(state.doc.lineAt(syntax.from).from),
       );
     }
-    decorations.push(
-      Decoration.mark({ class: className }).range(syntax.contentFrom, syntax.contentTo),
-    );
+    if (syntax.contentFrom < syntax.contentTo)
+      decorations.push(
+        Decoration.mark({ class: className }).range(syntax.contentFrom, syntax.contentTo),
+      );
   }
 
   return Decoration.set(decorations, true);

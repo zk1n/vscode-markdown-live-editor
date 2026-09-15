@@ -140,7 +140,10 @@ function findHeading(line: string, offset: number): PresentationSyntaxRange | un
     to: heading.to,
     contentFrom: heading.contentFrom,
     contentTo: heading.contentTo,
-    markers: [{ from: heading.markerFrom, to: heading.markerTo }],
+    markers: [
+      { from: heading.markerFrom, to: heading.markerTo },
+      ...(heading.closingFrom === undefined ? [] : [{ from: heading.closingFrom, to: heading.to }]),
+    ].filter((marker) => marker.from < marker.to),
     headingLevel: heading.level,
   };
 }

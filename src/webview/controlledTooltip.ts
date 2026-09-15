@@ -32,10 +32,10 @@ export function createControlledTooltip(container: HTMLElement): ControlledToolt
   container.append(tooltip);
   let active: HTMLElement | undefined;
   let pointerOver: HTMLElement | undefined;
-  let focused: HTMLElement | undefined;
+  let keyboardFocused: HTMLElement | undefined;
 
   const hide = (): void => {
-    if (pointerOver || focused) return;
+    if (pointerOver || keyboardFocused) return;
     tooltip.hidden = true;
     active = undefined;
   };
@@ -72,8 +72,13 @@ export function createControlledTooltip(container: HTMLElement): ControlledToolt
   const reposition = (): void => {
     place();
   };
+  const clearForWindowBlur = (): void => {
+    pointerOver = keyboardFocused = undefined;
+    hide();
+  };
   window.addEventListener("resize", reposition);
   window.addEventListener("scroll", reposition, true);
+  window.addEventListener("blur", clearForWindowBlur);
 
   return {
     reposition,
@@ -81,6 +86,9 @@ export function createControlledTooltip(container: HTMLElement): ControlledToolt
       target.removeAttribute("title");
       target.setAttribute("aria-describedby", tooltip.id);
       target.addEventListener("pointerenter", () => {
+        // A mouse click focuses its button too.  Keep that focus from turning a
+        // pointer tooltip into a keyboard tooltip which would linger after leave.
+        if (keyboardFocused === target) keyboardFocused = undefined;
         pointerOver = target;
         show(target, label);
       });
@@ -89,24 +97,27 @@ export function createControlledTooltip(container: HTMLElement): ControlledToolt
         hide();
       });
       target.addEventListener("focus", () => {
-        focused = target;
-        show(target, label);
+        if (pointerOver !== target) {
+          keyboardFocused = target;
+          show(target, label);
+        }
       });
       target.addEventListener("blur", () => {
-        if (focused === target) focused = undefined;
+        if (keyboardFocused === target) keyboardFocused = undefined;
         hide();
       });
     },
     hide() {
-      pointerOver = focused = undefined;
+      pointerOver = keyboardFocused = undefined;
       hide();
     },
     destroy() {
       window.removeEventListener("resize", reposition);
       window.removeEventListener("scroll", reposition, true);
+      window.removeEventListener("blur", clearForWindowBlur);
       tooltip.remove();
       active = undefined;
-      pointerOver = focused = undefined;
+      pointerOver = keyboardFocused = undefined;
     },
   };
 }

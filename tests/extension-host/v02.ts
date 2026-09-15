@@ -43,6 +43,28 @@ export async function run(): Promise<void> {
   await verifyV02TextDocumentBoundary(workspaceFolder.uri);
   await verifyV02Interaction(workspaceFolder.uri);
   await verifyV02ImageLifecycle(workspaceFolder.uri);
+  await verifyU6SettingsAndCommands(workspaceFolder.uri);
+}
+
+/**
+ * Synthetic Extension Host evidence that the contributed settings and their
+ * filtered workbench entry commands are available. It is not native UI or
+ * keyboard-interaction acceptance.
+ */
+export async function verifyU6SettingsAndCommands(workspaceUri: vscode.Uri): Promise<void> {
+  const configuration = vscode.workspace.getConfiguration("vscodeMarkdownLiveEditor", workspaceUri);
+  assert.equal(configuration.inspect<string>("wordWrap")?.defaultValue, "on");
+  assert.equal(configuration.inspect<boolean>("lineNumbers")?.defaultValue, true);
+  assert.equal(configuration.inspect<string | boolean>("minimapEnabled")?.defaultValue, "follow");
+  assert.equal(configuration.inspect<string>("minimapSlider")?.defaultValue, "mouseover");
+  const commands = await vscode.commands.getCommands(true);
+  for (const command of [
+    "vscodeMarkdownLiveEditor.openSettings",
+    "vscodeMarkdownLiveEditor.openKeyboardShortcuts",
+  ])
+    assert.ok(commands.includes(command), `The U6 command '${command}' was not registered.`);
+  await vscode.commands.executeCommand("vscodeMarkdownLiveEditor.openSettings");
+  await vscode.commands.executeCommand("vscodeMarkdownLiveEditor.openKeyboardShortcuts");
 }
 
 export async function verifyV02TextDocumentBoundary(workspaceUri: vscode.Uri): Promise<void> {

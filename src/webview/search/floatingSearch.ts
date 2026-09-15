@@ -425,11 +425,19 @@ export function createFloatingSearch(options: {
         );
     }
     private showStatus(): void {
-      this.status.textContent = this.result.error
-        ? this.text[this.result.error]
-        : this.result.matches.length
-          ? `${String(this.current + 1)} / ${String(this.result.matches.length)}`
-          : this.text.empty;
+      if (this.result.error) {
+        this.status.textContent = this.text[this.result.error];
+        this.status.removeAttribute("aria-label");
+      } else if (this.result.matches.length) {
+        const current = this.current + 1;
+        const total = this.result.matches.length;
+        const compact = (value: number): string => (value > 9999 ? "9999+" : String(value));
+        this.status.textContent = `${compact(current)} / ${compact(total)}`;
+        this.status.setAttribute("aria-label", `${String(current)} / ${String(total)}`);
+      } else {
+        this.status.textContent = this.text.empty;
+        this.status.removeAttribute("aria-label");
+      }
       this.query.setAttribute("aria-invalid", String(this.result.error === "invalid"));
       this.setButtons();
     }
@@ -560,8 +568,8 @@ export function createFloatingSearch(options: {
           boxShadow: "0 2px 8px var(--vscode-widget-shadow, #0005)",
           display: "grid",
           gridTemplateColumns: "auto minmax(72px, 1fr) minmax(0, max-content)",
-          columnGap: "4px",
-          rowGap: "4px",
+          columnGap: "3px",
+          rowGap: "3px",
         },
         ".cm-search-input-row": { display: "contents" },
         ".cm-search-expand, .cm-search-row-spacer": { gridColumn: "1" },
@@ -606,7 +614,12 @@ export function createFloatingSearch(options: {
         },
         ".cm-floating-search [role=status]": {
           whiteSpace: "nowrap",
-          minWidth: "30px",
+          // Reserve the largest normal count so input geometry cannot move as
+          // asynchronous results cross a digit boundary.
+          width: "9ch",
+          overflow: "hidden",
+          textOverflow: "clip",
+          fontVariantNumeric: "tabular-nums",
           fontSize: "11px",
         },
         ".cm-search-scope::before": {
@@ -622,7 +635,7 @@ export function createFloatingSearch(options: {
         ".cm-floating-search input": {
           minWidth: "0",
           width: "100%",
-          padding: "4px",
+          padding: "3px 4px",
           color: "var(--vscode-input-foreground, inherit)",
           background: "var(--vscode-input-background, #333)",
           border: "1px solid var(--vscode-input-border, transparent)",
@@ -633,10 +646,10 @@ export function createFloatingSearch(options: {
           background: "transparent",
           border: "1px solid transparent",
           borderRadius: "2px",
-          padding: "3px 5px",
+          padding: "2px 4px",
           margin: "0",
           flexShrink: "0",
-          minHeight: "24px",
+          minHeight: "22px",
         },
         ".cm-floating-search button:hover, .cm-floating-search button[aria-pressed=true]": {
           background: "var(--vscode-inputOption-activeBackground, #555)",

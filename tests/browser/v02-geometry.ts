@@ -112,8 +112,8 @@ function verifyStructuralEditing(parent: HTMLElement): void {
     try {
       press(view, key);
       requireCondition(
-        view.state.doc.toString() === "# h\nbody",
-        `${key} removed content instead of only the managed separator`,
+        view.state.doc.toString() === "# h\n\nbody",
+        `${key} removed protected structure or content`,
       );
     } finally {
       view.destroy();
@@ -175,7 +175,7 @@ export async function runV02Geometry(
         structuralInputAssistance(),
         tableEditing(() => true),
         imageEditing(actions),
-        linkPreview(actions),
+        linkPreview({ ...actions, previewOptions: () => ({ hoverDelayMs: 0 }) }),
         headingInputAssistance(() => true),
         contexts.extension,
         keymap.of(
@@ -255,7 +255,12 @@ export async function runV02Geometry(
       );
       requireCondition(element !== undefined, "source row missing");
       const rect = element.getBoundingClientRect();
-      const block = view.lineBlockAt(row.from);
+      const lineBlock = view.lineBlockAt(row.from);
+      const block =
+        typeof lineBlock.type === "number"
+          ? lineBlock
+          : lineBlock.type.find((item) => item.from === row.from && item.to === row.to);
+      requireCondition(block !== undefined, "source row has no measured text block");
       requireCondition(
         Math.abs(rect.top - (view.documentTop + block.top)) <= 1 &&
           Math.abs(rect.height - block.height) <= 1,
@@ -284,9 +289,11 @@ export async function runV02Geometry(
       x: gapRect.left + 1,
       y: (gapRect.top + gapRect.bottom) / 2,
     });
+    requireCondition(gapHit !== null, "structural gap hit was outside the editor");
+    view.dispatch({ selection: { anchor: gapHit }, userEvent: "select.pointer" });
     requireCondition(
-      gapHit === headingEnd || gapHit === bodyStart,
-      `structural gap hit ${String(gapHit)} was not a boundary`,
+      view.state.selection.main.head === headingEnd || view.state.selection.main.head === bodyStart,
+      "structural gap pointer selection accepted a hidden caret stop",
     );
     // A structural gap is atomic: moving into its hidden newlines lands at an
     // adjacent source boundary rather than creating a separate blank-line stop.
@@ -397,6 +404,51 @@ export async function runV02Geometry(
   });
   verifyStructuralEditing(parent);
   results.push({ structuralInputAndDeletion: true, sourceUnchanged: true });
+  const twoTables =
+    "| one | two |\n| --- | --- |\n| a | b |\n\n| three | four |\n| --- | --- |\n| c | d |";
+  const replacement = "| only | table |\n| --- | --- |\n| retained | row |";
+  parent.style.width = "900px";
+  view.dom.style.fontSize = "14px";
+  view.dispatch({
+    changes: { from: 0, to: view.state.doc.length, insert: twoTables },
+    selection: { anchor: 0 },
+    scrollIntoView: true,
+  });
+  await measure(view);
+  await measure(view);
+  const oldControls = [...view.dom.querySelectorAll<HTMLButtonElement>("[data-table-add]")];
+  requireCondition(oldControls.length === 10, `two-table controls: ${String(oldControls.length)}`);
+  view.dispatch({
+    changes: { from: 0, to: view.state.doc.length, insert: replacement },
+    selection: { anchor: 0 },
+    scrollIntoView: true,
+  });
+  requireCondition(
+    oldControls.every((control) => !control.isConnected),
+    "old controls survived replacement",
+  );
+  await measure(view);
+  await measure(view);
+  const newControls = [...view.dom.querySelectorAll<HTMLButtonElement>("[data-table-add]")];
+  requireCondition(
+    newControls.length === 5 &&
+      newControls.every((control) => control.dataset["tableFrom"] === "0"),
+    "replacement controls have stale targets",
+  );
+  view.dispatch({
+    changes: { from: 0, to: view.state.doc.length, insert: "# #\n\nplain" },
+    selection: { anchor: 10 },
+  });
+  await measure(view);
+  requireCondition(
+    view.dom.querySelector("[data-table-add]") === null,
+    "transparent controls survived table removal",
+  );
+  requireCondition(
+    view.state.doc.toString() === "# #\n\nplain",
+    "empty ATX rendering altered source",
+  );
+  results.push({ tableControlLifecycle: "10->5->0", emptyAtxRender: true });
   // Leave the final tested view visible in the browser dump for inspection.
   return results;
 }
