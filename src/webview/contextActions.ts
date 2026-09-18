@@ -86,7 +86,7 @@ function tableTarget(source: string, position: number): TableTarget | undefined 
       position: address.cell.contentFrom,
       row: address.row,
       column: address.column,
-      canDeleteRow: address.row > 0,
+      canDeleteRow: address.row > 0 && table.rows.length > 2,
       canDeleteColumn: table.columns > 1,
     };
   }
@@ -251,6 +251,16 @@ class ContextActionPlugin {
 
   public run(command: RichCommand, token?: string, version?: number): boolean {
     const fromToken = token === undefined ? undefined : this.captured;
+    // A raw-table session is intentionally independent of the table parser:
+    // editing the delimiter can invalidate the captured menu token before the
+    // user chooses "Return to Live".  Exiting that presentation state must
+    // remain possible without repairing or rewriting the source.
+    if (
+      command === "table-source" &&
+      (this.options.isReady?.() ?? this.options.isEditable()) &&
+      returnTableToLive(this.view)
+    )
+      return true;
     if (
       token !== undefined &&
       (fromToken?.token !== token ||
@@ -258,13 +268,6 @@ class ContextActionPlugin {
         !sameIdentity(fromToken.identity, this.options.identity()))
     )
       return false;
-    if (
-      token === undefined &&
-      command === "table-source" &&
-      (this.options.isReady?.() ?? this.options.isEditable()) &&
-      returnTableToLive(this.view)
-    )
-      return true;
     const candidate = fromToken?.target ?? targetAtCaret(this.view);
     if (candidate === undefined) return false;
     const target = validTarget(this.view, candidate);

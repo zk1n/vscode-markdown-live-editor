@@ -9,7 +9,7 @@ import { Decoration, EditorView, WidgetType, type DecorationSet } from "@codemir
 import { findMarkdownLinks, type MarkdownLink } from "../../core/markdown/markdownLinks.js";
 import { MAX_IMAGE_BYTES } from "../../protocol/richMessages.js";
 import type { RichClient } from "../richClient.js";
-import { imageSourceHeight } from "./imageSourceHeight.js";
+import { imageHeightSettled, imageSourceHeight } from "./imageSourceHeight.js";
 import {
   searchReveal,
   searchPresentation,
@@ -165,7 +165,7 @@ interface ImageBinding {
   link: MarkdownLink;
   readonly client: RichClient;
   readonly revision: number;
-  readonly abort: AbortController;
+  readonly update: (link: MarkdownLink) => void;
   dispose(): void;
 }
 // DOM lifetime only: no URL cache shared by documents, sessions or duplicate images.
@@ -190,6 +190,9 @@ class ImageWidget extends WidgetType {
     return (
       this.actions.client === other.actions.client &&
       this.revision === other.revision &&
+      // Returning false for source metadata changes makes CodeMirror call
+      // updateDOM. That method can then keep the element for same-revision
+      // source edits while a resource revision still gets a fresh element.
       this.link.from === other.link.from &&
       this.link.to === other.link.to &&
       this.link.target === other.link.target &&
@@ -199,15 +202,8 @@ class ImageWidget extends WidgetType {
   }
   public override updateDOM(container: HTMLElement): boolean {
     const binding = imageBindings.get(container);
-    if (
-      binding?.client !== this.actions.client ||
-      binding.revision !== this.revision ||
-      binding.link.target !== this.link.target ||
-      binding.link.label !== this.link.label ||
-      binding.link.title !== this.link.title
-    )
-      return false;
-    binding.link = this.link;
+    if (binding?.client !== this.actions.client || binding.revision !== this.revision) return false;
+    binding.update(this.link);
     setImagePosition(container, this.link);
     this.actions.onImageEvent?.("dom-reused");
     return true;
@@ -226,16 +222,28 @@ class ImageWidget extends WidgetType {
     status.textContent = "画像を読み込み中…";
     container.dataset["imageState"] = "loading";
     this.actions.onImageEvent?.("loading");
-    const abort = new AbortController();
+    let abort = new AbortController();
     let timer: ReturnType<typeof setTimeout> | undefined;
+    let generation = 0;
+    const active = (token: number): boolean => token === generation && !abort.signal.aborted;
+    const clearRequest = (): void => {
+      abort.abort();
+      clearTimeout(timer);
+      timer = undefined;
+    };
     const binding: ImageBinding = {
       link: this.link,
       client: this.actions.client,
       revision: this.revision,
-      abort,
+      update: (link) => {
+        const targetChanged = binding.link.target !== link.target;
+        binding.link = link;
+        image.alt = link.label;
+        image.title = link.title ?? link.label;
+        if (targetChanged) startResolve(link);
+      },
       dispose: () => {
-        abort.abort();
-        clearTimeout(timer);
+        clearRequest();
         image.removeEventListener("mousedown", reveal);
         image.removeEventListener("load", loaded);
         image.removeEventListener("error", failed);
@@ -258,20 +266,22 @@ class ImageWidget extends WidgetType {
     };
     image.addEventListener("mousedown", reveal);
     const loaded = (): void => {
-      if (abort.signal.aborted) return;
+      if (!active(generation)) return;
       clearTimeout(timer);
       status.textContent = "";
       container.dataset["imageState"] = "loaded";
       this.actions.onImageEvent?.("load");
+      view.dispatch({ effects: imageHeightSettled.of([binding.link.from]) });
       view.requestMeasure();
     };
     const fail = (note: string): void => {
-      if (abort.signal.aborted) return;
+      if (!active(generation)) return;
       clearTimeout(timer);
       status.textContent = note;
       container.dataset["imageState"] = "error";
       image.hidden = true;
       this.actions.onImageEvent?.("error");
+      view.dispatch({ effects: imageHeightSettled.of([binding.link.from]) });
       view.requestMeasure();
     };
     const failed = (): void => {
@@ -280,22 +290,42 @@ class ImageWidget extends WidgetType {
     image.addEventListener("load", loaded);
     image.addEventListener("error", failed);
     container.append(image, status);
-    this.actions.onImageEvent?.("resolve-requested");
-    void this.actions.client
-      .request("image-resolve", { target: this.link.target }, abort.signal)
-      .then((response) => {
-        if (abort.signal.aborted) return;
-        this.actions.onImageEvent?.("resolve-settled");
-        if (response?.ok === true && response.url !== undefined) {
-          timer = setTimeout(() => {
-            fail("画像の読み込みが時間内に完了しませんでした。Markdownのパスを確認してください。");
-            image.removeEventListener("load", loaded);
-            image.removeEventListener("error", failed);
-          }, 15000);
-          image.src = response.url;
-        } else
-          fail(response?.note ?? "画像を解決できませんでした。Markdownのパスを確認してください。");
-      });
+    const startResolve = (link: MarkdownLink): void => {
+      clearRequest();
+      generation += 1;
+      const token = generation;
+      abort = new AbortController();
+      const wasLoaded = container.dataset["imageState"] === "loaded";
+      container.dataset["imageState"] = "loading";
+      // Keep a previously loaded image in place while the replacement source
+      // resolves. This is a presentation cache only; Markdown remains the
+      // authority and a failed replacement still clears the old image.
+      if (!wasLoaded) {
+        image.hidden = false;
+        status.textContent = "画像を読み込み中…";
+      }
+      this.actions.onImageEvent?.("loading");
+      this.actions.onImageEvent?.("resolve-requested");
+      void this.actions.client
+        .request("image-resolve", { target: link.target }, abort.signal)
+        .then((response) => {
+          if (!active(token)) return;
+          this.actions.onImageEvent?.("resolve-settled");
+          if (response?.ok === true && response.url !== undefined) {
+            timer = setTimeout(() => {
+              if (!active(token)) return;
+              fail(
+                "画像の読み込みが時間内に完了しませんでした。Markdownのパスを確認してください。",
+              );
+            }, 15000);
+            image.src = response.url;
+          } else
+            fail(
+              response?.note ?? "画像を解決できませんでした。Markdownのパスを確認してください。",
+            );
+        });
+    };
+    startResolve(this.link);
     return container;
   }
   public override destroy(container: HTMLElement): void {

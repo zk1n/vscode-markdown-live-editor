@@ -14,9 +14,12 @@ interface Height {
   readonly to: number;
   readonly height: number;
   readonly textHeight: number;
+  readonly pending?: boolean;
 }
 const measured = StateEffect.define<readonly Height[]>();
 const textHeight = StateEffect.define<ReadonlyMap<number, number>>();
+/** Remove a temporary source-edit reservation after the replacement settles. */
+export const imageHeightSettled = StateEffect.define<readonly number[]>();
 const geometry = StateField.define<readonly Height[]>({
   create: () => [],
   update(value, tr) {
@@ -35,20 +38,28 @@ const session = StateField.define<readonly Height[]>({
   create: () => [],
   update(value, tr) {
     if (!tr.state.facet(editorPreferences).imageKeepHeight) return [];
+    const images = tr.docChanged
+      ? findMarkdownLinks(tr.state.doc.toString()).filter((link) => link.image)
+      : [];
     let next = value.flatMap((current) => {
       const removed: boolean[] = [];
       tr.changes.iterChangedRanges((from, to) => {
         removed.push(from <= current.from && to >= current.to && to > from);
       });
-      return removed.some(Boolean)
+      const from = tr.changes.mapPos(current.from, -1);
+      const to = tr.changes.mapPos(current.to, 1);
+      // A whole-source replacement can briefly make the old range look
+      // removed even when the replacement is another image. Keep the measured
+      // block until that image settles; a real deletion still releases it.
+      const replacementIsImage = images.some(
+        (link) => link.from <= from && link.to >= from && link.to >= to,
+      );
+      const pending =
+        current.pending === true ||
+        (tr.docChanged && tr.changes.touchesRange(current.from, current.to) && replacementIsImage);
+      return removed.some(Boolean) && !replacementIsImage
         ? []
-        : [
-            {
-              ...current,
-              from: tr.changes.mapPos(current.from, -1),
-              to: tr.changes.mapPos(current.to, 1),
-            },
-          ];
+        : [{ ...current, from, to, ...(pending ? { pending: true } : {}) }];
     });
     if (!tr.docChanged)
       next.push(
@@ -56,8 +67,10 @@ const session = StateField.define<readonly Height[]>({
           .field(geometry)
           .filter((item) => !next.some((other) => other.from === item.from)),
       );
-    next = next.filter((item) =>
-      tr.newSelection.ranges.some((range) => range.from <= item.to && range.to >= item.from),
+    next = next.filter(
+      (item) =>
+        item.pending === true ||
+        tr.newSelection.ranges.some((range) => range.from <= item.to && range.to >= item.from),
     );
     for (const effect of tr.effects)
       if (effect.is(textHeight))
@@ -65,6 +78,9 @@ const session = StateField.define<readonly Height[]>({
           ...item,
           textHeight: effect.value.get(item.from) ?? item.textHeight,
         }));
+    for (const effect of tr.effects)
+      if (effect.is(imageHeightSettled))
+        next = next.filter((item) => !effect.value.includes(item.from));
     return next;
   },
 });
@@ -132,13 +148,19 @@ export const imageSourceHeight: Extension = [
               const from = Number(element.dataset["imageFrom"]);
               const link = links.find((link) => link.from === from);
               const rect = element.closest(".cm-line")?.getBoundingClientRect();
-              if (link && rect && rect.height > 0)
+              if (link && rect && rect.height > 0) {
+                const previous = view.state.field(geometry).find((item) => item.from === from);
+                const height =
+                  element.dataset["imageState"] === "loading" && previous !== undefined
+                    ? Math.max(rect.height, previous.height)
+                    : rect.height;
                 values.push({
                   from,
                   to: link.to,
-                  height: rect.height,
+                  height,
                   textHeight: view.defaultLineHeight,
                 });
+              }
             }
             const heights = new Map<number, number>();
             for (const item of view.state.field(session)) {

@@ -122,6 +122,7 @@ export function createFloatingSearch(options: {
   open(view: EditorView, replace: boolean): void;
 } {
   const instances = new WeakMap<EditorView, FloatingSearch>();
+  let openView: EditorView | undefined;
   class FloatingSearch {
     readonly dom = document.createElement("section");
     private readonly query = document.createElement("input");
@@ -143,6 +144,7 @@ export function createFloatingSearch(options: {
     private selectionMovedOutsideForm = false;
     private destroyed = false;
     private generation = 0;
+    private pending = false;
     constructor(readonly view: EditorView) {
       instances.set(view, this);
       this.saved = view.state.selection.main;
@@ -272,10 +274,16 @@ export function createFloatingSearch(options: {
       // Scope Escape to this editor, including sibling UI such as the minimap.
       // Capture precedes CM's table keymap; form handling retains its restore policy.
       this.view.dom.addEventListener("keydown", this.escapeOutsideForm, true);
+      // After an OS window switch the first Escape can target the webview
+      // document/body instead of the editor root.  Listen at the owner
+      // document, but only for the currently opened search instance so other
+      // editors and workbench UI do not inherit a global Escape hook.
+      this.view.dom.ownerDocument.addEventListener("keydown", this.escapeOutsideForm, true);
     }
     private readonly escapeOutsideForm = (event: KeyboardEvent): void => {
       if (
         !this.opened ||
+        openView !== this.view ||
         event.key !== "Escape" ||
         (event.target instanceof Node && this.dom.contains(event.target)) ||
         event.isComposing ||
@@ -313,6 +321,7 @@ export function createFloatingSearch(options: {
         if (selected && !selected.includes("\n")) this.query.value = selected;
         this.view.dom.append(this.dom);
         this.opened = true;
+        openView = this.view;
         this.selectionMovedOutsideForm = false;
       }
       const scope = this.toggles.get("scope");
@@ -333,6 +342,7 @@ export function createFloatingSearch(options: {
             ? EditorSelection.single(this.saved.anchor, this.saved.head)
             : undefined;
       this.opened = false;
+      if (openView === this.view) openView = undefined;
       this.generation++;
       this.abort?.abort();
       this.tooltip.hide();
@@ -359,11 +369,12 @@ export function createFloatingSearch(options: {
       const snapshot = this.view.state.doc;
       const selection = this.view.state.selection.main;
       const previous = this.result.matches[this.current];
+      this.pending = true;
       this.snapshot = undefined;
-      this.result = { matches: [] };
       this.current = -1;
       this.view.dispatch({ effects: [setMatches.of([]), revealSearchMatch.of(undefined)] });
       this.status.textContent = this.text.busy;
+      this.status.setAttribute("aria-busy", "true");
       this.setButtons();
       void (options.executor ?? executeSearch)(
         {
@@ -387,6 +398,8 @@ export function createFloatingSearch(options: {
             snapshot !== this.view.state.doc
           )
             return;
+          this.pending = false;
+          this.status.removeAttribute("aria-busy");
           this.snapshot = snapshot;
           this.result = result;
           this.view.dispatch({ effects: setMatches.of(result.matches) });
@@ -408,6 +421,8 @@ export function createFloatingSearch(options: {
         })
         .catch(() => {
           if (generation === this.generation && this.opened) {
+            this.pending = false;
+            this.status.removeAttribute("aria-busy");
             this.result = { matches: [], error: "unavailable" };
             this.showStatus();
           }
@@ -419,13 +434,17 @@ export function createFloatingSearch(options: {
           "aria-disabled",
           String(
             !options.isEditable() ||
+              this.pending ||
               !this.result.matches.length ||
               this.snapshot !== this.view.state.doc,
           ),
         );
     }
     private showStatus(): void {
-      if (this.result.error) {
+      if (this.pending) {
+        this.status.textContent = this.text.busy;
+        this.status.removeAttribute("aria-label");
+      } else if (this.result.error) {
         this.status.textContent = this.text[this.result.error];
         this.status.removeAttribute("aria-label");
       } else if (this.result.matches.length) {
@@ -523,6 +542,8 @@ export function createFloatingSearch(options: {
     destroy(): void {
       this.destroyed = true;
       this.view.dom.removeEventListener("keydown", this.escapeOutsideForm, true);
+      this.view.dom.ownerDocument.removeEventListener("keydown", this.escapeOutsideForm, true);
+      if (openView === this.view) openView = undefined;
       this.abort?.abort();
       this.tooltip.destroy();
       this.dom.remove();

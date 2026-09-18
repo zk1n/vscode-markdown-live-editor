@@ -45,9 +45,11 @@ function createView(
   readonly view: EditorView;
   readonly notices: string[];
   readonly requested: string[];
+  readonly events: string[];
 } {
   const notices: string[] = [];
   const requested: string[] = [];
+  const events: string[] = [];
   const client = new RichClient((request): void => {
     requested.push(request.operation);
     const reply = (): void => {
@@ -62,7 +64,9 @@ function createView(
         ok: true,
         ...(request.operation === "image-import"
           ? { markdown: "![image](attachments/image.png)" }
-          : {}),
+          : request.operation === "image-resolve"
+            ? { url: `/resolved/${request.target ?? ""}` }
+            : {}),
       });
     };
     if (defer && request.operation === "image-import") defer(reply);
@@ -74,6 +78,9 @@ function createView(
     synchronize: (): Promise<boolean> => Promise.resolve(true),
     notify: (note): void => {
       notices.push(note);
+    },
+    onImageEvent: (event): void => {
+      events.push(event);
     },
   };
   const parent = document.createElement("div");
@@ -87,7 +94,7 @@ function createView(
     parent,
   });
   views.push(view);
-  return { view, notices, requested };
+  return { view, notices, requested, events };
 }
 
 async function settle(): Promise<void> {
@@ -164,6 +171,67 @@ describe("image paste and drop", () => {
       ?.querySelector("img")
       ?.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true }));
     expect(view.state.selection.main.from).toBe(from);
+  });
+  it("keeps the image DOM and measured-sized placeholder during a same-revision source switch", async () => {
+    const source = "before\n![alt](first.png)\nafter";
+    const { view, requested, events } = createView(source);
+    await settle();
+    const preview = view.dom.querySelector<HTMLElement>(".cm-image-preview");
+    const image = preview?.querySelector("img");
+    expect(image).not.toBeNull();
+    const created = events.filter((event) => event === "dom-created").length;
+    const firstTarget = source.indexOf("first.png");
+    view.dispatch({
+      changes: { from: firstTarget, to: firstTarget + "first.png".length, insert: "second.png" },
+      // Keep the preview visible while the source update is applied; a real
+      // source edit can leave the caret outside the image after composition.
+      selection: { anchor: 0 },
+      userEvent: "input.type",
+    });
+    await settle();
+
+    expect(preview).toBe(view.dom.querySelector(".cm-image-preview"));
+    expect(preview?.querySelector("img")).toBe(image);
+    expect(preview?.dataset["imageTarget"]).toBe("second.png");
+    expect(preview?.dataset["imageState"]).toBe("loading");
+    expect(events.filter((event) => event === "dom-created")).toHaveLength(created);
+    expect(requested.filter((operation) => operation === "image-resolve")).toHaveLength(2);
+    image?.dispatchEvent(new Event("load"));
+    expect(preview?.dataset["imageState"]).toBe("loaded");
+  });
+  it("retains a measured source-height reservation until the replacement image settles", async () => {
+    const source = "before\n![alt](first.png)\nafter";
+    const { view } = createView(source);
+    const initialPreview = view.dom.querySelector<HTMLElement>(".cm-image-preview");
+    const initialLine = initialPreview?.closest<HTMLElement>(".cm-line");
+    expect(initialPreview).not.toBeNull();
+    expect(initialLine).not.toBeNull();
+    if (initialPreview === null || initialLine === null) throw new Error("image line missing");
+    Object.defineProperty(initialLine, "getBoundingClientRect", {
+      configurable: true,
+      value: () => new DOMRect(0, 0, 240, 240),
+    });
+    initialPreview.querySelector("img")?.dispatchEvent(new Event("load"));
+    await settle();
+
+    const from = source.indexOf("![alt]");
+    const to = source.indexOf("\n", from);
+    view.dispatch({ selection: { anchor: from, head: to } });
+    await settle();
+    expect(view.dom.querySelector(".cm-image-source-height")).not.toBeNull();
+
+    const target = source.indexOf("first.png");
+    view.dispatch({
+      changes: { from: target, to: target + "first.png".length, insert: "second.png" },
+      selection: { anchor: 0 },
+      userEvent: "input.type",
+    });
+    await settle();
+    const replacement = view.dom.querySelector<HTMLElement>(".cm-image-preview");
+    expect(view.dom.querySelector(".cm-image-source-height")).not.toBeNull();
+    replacement?.querySelector("img")?.dispatchEvent(new Event("load"));
+    await settle();
+    expect(view.dom.querySelector(".cm-image-source-height")).toBeNull();
   });
   it("accepts an OS file clipboard image whose MIME type is unavailable, without consuming plain text paste", async () => {
     const { view, requested } = createView("before", 3);

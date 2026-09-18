@@ -264,6 +264,7 @@ export function tableControls(
                     top,
                     band,
                     bottom - top,
+                    table.rows.length <= 2,
                   );
               }
             }

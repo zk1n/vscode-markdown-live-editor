@@ -12,7 +12,9 @@ const interactionReview = process.argv.includes("--ux-interaction-review");
 const fourthReview = process.argv.includes("--ux-fourth-review");
 const fifthReview = process.argv.includes("--ux-fifth-review");
 const sixthReview = process.argv.includes("--ux-sixth-review");
+const seventhReview = process.argv.includes("--ux-seventh-review");
 const reviewBuild =
+  seventhReview ||
   sixthReview ||
   fifthReview ||
   fourthReview ||
@@ -20,19 +22,21 @@ const reviewBuild =
   stabilityReview ||
   process.argv.includes("--review") ||
   process.argv.includes("--ux-review");
-const reviewSuffix = sixthReview
-  ? "-ux-sixth-review"
-  : fifthReview
-    ? "-ux-fifth-review"
-    : fourthReview
-      ? "-ux-fourth-review"
-      : interactionReview
-        ? "-ux-interaction-review"
-        : stabilityReview
-          ? "-ux-stability-review"
-          : process.argv.includes("--ux-review")
-            ? "-ux-review"
-            : "-initial-review";
+const reviewSuffix = seventhReview
+  ? "-ux-seventh-review"
+  : sixthReview
+    ? "-ux-sixth-review"
+    : fifthReview
+      ? "-ux-fifth-review"
+      : fourthReview
+        ? "-ux-fourth-review"
+        : interactionReview
+          ? "-ux-interaction-review"
+          : stabilityReview
+            ? "-ux-stability-review"
+            : process.argv.includes("--ux-review")
+              ? "-ux-review"
+              : "-initial-review";
 const artifactPath = path.join(
   artifactDirectory,
   `${packageJson.name}-${packageJson.version}${reviewBuild ? reviewSuffix : ""}.vsix`,
@@ -185,11 +189,17 @@ function packageVsix() {
       mkdirSync(path.dirname(targetPath), { recursive: true });
       copyFileSync(path.join(repositoryRoot, source), targetPath);
     }
-    if (sixthReview) {
-      for (const [file, suffix] of [
-        ["package.nls.json", " [UX6 Review]"],
-        ["package.nls.ja.json", " [第六UXレビュー]"],
-      ]) {
+    if (seventhReview || sixthReview) {
+      const suffixes = seventhReview
+        ? [
+            ["package.nls.json", " [UX7 Review]"],
+            ["package.nls.ja.json", " [第七UXレビュー]"],
+          ]
+        : [
+            ["package.nls.json", " [UX6 Review]"],
+            ["package.nls.ja.json", " [第六UXレビュー]"],
+          ];
+      for (const [file, suffix] of suffixes) {
         const target = path.join(stagingDirectory, file);
         const labels = JSON.parse(readFileSync(target, "utf8"));
         labels.displayName += suffix;

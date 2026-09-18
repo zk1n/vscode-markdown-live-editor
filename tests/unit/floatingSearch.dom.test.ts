@@ -155,6 +155,22 @@ describe("floating full-source search", () => {
     expect(view.state.selection.main.from).toBe(2);
     expect(view.state.selection.main.to).toBe(3);
   });
+  it("distinguishes a pending query from a confirmed empty result", async () => {
+    let resolve: ((result: SearchResult) => void) | undefined;
+    const { open } = create(
+      "needle",
+      () =>
+        new Promise((complete) => {
+          resolve = complete;
+        }),
+    );
+    open();
+    input("query", "missing");
+    expect(document.querySelector('[role="status"]')?.textContent).toBe("検索中…");
+    resolve?.({ matches: [] });
+    await settle();
+    expect(document.querySelector('[role="status"]')?.textContent).toBe("一致なし");
+  });
   it("maps selection scope through replacement and discards asynchronous stale results", async () => {
     const completions: { request: SearchRequest; resolve(value: SearchResult): void }[] = [];
     const { view, open } = create(
@@ -264,5 +280,13 @@ describe("floating full-source search", () => {
     expect(document.querySelector(".cm-floating-search")).toBeNull();
     expect(document.activeElement).toBe(sibling);
     expect(view.state.selection.eq(selection)).toBe(true);
+  });
+  it("handles Escape delivered to the owner document after focus leaves the webview", () => {
+    const { view, open } = create("before after");
+    open();
+    view.dom.ownerDocument.body.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }),
+    );
+    expect(document.querySelector(".cm-floating-search")).toBeNull();
   });
 });
