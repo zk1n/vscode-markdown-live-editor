@@ -128,6 +128,36 @@ describe("native webview context actions", () => {
     expect(prose.dataset["vscodeContext"]).toBeUndefined();
   });
 
+  it("protects the only data row in both metadata and the runtime command guard", () => {
+    const source = "| h1 | h2 |\n| --- | --- |\n| value | other |";
+    const { view, contexts, identity } = createView(source, source.indexOf("value"));
+    const cell = view.contentDOM.querySelector<HTMLElement>(
+      `[data-table-cell="${String(source.indexOf("value"))}"]`,
+    );
+    if (cell === null) throw new Error("Expected rendered data cell.");
+    contextMenu(cell);
+    const captured = context(cell);
+    expect(captured["markdownCanDeleteRow"]).toBe(false);
+    const token = captured["markdownContextToken"];
+    if (typeof token !== "string") throw new Error("Expected a context token.");
+    expect(contexts.run("table-row-delete", token, identity.documentVersion)).toBe(false);
+    expect(view.state.doc.toString()).toBe(source);
+  });
+
+  it("leaves malformed raw table source unchanged while returning to live presentation", () => {
+    const source = "| h | x |\n| --- | --- |\n| value | other |";
+    const { view, contexts } = createView(source, source.indexOf("value"));
+    expect(contexts.run("table-source")).toBe(true);
+    const malformed = "| h | x |\nnot a delimiter\n| value | other |";
+    const delimiterLine = view.state.doc.line(2);
+    view.dispatch({
+      changes: { from: delimiterLine.from, to: delimiterLine.to, insert: "not a delimiter" },
+    });
+    expect(contexts.run("table-source")).toBe(true);
+    expect(view.state.doc.toString()).toBe(malformed);
+    expect(view.contentDOM.querySelector(".cm-table-cell")).toBeNull();
+  });
+
   it("revalidates tokens against document changes and reveals an image source without modifying it", () => {
     const source = "| h |\n| --- |\n| value |\n\n![alt](assets/image.png)";
     const { view, contexts, identity } = createView(source, source.indexOf("value"));

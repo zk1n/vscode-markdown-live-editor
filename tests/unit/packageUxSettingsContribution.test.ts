@@ -42,7 +42,7 @@ describe("U6 Settings contribution", () => {
     expect(settings?.["vscodeMarkdownLiveEditor.linkHoverDelay"]).toMatchObject({
       minimum: 100,
       maximum: 2000,
-      default: 500,
+      default: 300,
     });
     for (const key of ["compactSpacing", "imageKeepHeight", "lineNumbers"])
       expect(settings?.[`vscodeMarkdownLiveEditor.${key}`]).toMatchObject({

@@ -147,4 +147,51 @@ describe("link preview hover lifecycle", () => {
     await settle();
     expect(requests).toBe(3);
   });
+
+  it("wraps a long URL/title within the viewport-constrained preview", async () => {
+    const longTarget = `https://${"very-long-segment/".repeat(24)}end`;
+    const client = new RichClient((request) => {
+      client.receive({
+        kind: "rich-response",
+        protocolVersion: PROTOCOL_VERSION,
+        documentUri: "file:///review.md",
+        sessionId: "session",
+        controllerId: "controller",
+        documentVersion: 0,
+        requestId: request.requestId,
+        ok: true,
+        title: longTarget,
+        text: longTarget,
+      });
+    });
+    const view = new EditorView({
+      parent: document.body,
+      state: EditorState.create({
+        doc: `[link](${longTarget})`,
+        extensions: [
+          editorPreferences.of({ ...defaultEditorPreferences, linkHoverDelay: 1 }),
+          linkPreview({
+            client,
+            isEditable: () => true,
+            synchronize: () => Promise.resolve(true),
+            notify: () => undefined,
+          }),
+        ],
+      }),
+    });
+    views.push(view);
+    vi.spyOn(view, "coordsAtPos").mockReturnValue({ left: 20, right: 28, top: 120, bottom: 140 });
+    activateHover(view, 2, 1);
+    await new Promise<void>((resolve) => window.setTimeout(resolve, 5));
+    await settle();
+
+    const card = document.querySelector<HTMLElement>(".cm-link-preview");
+    const title = document.querySelector<HTMLElement>(".cm-link-preview-title");
+    expect(card).not.toBeNull();
+    expect(title).not.toBeNull();
+    if (card === null || title === null) throw new Error("link preview did not render");
+    expect(getComputedStyle(card).overflowWrap).toBe("anywhere");
+    expect(getComputedStyle(card).maxWidth).toContain("560px");
+    expect(getComputedStyle(title).overflowWrap).toBe("anywhere");
+  });
 });

@@ -25,6 +25,7 @@ import {
   changeTableColumn,
   findTables,
   tableCellAt,
+  type TableCell,
   type SourceTable,
 } from "../../core/markdown/tableSource.js";
 
@@ -291,6 +292,253 @@ export type TableAction =
   | "align-right"
   | "source";
 
+interface TableSelectionRectangle {
+  readonly table: SourceTable;
+  readonly topRow: number;
+  readonly bottomRow: number;
+  readonly leftColumn: number;
+  readonly rightColumn: number;
+}
+
+function isMultiCellRectangle(rectangle: TableSelectionRectangle): boolean {
+  return rectangle.topRow !== rectangle.bottomRow || rectangle.leftColumn !== rectangle.rightColumn;
+}
+
+function tableSelectionRectangle(state: EditorState): TableSelectionRectangle | undefined {
+  if (
+    state.selection.ranges.length !== 1 ||
+    state.selection.main.empty ||
+    state.field(sourceLineSelection, false) === true
+  )
+    return undefined;
+  const selection = state.selection.main;
+  const tables = findTables(state.doc.toString());
+  const table = tables.find(
+    (candidate) =>
+      candidate.from < selection.to &&
+      candidate.to > selection.from &&
+      selection.from >= candidate.from &&
+      selection.to <= candidate.to,
+  );
+  if (table === undefined || isTableSourceActive(state, table)) return undefined;
+  // An explicit source selection keeps CodeMirror's native clipboard behavior.
+  if (selection.from <= table.from && selection.to >= table.to) return undefined;
+  const start = tableCellAt(table, selection.from);
+  const end = tableCellAt(table, Math.max(selection.from, selection.to - 1));
+  if (start === undefined || end === undefined) return undefined;
+  return {
+    table,
+    topRow: Math.min(start.row, end.row),
+    bottomRow: Math.max(start.row, end.row),
+    leftColumn: Math.min(start.column, end.column),
+    rightColumn: Math.max(start.column, end.column),
+  };
+}
+
+function rectangleCells(
+  rectangle: TableSelectionRectangle,
+): readonly (readonly TableCell[])[] | undefined {
+  const rows: (readonly TableCell[])[] = [];
+  for (let row = rectangle.topRow; row <= rectangle.bottomRow; row += 1) {
+    const cells = rectangle.table.rows[row]?.cells.slice(
+      rectangle.leftColumn,
+      rectangle.rightColumn + 1,
+    );
+    if (cells?.length !== rectangle.rightColumn - rectangle.leftColumn + 1) return undefined;
+    rows.push(cells);
+  }
+  return rows;
+}
+
+function tableClipboardText(
+  state: EditorState,
+  rectangle: TableSelectionRectangle,
+): string | undefined {
+  const rows = rectangleCells(rectangle);
+  if (rows === undefined || (rows.length === 1 && rows[0]?.length === 1)) return undefined;
+  return rows
+    .map((cells) =>
+      cells.map((cell) => state.sliceDoc(cell.contentFrom, cell.contentTo)).join("\t"),
+    )
+    .join("\n");
+}
+
+function setClipboardText(clipboard: DataTransfer | null, text: string): boolean {
+  if (clipboard === null) return false;
+  try {
+    clipboard.clearData();
+    clipboard.setData("text/plain", text);
+    if (clipboard.getData("text/plain") !== text) return false;
+  } catch {
+    return false;
+  }
+  // Keep an explicit TSV flavor when the browser permits custom clipboard
+  // types so one-column multi-row copies remain distinguishable from prose.
+  try {
+    clipboard.setData("text/tab-separated-values", text);
+  } catch {
+    // Some hosts expose only text/plain. It is still a successful clipboard
+    // write for cut safety; paste falls back to tab-containing text.
+  }
+  return true;
+}
+
+function escapeTableCellValue(value: string): string {
+  let result = "";
+  let escaped = false;
+  for (const char of value) {
+    if (char === "\n" || char === "\r") result += " ";
+    else if (char === "|" && !escaped) result += "\\|";
+    else result += char;
+    escaped = char === "\\" && !escaped;
+  }
+  return result;
+}
+
+interface ClipboardMatrix {
+  readonly rows: readonly (readonly string[])[] | undefined;
+}
+
+function clipboardMatrix(text: string, explicitTsv: boolean): ClipboardMatrix | undefined {
+  const normalized = text.replace(/\r\n?/g, "\n");
+  if (!explicitTsv && !normalized.includes("\t")) return undefined;
+  const withoutTrailingBreak = normalized.endsWith("\n") ? normalized.slice(0, -1) : normalized;
+  const rows = withoutTrailingBreak.split("\n").map((row) => row.split("\t"));
+  const width = rows[0]?.length ?? 0;
+  if (width <= 1 && rows.length <= 1) return undefined;
+  if (width === 0 || rows.some((row) => row.length !== width)) return { rows: undefined };
+  return { rows };
+}
+
+function clipboardPasteTarget(
+  state: EditorState,
+): { readonly table: SourceTable; readonly row: number; readonly column: number } | undefined {
+  if (state.selection.ranges.length !== 1 || state.field(sourceLineSelection, false) === true)
+    return undefined;
+  const position = state.selection.main.from;
+  const table = findTables(state.doc.toString()).find(
+    (candidate) => candidate.from <= position && candidate.to >= position,
+  );
+  if (table === undefined || isTableSourceActive(state, table)) return undefined;
+  const cell = tableCellAt(table, position);
+  return cell === undefined ? undefined : { table, row: cell.row, column: cell.column };
+}
+
+function handleTableCopy(event: ClipboardEvent, view: EditorView): boolean {
+  if (view.composing || view.compositionStarted) return false;
+  const rectangle = tableSelectionRectangle(view.state);
+  if (rectangle === undefined) return false;
+  const text = tableClipboardText(view.state, rectangle);
+  if (text === undefined) return false;
+  // A rectangle is an explicit table operation. When a ClipboardEvent carries
+  // a DataTransfer, do not let CM fall back to a source-range copy if writing
+  // that transfer fails. A null transfer is the old capture-copy path, which
+  // remains owned by CM.
+  if (event.clipboardData === null) return false;
+  event.preventDefault();
+  setClipboardText(event.clipboardData, text);
+  return true;
+}
+
+function handleTableCut(
+  event: ClipboardEvent,
+  view: EditorView,
+  isEditable: () => boolean,
+): boolean {
+  if (view.composing || view.compositionStarted || !isEditable() || view.state.readOnly)
+    return false;
+  const rectangle = tableSelectionRectangle(view.state);
+  if (rectangle === undefined) return false;
+  const text = tableClipboardText(view.state, rectangle);
+  if (text === undefined) return false;
+  event.preventDefault();
+  // Never clear source until the clipboard write has been confirmed.
+  if (!setClipboardText(event.clipboardData, text)) return true;
+  const rows = rectangleCells(rectangle);
+  if (rows === undefined) return true;
+  const changes = rows.flatMap((cells) =>
+    cells
+      .filter((cell) => cell.contentFrom !== cell.contentTo)
+      .map((cell) => ({ from: cell.contentFrom, to: cell.contentTo, insert: "" })),
+  );
+  if (changes.length > 0) view.dispatch({ changes, userEvent: "delete.cut", scrollIntoView: true });
+  return true;
+}
+
+function handleTablePaste(
+  event: ClipboardEvent,
+  view: EditorView,
+  isEditable: () => boolean,
+): boolean {
+  if (
+    view.composing ||
+    view.compositionStarted ||
+    !isEditable() ||
+    view.state.readOnly ||
+    event.clipboardData === null
+  )
+    return false;
+  // File/image transfers remain owned by imageEditing and the browser's native
+  // route. Only text-only TSV is a table matrix operation.
+  if ([...event.clipboardData.items].some((item) => item.kind === "file")) return false;
+  const explicitTsv = [...event.clipboardData.types].some(
+    (type) => type.toLowerCase() === "text/tab-separated-values",
+  );
+  let text: string;
+  try {
+    text = event.clipboardData.getData("text/plain");
+    if (text === "" && explicitTsv) text = event.clipboardData.getData("text/tab-separated-values");
+  } catch {
+    return false;
+  }
+  const target = clipboardPasteTarget(view.state);
+  if (target === undefined) return false;
+  const selectionRectangle = tableSelectionRectangle(view.state);
+  const matrix = clipboardMatrix(
+    text,
+    explicitTsv || (selectionRectangle !== undefined && isMultiCellRectangle(selectionRectangle)),
+  );
+  if (matrix === undefined) return false;
+  event.preventDefault();
+  if (matrix.rows === undefined) return true;
+  const rows = matrix.rows;
+  const height = rows.length;
+  const width = rows[0]?.length ?? 0;
+  if (
+    height === 0 ||
+    width === 0 ||
+    target.row + height > target.table.rows.length ||
+    target.column + width > target.table.columns
+  )
+    return true;
+  const cells: { readonly cell: TableCell; readonly value: string }[] = [];
+  for (let row = 0; row < height; row += 1) {
+    for (let column = 0; column < width; column += 1) {
+      const cell = target.table.rows[target.row + row]?.cells[target.column + column];
+      const value = rows[row]?.[column];
+      if (cell === undefined || value === undefined) return true;
+      cells.push({ cell, value: escapeTableCellValue(value) });
+    }
+  }
+  const changes = cells.map(({ cell, value }) => ({
+    from: cell.contentFrom,
+    to: cell.contentTo,
+    insert: value,
+  }));
+  const changeSet = view.state.changes(changes);
+  if (changeSet.empty) return true;
+  const last = cells.at(-1);
+  if (last === undefined) return true;
+  const caret = changeSet.mapPos(last.cell.contentFrom, -1) + last.value.length;
+  view.dispatch({
+    changes: changeSet,
+    selection: { anchor: caret },
+    userEvent: "input.paste",
+    scrollIntoView: true,
+  });
+  return true;
+}
+
 /** A context action may target a cell other than the visible caret. */
 export function editTable(view: EditorView, action: TableAction, targetPosition?: number): boolean {
   if (view.composing || view.compositionStarted || (view.state.readOnly && action !== "source"))
@@ -345,7 +593,10 @@ export function editTable(view: EditorView, action: TableAction, targetPosition?
     targetRow = action === "row-append" ? table.rows.length : current.row + 1;
     if (action === "row-append") targetColumn = 0;
   } else if (action === "row-delete") {
-    if (current.row === 0) return false;
+    // Keep the header and at least one data row. A header-only table is not a
+    // valid editable target, and deleting its final data row loses the table's
+    // body without offering a recovery path through the table controls.
+    if (current.row === 0 || table.rows.length <= 2) return false;
     const row = table.rows[current.row];
     if (row === undefined) return false;
     changes = { from: row.from - 1, to: row.to, insert: "" };
@@ -702,6 +953,13 @@ export function tableEditing(isEditable: () => boolean): Extension {
     searchReveal,
     drawSelection(),
     State.transactionFilter.of(protectCells),
+    Prec.highest(
+      EditorView.domEventHandlers({
+        copy: (event, view) => handleTableCopy(event, view),
+        cut: (event, view) => handleTableCut(event, view, isEditable),
+        paste: (event, view) => handleTablePaste(event, view, isEditable),
+      }),
+    ),
     tableControls(isEditable, isTableSourceActive, editTable),
     EditorView.mouseSelectionStyle.of(tablePointerSelection),
     tableDecorations,

@@ -11,6 +11,19 @@ interface SummaryLine {
   indent: number;
   block: boolean;
 }
+interface LineGeometry extends SummaryLine {
+  readonly y: number;
+  readonly bottom: number;
+}
+interface LineGeometryCache {
+  readonly doc: Text;
+  readonly lines: readonly LineGeometry[];
+}
+interface MatchGeometryCache {
+  readonly doc: Text;
+  readonly matches: readonly { readonly from: number; readonly to: number }[];
+  readonly y: readonly number[];
+}
 /** Bounded raster detail, covering every source line even when the document exceeds the canvas. */
 function summarize(doc: Text): SummaryLine[] {
   const stride = Math.max(1, Math.ceil(doc.lines / 1600));
@@ -53,6 +66,9 @@ export const minimap: Extension = [
       private pointerId: number | undefined;
       private scrollRange = 0;
       private travel = 0;
+      private geometryDirty = true;
+      private lineGeometry: LineGeometryCache | undefined;
+      private matchGeometry: MatchGeometryCache | undefined;
       private destroyed = false;
       private paints = 0;
       constructor(private readonly view: EditorView) {
@@ -77,11 +93,11 @@ export const minimap: Extension = [
         this.dom.addEventListener("pointercancel", this.up);
         this.dom.addEventListener("lostpointercapture", this.up);
         this.dom.addEventListener("keydown", this.key);
-        view.scrollDOM.addEventListener("scroll", this.measure);
-        this.observer = new MutationObserver(this.measure);
+        view.scrollDOM.addEventListener("scroll", this.onScroll);
+        this.observer = new MutationObserver(this.invalidateGeometry);
         for (const element of [document.documentElement, document.body])
           this.observer.observe(element, { attributes: true, attributeFilter: ["class", "style"] });
-        this.resize = new ResizeObserver(this.measure);
+        this.resize = new ResizeObserver(this.invalidateGeometry);
         this.resize.observe(view.scrollDOM);
         this.measure();
       }
@@ -118,6 +134,23 @@ export const minimap: Extension = [
                 this.scrollRange,
                 Math.max(0, ((y - (this.dragOffset ?? 0)) / this.travel) * this.scrollRange),
               );
+      }
+      private readonly onScroll = (): void => {
+        this.updateViewportThumb();
+      };
+      private readonly invalidateGeometry = (): void => {
+        if (this.destroyed) return;
+        this.geometryDirty = true;
+        this.matchGeometry = undefined;
+        this.measure();
+      };
+      private updateViewportThumb(): void {
+        if (this.destroyed) return;
+        const top = this.view.scrollDOM.scrollTop;
+        this.viewportTop =
+          this.scrollRange === 0 ? 0 : Math.min(1, top / this.scrollRange) * this.travel;
+        this.viewport.style.top = `${String(this.viewportTop)}px`;
+        this.dom.setAttribute("aria-valuenow", String(Math.round(top)));
       }
       private readonly key = (event: KeyboardEvent): void => {
         const scroller = this.view.scrollDOM;
@@ -163,21 +196,37 @@ export const minimap: Extension = [
             const style = getComputedStyle(this.dom);
             const token = (name: string, fallback: string): string =>
               style.getPropertyValue(name).trim() || fallback;
+            const currentMatches = view.state.field(searchMatches, false) ?? [];
+            const cachedLines =
+              !this.geometryDirty && this.lineGeometry?.doc === view.state.doc
+                ? this.lineGeometry.lines
+                : undefined;
+            const lines =
+              cachedLines ??
+              this.lines.map((line) => ({
+                ...line,
+                y: padding + view.lineBlockAt(line.from).top,
+                bottom: padding + view.lineBlockAt(line.to).bottom,
+              }));
+            const cachedMatches =
+              !this.geometryDirty &&
+              this.matchGeometry?.doc === view.state.doc &&
+              this.matchGeometry.matches === currentMatches
+                ? this.matchGeometry.y
+                : undefined;
+            const matches = cachedMatches ?? currentMatches.map((match) => positionY(match.from));
             return {
+              doc: view.state.doc,
+              geometryDirty: this.geometryDirty || cachedLines === undefined,
               width: rect.width,
               height: rect.height,
               total,
               top: scroller.scrollTop,
               visible: scroller.clientHeight,
               lineHeight: view.defaultLineHeight,
-              lines: this.lines.map((line) => ({
-                ...line,
-                y: padding + view.lineBlockAt(line.from).top,
-                bottom: padding + view.lineBlockAt(line.to).bottom,
-              })),
-              matches: (view.state.field(searchMatches, false) ?? []).map((match) =>
-                positionY(match.from),
-              ),
+              lines,
+              matches,
+              matchSource: currentMatches,
               current: view.state.field(searchReveal, false),
               selection: view.state.selection.ranges
                 .filter((range) => !range.empty)
@@ -198,6 +247,16 @@ export const minimap: Extension = [
               this.view.state.facet(editorPreferences).minimapSlider === "always",
             );
             this.contentHeight = data.total;
+            if (data.geometryDirty) {
+              this.lineGeometry = { doc: data.doc, lines: data.lines };
+              this.geometryDirty = false;
+            }
+            const cachedMatchGeometry = this.matchGeometry;
+            if (
+              cachedMatchGeometry?.doc !== data.doc ||
+              cachedMatchGeometry.matches !== data.matchSource
+            )
+              this.matchGeometry = { doc: data.doc, matches: data.matchSource, y: data.matches };
             // Cap ordinary text at a two-pixel overview pitch. Short documents
             // remain top-aligned; long documents still cover the full source.
             const scale = Math.min(data.height / data.total, 2 / Math.max(1, data.lineHeight));
@@ -261,11 +320,18 @@ export const minimap: Extension = [
         if (this.doc !== update.state.doc) {
           this.doc = update.state.doc;
           this.lines = summarize(this.doc);
+          this.geometryDirty = true;
+          this.lineGeometry = undefined;
+          this.matchGeometry = undefined;
         }
+        if (update.geometryChanged) {
+          this.geometryDirty = true;
+          this.matchGeometry = undefined;
+        }
+        if (update.viewportChanged) this.updateViewportThumb();
         if (
           update.docChanged ||
           update.geometryChanged ||
-          update.viewportChanged ||
           update.selectionSet ||
           update.transactions.some((tr) => tr.effects.length)
         )
@@ -279,7 +345,7 @@ export const minimap: Extension = [
         if (id !== undefined && this.dom.hasPointerCapture(id)) this.dom.releasePointerCapture(id);
         this.observer.disconnect();
         this.resize.disconnect();
-        this.view.scrollDOM.removeEventListener("scroll", this.measure);
+        this.view.scrollDOM.removeEventListener("scroll", this.onScroll);
         this.dom.remove();
       }
     },

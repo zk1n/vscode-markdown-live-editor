@@ -1,5 +1,6 @@
 import {
   EditorSelection,
+  Prec,
   RangeSet,
   StateField,
   type EditorState,
@@ -49,7 +50,11 @@ function hiddenLines(
 function selectLines(view: EditorView, start: number, end: number): void {
   const first = view.state.doc.lineAt(Math.min(start, end));
   const last = view.state.doc.lineAt(Math.max(start, end));
-  const to = last.number === view.state.doc.lines ? last.to : last.to + 1;
+  // Keep the actual selection end at the final selected line's content end.
+  // Selecting the following line break makes CodeMirror's selection layer tint
+  // the next line's first character, even though copy/cut treat it as a
+  // separator. Clipboard handlers below add that separator back from source.
+  const to = last.to;
   view.dispatch({
     selection: EditorSelection.single(
       start <= end ? first.from : to,
@@ -57,6 +62,27 @@ function selectLines(view: EditorView, start: number, end: number): void {
     ),
     userEvent: "select.line",
   });
+}
+function lineBreakEnd(state: EditorState, end: number): number {
+  if (end >= state.doc.length) return end;
+  return state.sliceDoc(end, end + 2) === "\r\n" ? end + 2 : end + 1;
+}
+function sourceLineClipboardRange(
+  state: EditorState,
+): { readonly from: number; readonly to: number } | undefined {
+  if (state.field(sourceLineSelection, false) !== true || state.selection.ranges.length !== 1)
+    return undefined;
+  const range = state.selection.main;
+  if (range.empty) {
+    const line = state.doc.lineAt(range.from);
+    return range.from === line.from
+      ? { from: line.from, to: lineBreakEnd(state, line.to) }
+      : undefined;
+  }
+  const first = state.doc.lineAt(range.from);
+  const last = state.doc.lineAt(range.to);
+  if (range.from !== first.from || range.to !== last.to) return undefined;
+  return { from: range.from, to: lineBreakEnd(state, range.to) };
 }
 class LineDrag {
   private anchor: number | undefined;
@@ -116,6 +142,39 @@ export function sourceLineNumbers(
   });
   return [
     drag,
+    Prec.highest(
+      EditorView.domEventHandlers({
+        copy(event, view) {
+          const range = sourceLineClipboardRange(view.state);
+          const clipboard = event.clipboardData;
+          if (range === undefined || clipboard === null) return false;
+          try {
+            clipboard.setData("text/plain", view.state.sliceDoc(range.from, range.to));
+          } catch {
+            return false;
+          }
+          event.preventDefault();
+          return true;
+        },
+        cut(event, view) {
+          const range = sourceLineClipboardRange(view.state);
+          const clipboard = event.clipboardData;
+          if (range === undefined || clipboard === null) return false;
+          try {
+            clipboard.setData("text/plain", view.state.sliceDoc(range.from, range.to));
+          } catch {
+            return false;
+          }
+          event.preventDefault();
+          view.dispatch({
+            changes: { from: range.from, to: range.to },
+            selection: { anchor: range.from },
+            userEvent: "delete.cut",
+          });
+          return true;
+        },
+      }),
+    ),
     lineNumbers({
       domEventHandlers: {
         pointerdown: (view, line, event) =>

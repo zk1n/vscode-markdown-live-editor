@@ -29,6 +29,29 @@ interface LivePreviewState {
   readonly decorations: DecorationSet;
 }
 
+interface CachedPresentation {
+  readonly syntax: ReturnType<typeof findPresentationSyntax>;
+  readonly unorderedMarkerDepths: ReadonlyMap<number, number>;
+}
+
+// Search navigation and focus changes reuse the same immutable CodeMirror Text
+// instance.  Keep document-derived presentation work out of those transactions;
+// a changed Text identity is the invalidation boundary, while selection/search
+// state remains local to buildDecorations.
+const presentationCache = new WeakMap<object, CachedPresentation>();
+
+function presentationFor(state: EditorState, documentText: string): CachedPresentation {
+  const key = state.doc as unknown as object;
+  const cached = presentationCache.get(key);
+  if (cached !== undefined) return cached;
+  const value: CachedPresentation = {
+    syntax: findPresentationSyntax(documentText),
+    unorderedMarkerDepths: findUnorderedMarkerDepths(documentText),
+  };
+  presentationCache.set(key, value);
+  return value;
+}
+
 export const livePreviewState = StateField.define<LivePreviewState>({
   create: (state): LivePreviewState => ({ decorations: buildDecorations(state) }),
   update: (value, transaction): LivePreviewState => {
@@ -299,15 +322,15 @@ class CodeMirrorDecorationLivePreviewEngine implements LivePreviewEngine {
 
 function buildDecorations(state: EditorState): DecorationSet {
   const documentText = state.doc.toString();
+  const presentation = presentationFor(state, documentText);
   const match = state.field(searchReveal, false);
   const selections = [
     ...(state.field(searchPresentation, false) ? [] : state.selection.ranges),
     ...tableSourceSelectionRanges(state),
   ];
-  const unorderedMarkerDepths = findUnorderedMarkerDepths(documentText);
   const decorations = buildStructuralLineDecorations(state, selections);
 
-  for (const syntax of findPresentationSyntax(documentText)) {
+  for (const syntax of presentation.syntax) {
     const hiddenMatch =
       match !== undefined &&
       syntax.markers.some((marker) => match.from < marker.to && match.to > marker.from);
@@ -315,7 +338,7 @@ function buildDecorations(state: EditorState): DecorationSet {
       for (const marker of syntax.markers) {
         if (marker.presentation === "list-unordered") {
           const depth =
-            unorderedMarkerDepths.get(
+            presentation.unorderedMarkerDepths.get(
               unorderedMarkerPosition(documentText, marker.from, marker.to),
             ) ?? 1;
           decorations.push(

@@ -409,9 +409,8 @@ describe("table editing in the main CodeMirror content DOM", () => {
     expect(editTable(view, "row-add")).toBe(true);
     expect(view.state.doc.toString()).toContain("| a | b |\n|  |  |");
     expect(undo(view)).toBe(true);
-    expect(editTable(view, "row-delete")).toBe(true);
-    expect(view.state.doc.toString()).toBe("| h1 | h2 |\n| --- | --- |");
-    expect(undo(view)).toBe(true);
+    expect(editTable(view, "row-delete")).toBe(false);
+    expect(view.state.doc.toString()).toBe(source);
     expect(editTable(view, "column-delete")).toBe(true);
     expect(view.state.doc.toString()).toBe("| h2 |\n| --- |\n| b |");
   });

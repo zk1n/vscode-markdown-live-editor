@@ -111,7 +111,7 @@
           "type": "number",
           "minimum": 100,
           "maximum": 2000,
-          "default": 500,
+          "default": 300,
           "scope": "resource",
           "markdownDescription": "%configuration.linkHoverDelay.markdownDescription%"
         },
@@ -390,7 +390,8 @@
     "package:vsix:ux-interaction-review": "npm run build && node ./scripts/package-vsix.mjs --ux-interaction-review",
     "package:vsix:ux-fourth-review": "npm run build && node ./scripts/package-vsix.mjs --ux-fourth-review",
     "package:vsix:ux-fifth-review": "npm run build && node ./scripts/package-vsix.mjs --ux-fifth-review",
-    "package:vsix:ux-sixth-review": "npm run build && node ./scripts/package-vsix.mjs --ux-sixth-review"
+    "package:vsix:ux-sixth-review": "npm run build && node ./scripts/package-vsix.mjs --ux-sixth-review",
+    "package:vsix:ux-seventh-review": "npm run build && node ./scripts/package-vsix.mjs --ux-seventh-review"
   },
   "dependencies": {
     "@codemirror/commands": "6.11.0",

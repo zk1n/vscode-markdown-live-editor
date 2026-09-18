@@ -22,7 +22,7 @@ export const defaultEditorPreferences: EditorPreferences = {
   tableBandSize: 18,
   compactSpacing: true,
   structuralGap: 6,
-  linkHoverDelay: 500,
+  linkHoverDelay: 300,
   imageKeepHeight: true,
 };
 export function normalizeEditorPreferences(value: unknown): EditorPreferences {
@@ -52,7 +52,7 @@ export function normalizeEditorPreferences(value: unknown): EditorPreferences {
     tableBandSize: number("tableBandSize", 10, 28, 18),
     compactSpacing: flag("compactSpacing", true),
     structuralGap: number("structuralGap", 2, 32, 6),
-    linkHoverDelay: number("linkHoverDelay", 100, 2000, 500),
+    linkHoverDelay: number("linkHoverDelay", 100, 2000, 300),
     imageKeepHeight: flag("imageKeepHeight", true),
   };
 }
