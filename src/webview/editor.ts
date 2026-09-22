@@ -951,7 +951,7 @@ class MarkdownWebviewController {
       command !== "return-to-live" &&
       command !== "table-source"
     ) {
-      if (contextualTableCommand && contextToken === undefined) return;
+      if (contextualTableCommand) return;
       this.showRichNotice(this.bootstrap.readOnlyReason ?? "この文書は読み取り専用です。");
       return;
     }
@@ -985,11 +985,10 @@ class MarkdownWebviewController {
       }
       void insertImage(this.view, this.imageActions);
     } else if (!this.contextActions.run(command, contextToken, documentVersion)) {
-      // A user-assigned table keybinding is allowed to fire while focus is in
-      // ordinary prose. The runtime guard must be a quiet no-op there; a
-      // context token proves that a menu target existed and deserves the
-      // existing stale-target notice.
-      if (!(contextualTableCommand && contextToken === undefined))
+      // Table commands are contextual editing affordances. Missing, stale, or
+      // otherwise invalid table targets are quiet no-ops, including commands
+      // invoked from a user keybinding or a native context menu.
+      if (!contextualTableCommand)
         this.showRichNotice(
           "対象のセル・画像を選び直してください。文書や対象が変わった場合は操作を取り消します。",
         );

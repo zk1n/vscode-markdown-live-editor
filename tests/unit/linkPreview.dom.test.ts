@@ -235,6 +235,7 @@ describe("link preview hover lifecycle", () => {
     const card = document.querySelector<HTMLElement>(".cm-link-preview");
     const tooltip = transit?.closest<HTMLElement>(".cm-tooltip");
     expect(tooltip?.classList.contains("cm-link-preview-tooltip")).toBe(true);
+    expect(getComputedStyle(tooltip ?? document.body).backgroundColor).toBe("transparent");
     expect(transit?.classList.contains("cm-tooltip-section")).toBe(true);
     expect(card?.classList.contains("cm-link-preview")).toBe(true);
   });

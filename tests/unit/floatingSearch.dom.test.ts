@@ -166,7 +166,7 @@ describe("floating full-source search", () => {
     );
     open();
     input("query", "missing");
-    expect(document.querySelector('[role="status"]')?.textContent).toBe("");
+    expect(document.querySelector('[role="status"]')?.textContent).toBe("—");
     resolve?.({ matches: [] });
     await settle();
     expect(document.querySelector('[role="status"]')?.textContent).toBe("一致なし");
@@ -181,14 +181,18 @@ describe("floating full-source search", () => {
       );
       open();
       input("query", "first");
-      expect(document.querySelector('[role="status"]')?.textContent).toBe("");
+      expect(document.querySelector('[role="status"]')?.textContent).toBe("—");
       vi.advanceTimersByTime(199);
-      expect(document.querySelector('[role="status"]')?.textContent).toBe("");
+      expect(document.querySelector('[role="status"]')?.textContent).toBe("—");
       input("query", "second");
       vi.advanceTimersByTime(199);
-      expect(document.querySelector('[role="status"]')?.textContent).toBe("");
+      expect(document.querySelector('[role="status"]')?.textContent).toBe("—");
       vi.advanceTimersByTime(1);
-      expect(document.querySelector('[role="status"]')?.textContent).toBe("検索中…");
+      expect(document.querySelector('[role="status"]')?.textContent).toBe("—");
+      expect(document.querySelector('[role="status"]')?.getAttribute("aria-busy")).toBe("true");
+      expect(document.querySelector('[role="status"]')?.getAttribute("data-search-slow")).toBe(
+        "true",
+      );
       completions.at(-1)?.resolve({ matches: [] });
       await settle();
       expect(document.querySelector('[role="status"]')?.textContent).toBe("一致なし");

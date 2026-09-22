@@ -8,8 +8,10 @@ import { RichClient } from "../../src/webview/richClient.js";
 import {
   imageEditing,
   imageInsertion,
+  refreshImages,
   type ImageActions,
 } from "../../src/webview/livePreview/imageEditing.js";
+import { IMAGE_SOURCE_HEIGHT_PLACEHOLDER } from "../../src/webview/livePreview/imageSourceHeight.js";
 
 const views: EditorView[] = [];
 const png = Uint8Array.from([137, 80, 78, 71, 13, 10, 26, 10, 1]);
@@ -266,6 +268,62 @@ describe("image paste and drop", () => {
     await settle();
     recreated?.querySelector("img")?.dispatchEvent(new Event("load"));
     expect(recreated?.dataset["imageState"]).toBe("loaded");
+  });
+
+  it("uses a bounded placeholder before any decoded image measurement exists", async () => {
+    const source = "before\n![alt](first.png)\nafter";
+    const { view } = createView(source);
+    const from = source.indexOf("![alt]");
+    const to = source.indexOf("\n", from);
+    view.dispatch({ selection: { anchor: from, head: to } });
+    await settle();
+
+    const placeholder = view.dom.querySelector<HTMLElement>(".cm-image-source-height");
+    expect(placeholder).not.toBeNull();
+    expect(Number.parseFloat(placeholder?.style.height ?? "0")).toBe(
+      IMAGE_SOURCE_HEIGHT_PLACEHOLDER,
+    );
+    expect(view.state.doc.toString()).toBe(source);
+  });
+
+  it("keeps the last measured frame across source leave and refresh until the new load settles", async () => {
+    const source = "before\n![alt](first.png)\nafter";
+    const { view } = createView(source);
+    const initialPreview = view.dom.querySelector<HTMLElement>(".cm-image-preview");
+    const initialLine = initialPreview?.closest<HTMLElement>(".cm-line");
+    expect(initialPreview).not.toBeNull();
+    expect(initialLine).not.toBeNull();
+    if (initialPreview === null || initialLine === null) throw new Error("image line missing");
+    Object.defineProperty(initialLine, "getBoundingClientRect", {
+      configurable: true,
+      value: () => new DOMRect(0, 0, 240, 240),
+    });
+    initialPreview.querySelector("img")?.dispatchEvent(new Event("load"));
+    await settle();
+
+    const from = source.indexOf("![alt]");
+    const to = source.indexOf("\n", from);
+    view.dispatch({ selection: { anchor: from, head: to } });
+    await settle();
+    expect(view.dom.querySelector(".cm-image-source-height")).not.toBeNull();
+
+    view.dispatch({ selection: { anchor: 0 } });
+    await settle();
+    const beforeRefresh = view.dom.querySelector<HTMLElement>(".cm-image-preview");
+    expect(beforeRefresh).not.toBeNull();
+    expect(view.dom.querySelector(".cm-image-source-height")).not.toBeNull();
+
+    view.dispatch({ effects: refreshImages.of(null) });
+    await settle();
+    const refreshed = view.dom.querySelector<HTMLElement>(".cm-image-preview");
+    expect(refreshed).not.toBeNull();
+    expect(refreshed).not.toBe(beforeRefresh);
+    expect(view.dom.querySelector(".cm-image-source-height")).not.toBeNull();
+
+    refreshed?.querySelector("img")?.dispatchEvent(new Event("load"));
+    await settle();
+    expect(view.dom.querySelector(".cm-image-source-height")).toBeNull();
+    expect(view.state.doc.toString()).toBe(source);
   });
 
   it("retains a measured source-height reservation until the replacement image settles", async () => {

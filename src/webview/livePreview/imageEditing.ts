@@ -1,15 +1,9 @@
-import {
-  StateEffect,
-  StateField,
-  type EditorState,
-  type Extension,
-  type Range,
-} from "@codemirror/state";
+import { StateField, type EditorState, type Extension, type Range } from "@codemirror/state";
 import { Decoration, EditorView, WidgetType, type DecorationSet } from "@codemirror/view";
 import { findMarkdownLinks, type MarkdownLink } from "../../core/markdown/markdownLinks.js";
 import { MAX_IMAGE_BYTES } from "../../protocol/richMessages.js";
 import type { RichClient } from "../richClient.js";
-import { imageHeightSettled, imageSourceHeight } from "./imageSourceHeight.js";
+import { imageHeightRefresh, imageHeightSettled, imageSourceHeight } from "./imageSourceHeight.js";
 import {
   searchReveal,
   searchPresentation,
@@ -31,7 +25,7 @@ export interface ImageActions {
   ) => boolean;
 }
 
-export const refreshImages = StateEffect.define();
+export const refreshImages = imageHeightRefresh;
 const imageRevision = StateField.define<number>({
   create: () => 0,
   update: (value, transaction) =>

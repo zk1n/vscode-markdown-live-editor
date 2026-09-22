@@ -146,6 +146,8 @@ export function createFloatingSearch(options: {
     private destroyed = false;
     private generation = 0;
     private pending = false;
+    private confirmedStatus = "—";
+    private confirmedStatusLabel = "検索結果未確定";
     private busyStatusTimer: ReturnType<typeof setTimeout> | undefined;
     constructor(readonly view: EditorView) {
       instances.set(view, this);
@@ -205,6 +207,8 @@ export function createFloatingSearch(options: {
       }
       this.status.setAttribute("role", "status");
       this.status.setAttribute("aria-live", "polite");
+      this.status.textContent = this.confirmedStatus;
+      this.status.setAttribute("aria-label", this.confirmedStatusLabel);
       const queryBox = document.createElement("div");
       queryBox.className = "cm-search-query-box";
       this.query.replaceWith(queryBox);
@@ -377,17 +381,15 @@ export function createFloatingSearch(options: {
       this.snapshot = undefined;
       this.current = -1;
       this.view.dispatch({ effects: [setMatches.of([]), revealSearchMatch.of(undefined)] });
-      // Do not flash the busy label for fast generations. Clear the prior
-      // count immediately so it cannot be mistaken for the new query, then
-      // expose busy only when the request has remained pending long enough to
-      // be useful feedback.
-      this.status.textContent = "";
-      this.status.removeAttribute("aria-label");
+      // Keep the last confirmed count visible while a new generation is
+      // pending. The aria-busy/data marker is an independent progress signal;
+      // it must not replace the count with an empty or busy string.
       this.status.setAttribute("aria-busy", "true");
+      this.status.dataset["searchPending"] = "true";
       this.busyStatusTimer = setTimeout(() => {
         this.busyStatusTimer = undefined;
         if (!this.destroyed && this.opened && generation === this.generation && this.pending)
-          this.status.textContent = this.text.busy;
+          this.status.dataset["searchSlow"] = "true";
       }, BUSY_STATUS_DELAY_MS);
       this.setButtons();
       void (options.executor ?? executeSearch)(
@@ -415,6 +417,8 @@ export function createFloatingSearch(options: {
           this.clearBusyStatusTimer();
           this.pending = false;
           this.status.removeAttribute("aria-busy");
+          delete this.status.dataset["searchPending"];
+          delete this.status.dataset["searchSlow"];
           this.snapshot = snapshot;
           this.result = result;
           this.view.dispatch({ effects: setMatches.of(result.matches) });
@@ -439,6 +443,8 @@ export function createFloatingSearch(options: {
             this.clearBusyStatusTimer();
             this.pending = false;
             this.status.removeAttribute("aria-busy");
+            delete this.status.dataset["searchPending"];
+            delete this.status.dataset["searchSlow"];
             this.result = { matches: [], error: "unavailable" };
             this.showStatus();
           }
@@ -457,22 +463,28 @@ export function createFloatingSearch(options: {
         );
     }
     private showStatus(): void {
+      // A pending generation has no confirmed result. Keep the previous
+      // display untouched and let aria-busy/data-search-pending describe it.
       if (this.pending) {
-        this.status.textContent = this.text.busy;
-        this.status.removeAttribute("aria-label");
-      } else if (this.result.error) {
-        this.status.textContent = this.text[this.result.error];
-        this.status.removeAttribute("aria-label");
+        this.setButtons();
+        return;
+      }
+      let text = this.text.empty;
+      let label: string | undefined;
+      if (this.result.error) {
+        text = this.text[this.result.error];
       } else if (this.result.matches.length) {
         const current = this.current + 1;
         const total = this.result.matches.length;
         const compact = (value: number): string => (value > 9999 ? "9999+" : String(value));
-        this.status.textContent = `${compact(current)} / ${compact(total)}`;
-        this.status.setAttribute("aria-label", `${String(current)} / ${String(total)}`);
-      } else {
-        this.status.textContent = this.text.empty;
-        this.status.removeAttribute("aria-label");
+        text = `${compact(current)} / ${compact(total)}`;
+        label = `${String(current)} / ${String(total)}`;
       }
+      this.confirmedStatus = text;
+      this.confirmedStatusLabel = label ?? text;
+      if (this.status.textContent !== text) this.status.textContent = text;
+      if (label === undefined) this.status.removeAttribute("aria-label");
+      else this.status.setAttribute("aria-label", label);
       this.query.setAttribute("aria-invalid", String(this.result.error === "invalid"));
       this.setButtons();
     }

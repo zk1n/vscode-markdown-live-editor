@@ -51,7 +51,7 @@ describe("source line selection display and clipboard ranges", () => {
     expect(view.state.doc.toString()).toBe(source);
   });
 
-  it("biases an exact gutter boundary upward without changing the logical range", () => {
+  it("resolves an exact gutter boundary without changing the logical range", () => {
     const view = createView("first\nsecond\nthird");
     const gutter = view.dom.querySelector<HTMLElement>(".cm-lineNumbers .cm-gutterElement");
     if (gutter === null) throw new Error("Expected line-number gutter.");
@@ -81,10 +81,50 @@ describe("source line selection display and clipboard ranges", () => {
       }),
     );
     expect(blockAtHeight).toHaveBeenCalled();
-    expect(heights.at(-1)).toBe(Math.max(0, boundary - view.documentTop - 1));
+    expect(heights.at(-1)).toBe(boundary - view.documentTop);
     expect(view.state.selection.main.to).toBe(view.state.doc.line(2).to);
     document.dispatchEvent(
       new PointerEvent("pointerup", { bubbles: true, pointerId: 7, clientY: boundary }),
+    );
+  });
+
+  it("uses the actual gutter element block identity during a drag", () => {
+    const view = createView("first\nsecond\nthird");
+    const gutter = view.dom.querySelector<HTMLElement>(".cm-lineNumbers .cm-gutterElement");
+    if (gutter === null) throw new Error("Expected line-number gutter.");
+    const expectedBlock = view.lineBlockAt(view.state.doc.line(2).from);
+    const heights: number[] = [];
+    const blockAtHeight = vi.spyOn(view, "lineBlockAtHeight").mockImplementation((height) => {
+      heights.push(height);
+      return expectedBlock;
+    });
+    Object.defineProperty(gutter, "getBoundingClientRect", {
+      configurable: true,
+      value: () => new DOMRect(0, 12, 100, 24),
+    });
+    gutter.dispatchEvent(
+      new PointerEvent("pointerdown", {
+        bubbles: true,
+        cancelable: true,
+        button: 0,
+        buttons: 1,
+        pointerId: 8,
+        clientY: 12,
+      }),
+    );
+    gutter.dispatchEvent(
+      new PointerEvent("pointermove", {
+        bubbles: true,
+        buttons: 1,
+        pointerId: 8,
+        clientY: 999,
+      }),
+    );
+    expect(blockAtHeight).toHaveBeenCalled();
+    expect(heights.at(-1)).toBe((12 + 36) / 2 - view.documentTop);
+    expect(view.state.selection.main.to).toBe(expectedBlock.to);
+    document.dispatchEvent(
+      new PointerEvent("pointerup", { bubbles: true, pointerId: 8, clientY: 999 }),
     );
   });
 

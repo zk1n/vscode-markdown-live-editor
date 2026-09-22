@@ -281,17 +281,19 @@ async function run(): Promise<void> {
   );
   query.value = "needle";
   query.dispatchEvent(new InputEvent("input", { bubbles: true }));
-  await wait(
-    () => /^[1-3] \/ 3$/.test(view.dom.querySelector('[role="status"]')?.textContent ?? ""),
-    "worker did not find full-source matches",
-  );
+  const searchReady = (): boolean => {
+    const status = view.dom.querySelector<HTMLElement>('[role="status"]');
+    return (
+      /^[1-3] \/ 3$/.test(status?.textContent ?? "") &&
+      status?.getAttribute("aria-busy") !== "true" &&
+      status?.dataset["searchPending"] !== "true"
+    );
+  };
+  await wait(searchReady, "worker did not find full-source matches");
   replacement.focus();
   replacement.value = "FOUND";
   replacement.dispatchEvent(new InputEvent("input", { bubbles: true }));
-  await wait(
-    () => /^[1-3] \/ 3$/.test(view.dom.querySelector('[role="status"]')?.textContent ?? ""),
-    "replacement query not ready",
-  );
+  await wait(searchReady, "replacement query not ready");
   const all = view.dom.querySelector<HTMLButtonElement>(
     'button[aria-label="すべて置換"],button[aria-label="Replace all"]',
   );
