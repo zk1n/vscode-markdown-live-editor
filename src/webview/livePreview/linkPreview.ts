@@ -148,6 +148,7 @@ export function linkPreview(actions: LinkActions): Extension {
             card.append(heading, hint);
             dom.append(card);
             let destroyed = false;
+            let tooltipOwner: HTMLElement | undefined;
             const fit = (): void => {
               if (destroyed) return;
               view.requestMeasure({
@@ -170,6 +171,7 @@ export function linkPreview(actions: LinkActions): Extension {
             };
             const cleanupPlacement = (): void => {
               destroyed = true;
+              tooltipOwner?.classList.remove("cm-link-preview-tooltip");
               view.scrollDOM.removeEventListener("scroll", fit);
               window.removeEventListener("resize", fit);
             };
@@ -178,6 +180,8 @@ export function linkPreview(actions: LinkActions): Extension {
               // preserves the card's visible 14px separation from its link.
               offset: { x: 0, y: 14 - TRANSIT_PX },
               mount() {
+                tooltipOwner = dom.closest<HTMLElement>(".cm-tooltip") ?? undefined;
+                tooltipOwner?.classList.add("cm-link-preview-tooltip");
                 fit();
                 view.scrollDOM.addEventListener("scroll", fit);
                 window.addEventListener("resize", fit);
@@ -283,6 +287,10 @@ export function linkPreview(actions: LinkActions): Extension {
         maxWidth: "calc(100vw - 16px)",
         pointerEvents: "auto",
       },
+      // CodeMirror adds the generic tooltip border to the transit wrapper.
+      // The card owns the themed preview border; keeping the wrapper border
+      // would render an unbalanced double/white line around the preview.
+      ".cm-tooltip.cm-link-preview-tooltip": { border: "0" },
       ".cm-link-preview": {
         boxSizing: "border-box",
         width: "fit-content",

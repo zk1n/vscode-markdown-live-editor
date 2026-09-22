@@ -26,6 +26,7 @@ import {
 } from "../livePreview/searchReveal.js";
 
 const setMatches = StateEffect.define<readonly SearchMatch[]>();
+const BUSY_STATUS_DELAY_MS = 200;
 export const searchMatches = StateField.define<readonly SearchMatch[]>({
   create: () => [],
   update(value, transaction) {
@@ -145,6 +146,7 @@ export function createFloatingSearch(options: {
     private destroyed = false;
     private generation = 0;
     private pending = false;
+    private busyStatusTimer: ReturnType<typeof setTimeout> | undefined;
     constructor(readonly view: EditorView) {
       instances.set(view, this);
       this.saved = view.state.selection.main;
@@ -343,6 +345,7 @@ export function createFloatingSearch(options: {
             : undefined;
       this.opened = false;
       if (openView === this.view) openView = undefined;
+      this.clearBusyStatusTimer();
       this.generation++;
       this.abort?.abort();
       this.tooltip.hide();
@@ -363,6 +366,7 @@ export function createFloatingSearch(options: {
       return this.toggles.get(key)?.getAttribute("aria-pressed") === "true";
     }
     private refresh(navigate = true): void {
+      this.clearBusyStatusTimer();
       this.abort?.abort();
       this.abort = new AbortController();
       const generation = ++this.generation;
@@ -373,8 +377,18 @@ export function createFloatingSearch(options: {
       this.snapshot = undefined;
       this.current = -1;
       this.view.dispatch({ effects: [setMatches.of([]), revealSearchMatch.of(undefined)] });
-      this.status.textContent = this.text.busy;
+      // Do not flash the busy label for fast generations. Clear the prior
+      // count immediately so it cannot be mistaken for the new query, then
+      // expose busy only when the request has remained pending long enough to
+      // be useful feedback.
+      this.status.textContent = "";
+      this.status.removeAttribute("aria-label");
       this.status.setAttribute("aria-busy", "true");
+      this.busyStatusTimer = setTimeout(() => {
+        this.busyStatusTimer = undefined;
+        if (!this.destroyed && this.opened && generation === this.generation && this.pending)
+          this.status.textContent = this.text.busy;
+      }, BUSY_STATUS_DELAY_MS);
       this.setButtons();
       void (options.executor ?? executeSearch)(
         {
@@ -398,6 +412,7 @@ export function createFloatingSearch(options: {
             snapshot !== this.view.state.doc
           )
             return;
+          this.clearBusyStatusTimer();
           this.pending = false;
           this.status.removeAttribute("aria-busy");
           this.snapshot = snapshot;
@@ -421,6 +436,7 @@ export function createFloatingSearch(options: {
         })
         .catch(() => {
           if (generation === this.generation && this.opened) {
+            this.clearBusyStatusTimer();
             this.pending = false;
             this.status.removeAttribute("aria-busy");
             this.result = { matches: [], error: "unavailable" };
@@ -531,6 +547,7 @@ export function createFloatingSearch(options: {
             to: update.changes.mapPos(this.scope.to, 1),
           };
         this.abort?.abort();
+        this.clearBusyStatusTimer();
         this.snapshot = undefined;
         const generation = ++this.generation;
         queueMicrotask(() => {
@@ -541,6 +558,7 @@ export function createFloatingSearch(options: {
     }
     destroy(): void {
       this.destroyed = true;
+      this.clearBusyStatusTimer();
       this.view.dom.removeEventListener("keydown", this.escapeOutsideForm, true);
       this.view.dom.ownerDocument.removeEventListener("keydown", this.escapeOutsideForm, true);
       if (openView === this.view) openView = undefined;
@@ -548,6 +566,11 @@ export function createFloatingSearch(options: {
       this.tooltip.destroy();
       this.dom.remove();
       instances.delete(this.view);
+    }
+    private clearBusyStatusTimer(): void {
+      if (this.busyStatusTimer === undefined) return;
+      clearTimeout(this.busyStatusTimer);
+      this.busyStatusTimer = undefined;
     }
   }
   return {

@@ -158,6 +158,28 @@ describe("native webview context actions", () => {
     expect(view.contentDOM.querySelector(".cm-table-cell")).toBeNull();
   });
 
+  it("keeps a raw-table Source exit in the context menu after the delimiter is broken", () => {
+    const source = "| h | x |\n| --- | --- |\n| value | other |";
+    const { view, contexts, identity } = createView(source, source.indexOf("value"));
+    expect(contexts.run("table-source")).toBe(true);
+    const delimiterLine = view.state.doc.line(2);
+    view.dispatch({
+      changes: { from: delimiterLine.from, to: delimiterLine.to, insert: "not a delimiter" },
+    });
+    const line = view.contentDOM.querySelector<HTMLElement>(".cm-line");
+    if (line === null) throw new Error("Expected raw source line.");
+    contextMenu(line);
+    const captured = context(view.contentDOM);
+    expect(captured).toMatchObject({
+      webviewSection: "markdown-table",
+      markdownContextEditable: true,
+    });
+    const token = captured["markdownContextToken"];
+    if (typeof token !== "string") throw new Error("Expected a context token.");
+    expect(contexts.run("table-source", token, identity.documentVersion)).toBe(true);
+    expect(view.state.doc.toString()).toBe("| h | x |\nnot a delimiter\n| value | other |");
+  });
+
   it("revalidates tokens against document changes and reveals an image source without modifying it", () => {
     const source = "| h |\n| --- |\n| value |\n\n![alt](assets/image.png)";
     const { view, contexts, identity } = createView(source, source.indexOf("value"));

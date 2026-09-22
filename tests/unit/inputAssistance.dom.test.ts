@@ -132,6 +132,17 @@ describe("heading Enter and independent compact presentation", () => {
     view.dispatch({ changes: { from: 0, to: 2 }, userEvent: "delete.backward" });
     expect(view.state.doc.toString()).toBe("title\n\n\nbody");
   });
+  it("keeps generated separator compact when a second Enter adds an empty paragraph", () => {
+    const view = editor("# title\nbody", 7);
+    expect(insertHeadingParagraph(view)).toBe(true);
+    view.dispatch({
+      changes: { from: view.state.selection.main.head, insert: "\n" },
+      userEvent: "input.type",
+    });
+    expect(view.state.doc.toString()).toBe("# title\n\n\n\nbody");
+    expect(view.dom.querySelectorAll(".cm-structural-gap")).toHaveLength(1);
+  });
+
   it("keeps ordinary paragraph space and the empty input line after heading Enter", () => {
     const ordinary = editor("first\n\nsecond", 0);
     expect(ordinary.dom.querySelectorAll(".cm-structural-gap")).toHaveLength(0);

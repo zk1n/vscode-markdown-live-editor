@@ -45,4 +45,23 @@ describe("table source parsing", () => {
     expect(findTables("heading | ordinary text\n--- | ---\nnot a table")).toEqual([]);
     expect(parseTableRow("| a\\|b | c |", 10).cells).toHaveLength(2);
   });
+
+  it("separates one formatting space from meaningful cell whitespace", () => {
+    const source = "|  前  |　日本　|  | a |";
+    const row = parseTableRow(source, 0);
+    const [ascii, fullWidth, empty, plain] = row.cells;
+    if (
+      ascii === undefined ||
+      fullWidth === undefined ||
+      empty === undefined ||
+      plain === undefined
+    ) {
+      throw new Error("Expected four parsed cells.");
+    }
+
+    expect(source.slice(ascii.contentFrom, ascii.contentTo)).toBe(" 前 ");
+    expect(source.slice(fullWidth.contentFrom, fullWidth.contentTo)).toBe("　日本　");
+    expect(source.slice(empty.contentFrom, empty.contentTo)).toBe("");
+    expect(source.slice(plain.contentFrom, plain.contentTo)).toBe("a");
+  });
 });

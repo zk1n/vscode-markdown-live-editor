@@ -41,6 +41,7 @@ function createView(
   text: string,
   selection = 0,
   defer?: (reply: () => void) => void,
+  deferResolve?: (target: string, reply: () => void) => void,
 ): {
   readonly view: EditorView;
   readonly notices: string[];
@@ -69,7 +70,9 @@ function createView(
             : {}),
       });
     };
-    if (defer && request.operation === "image-import") defer(reply);
+    if (deferResolve && request.operation === "image-resolve")
+      deferResolve(request.target ?? "", reply);
+    else if (defer && request.operation === "image-import") defer(reply);
     else queueMicrotask(reply);
   });
   const actions: ImageActions = {
@@ -199,6 +202,72 @@ describe("image paste and drop", () => {
     image?.dispatchEvent(new Event("load"));
     expect(preview?.dataset["imageState"]).toBe("loaded");
   });
+  it("ignores a stale resolve after a newer source generation starts", async () => {
+    const replies = new Map<string, () => void>();
+    const source = "before\n![alt](first.png)\nafter";
+    const { view } = createView(source, 0, undefined, (target, reply) => {
+      replies.set(target, reply);
+    });
+    await settle();
+    const preview = view.dom.querySelector<HTMLElement>(".cm-image-preview");
+    const image = preview?.querySelector("img");
+    expect(preview?.dataset["imageState"]).toBe("loading");
+
+    const target = source.indexOf("first.png");
+    view.dispatch({
+      changes: { from: target, to: target + "first.png".length, insert: "second.png" },
+      selection: { anchor: 0 },
+      userEvent: "input.type",
+    });
+    await settle();
+    replies.get("first.png")?.();
+    await settle();
+    expect(preview?.dataset["imageState"]).toBe("loading");
+    expect(image?.src).not.toContain("first.png");
+
+    replies.get("second.png")?.();
+    await settle();
+    image?.dispatchEvent(new Event("load"));
+    expect(preview?.dataset["imageState"]).toBe("loaded");
+  });
+
+  it("creates a fresh frame after remove and recreate instead of reusing the old request", async () => {
+    const replies: (() => void)[] = [];
+    const imageText = "![alt](first.png)";
+    const source = `before\n${imageText}\nafter`;
+    const { view } = createView(source, 0, undefined, (_target, reply) => {
+      replies.push(reply);
+    });
+    await settle();
+    const original = view.dom.querySelector<HTMLElement>(".cm-image-preview");
+    expect(original).not.toBeNull();
+    const from = source.indexOf(imageText);
+    view.dispatch({
+      changes: { from, to: from + imageText.length },
+      selection: { anchor: 0 },
+      userEvent: "input.delete",
+    });
+    await settle();
+    expect(view.dom.querySelector(".cm-image-preview")).toBeNull();
+
+    view.dispatch({
+      changes: { from: "before\n".length, insert: `${imageText}\n` },
+      selection: { anchor: 0 },
+      userEvent: "input.type",
+    });
+    await settle();
+    const recreated = view.dom.querySelector<HTMLElement>(".cm-image-preview");
+    expect(recreated).not.toBeNull();
+    expect(recreated).not.toBe(original);
+    replies[0]?.();
+    await settle();
+    expect(recreated?.dataset["imageState"]).toBe("loading");
+    replies[1]?.();
+    await settle();
+    recreated?.querySelector("img")?.dispatchEvent(new Event("load"));
+    expect(recreated?.dataset["imageState"]).toBe("loaded");
+  });
+
   it("retains a measured source-height reservation until the replacement image settles", async () => {
     const source = "before\n![alt](first.png)\nafter";
     const { view } = createView(source);
@@ -232,6 +301,52 @@ describe("image paste and drop", () => {
     replacement?.querySelector("img")?.dispatchEvent(new Event("load"));
     await settle();
     expect(view.dom.querySelector(".cm-image-source-height")).toBeNull();
+  });
+  it("releases a source-height reservation after deletion and final image failure", async () => {
+    const source = "before\n![alt](first.png)\nafter";
+    const { view } = createView(source);
+    const initialPreview = view.dom.querySelector<HTMLElement>(".cm-image-preview");
+    const initialLine = initialPreview?.closest<HTMLElement>(".cm-line");
+    expect(initialPreview).not.toBeNull();
+    expect(initialLine).not.toBeNull();
+    if (initialPreview === null || initialLine === null) throw new Error("image line missing");
+    Object.defineProperty(initialLine, "getBoundingClientRect", {
+      configurable: true,
+      value: () => new DOMRect(0, 0, 240, 240),
+    });
+    initialPreview.querySelector("img")?.dispatchEvent(new Event("load"));
+    await settle();
+    const from = source.indexOf("![alt]");
+    const to = source.indexOf("\n", from);
+    view.dispatch({ selection: { anchor: from, head: to } });
+    await settle();
+    expect(view.dom.querySelector(".cm-image-source-height")).not.toBeNull();
+
+    const target = source.indexOf("first.png");
+    view.dispatch({
+      changes: { from: target, to: target + "first.png".length, insert: "second.png" },
+      selection: { anchor: 0 },
+      userEvent: "input.type",
+    });
+    await settle();
+    const replacement = view.dom.querySelector<HTMLElement>(".cm-image-preview");
+    expect(view.dom.querySelector(".cm-image-source-height")).not.toBeNull();
+    replacement?.querySelector("img")?.dispatchEvent(new Event("error"));
+    await settle();
+    expect(replacement?.dataset["imageState"]).toBe("error");
+    expect(view.dom.querySelector(".cm-image-source-height")).toBeNull();
+
+    const current = view.state.doc.toString();
+    const currentFrom = current.indexOf("![alt]");
+    const currentTo = current.indexOf("\n", currentFrom);
+    view.dispatch({
+      changes: { from: currentFrom, to: currentTo },
+      selection: { anchor: currentFrom },
+      userEvent: "input.delete",
+    });
+    await settle();
+    expect(view.dom.querySelector(".cm-image-source-height")).toBeNull();
+    expect(view.dom.querySelector(".cm-image-preview")).toBeNull();
   });
   it("accepts an OS file clipboard image whose MIME type is unavailable, without consuming plain text paste", async () => {
     const { view, requested } = createView("before", 3);

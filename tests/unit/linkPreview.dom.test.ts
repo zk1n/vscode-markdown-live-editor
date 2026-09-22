@@ -194,4 +194,48 @@ describe("link preview hover lifecycle", () => {
     expect(getComputedStyle(card).maxWidth).toContain("560px");
     expect(getComputedStyle(title).overflowWrap).toBe("anywhere");
   });
+
+  it("removes only the generic tooltip border from the preview transit owner", async () => {
+    const client = new RichClient((request) => {
+      client.receive({
+        kind: "rich-response",
+        protocolVersion: PROTOCOL_VERSION,
+        documentUri: "file:///review.md",
+        sessionId: "session",
+        controllerId: "controller",
+        documentVersion: 0,
+        requestId: request.requestId,
+        ok: true,
+        title: "Preview",
+        text: "Preview text",
+      });
+    });
+    const view = new EditorView({
+      parent: document.body,
+      state: EditorState.create({
+        doc: "[link](target.md)",
+        extensions: [
+          editorPreferences.of({ ...defaultEditorPreferences, linkHoverDelay: 1 }),
+          linkPreview({
+            client,
+            isEditable: () => true,
+            synchronize: () => Promise.resolve(true),
+            notify: () => undefined,
+          }),
+        ],
+      }),
+    });
+    views.push(view);
+    vi.spyOn(view, "coordsAtPos").mockReturnValue({ left: 20, right: 28, top: 120, bottom: 140 });
+    activateHover(view, 2, 1);
+    await new Promise<void>((resolve) => window.setTimeout(resolve, 5));
+    await settle();
+
+    const transit = document.querySelector<HTMLElement>(".cm-link-preview-transit");
+    const card = document.querySelector<HTMLElement>(".cm-link-preview");
+    const tooltip = transit?.closest<HTMLElement>(".cm-tooltip");
+    expect(tooltip?.classList.contains("cm-link-preview-tooltip")).toBe(true);
+    expect(transit?.classList.contains("cm-tooltip-section")).toBe(true);
+    expect(card?.classList.contains("cm-link-preview")).toBe(true);
+  });
 });
