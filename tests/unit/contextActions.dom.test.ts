@@ -20,6 +20,7 @@ afterEach((): void => {
 function createView(
   text: string,
   selection: number,
+  editable = true,
 ): {
   readonly view: EditorView;
   readonly contexts: ReturnType<typeof createContextActions>;
@@ -34,7 +35,7 @@ function createView(
   };
   const contexts = createContextActions({
     identity: (): ContextActionIdentity => identity,
-    isEditable: (): boolean => true,
+    isEditable: (): boolean => editable,
   });
   const parent = document.createElement("div");
   document.body.append(parent);
@@ -180,6 +181,36 @@ describe("native webview context actions", () => {
     expect(view.state.doc.toString()).toBe("| h | x |\nnot a delimiter\n| value | other |");
   });
 
+  it("quietly rejects every table command without a valid editable table target", () => {
+    const commands = [
+      "table-row-add",
+      "table-row-delete",
+      "table-column-add",
+      "table-column-delete",
+      "table-align-left",
+      "table-align-center",
+      "table-align-right",
+      "table-source",
+    ] as const;
+    const prose = createView("ordinary prose", 2);
+    for (const command of commands) expect(prose.contexts.run(command)).toBe(false);
+
+    const source = "| h | v |\n| --- | --- |\n| value | other |";
+    const stale = createView(source, source.indexOf("value"));
+    const cell = stale.view.contentDOM.querySelector<HTMLElement>(
+      `[data-table-cell="${String(source.indexOf("value"))}"]`,
+    );
+    if (cell === null) throw new Error("Expected rendered data cell.");
+    contextMenu(cell);
+    const token = context(cell)["markdownContextToken"];
+    if (typeof token !== "string") throw new Error("Expected a context token.");
+    stale.view.dispatch({ changes: { from: 0, insert: "changed\n" } });
+    for (const command of commands)
+      expect(stale.contexts.run(command, token, stale.identity.documentVersion)).toBe(false);
+
+    const readOnly = createView(source, source.indexOf("value"), false);
+    for (const command of commands) expect(readOnly.contexts.run(command)).toBe(false);
+  });
   it("revalidates tokens against document changes and reveals an image source without modifying it", () => {
     const source = "| h |\n| --- |\n| value |\n\n![alt](assets/image.png)";
     const { view, contexts, identity } = createView(source, source.indexOf("value"));

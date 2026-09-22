@@ -55,6 +55,22 @@ function dispatchClipboard(
   return event;
 }
 
+function dispatchKey(
+  view: EditorView,
+  key: "Backspace" | "Delete",
+  options: Readonly<KeyboardEventInit> = {},
+): KeyboardEvent {
+  const event = new KeyboardEvent("keydown", {
+    bubbles: true,
+    cancelable: true,
+    code: key,
+    key,
+    ...options,
+  });
+  view.contentDOM.dispatchEvent(event);
+  return event;
+}
+
 function sourceTable(source: string): NonNullable<ReturnType<typeof findTables>[number]> {
   const table = findTables(source)[0];
   if (table === undefined) throw new Error("Expected a parsed table.");
@@ -62,6 +78,79 @@ function sourceTable(source: string): NonNullable<ReturnType<typeof findTables>[
 }
 
 describe("rectangular table clipboard editing", () => {
+  it.each(["Delete", "Backspace"] as const)(
+    "%s clears a whole rendered rectangle, including header cells, atomically",
+    (key) => {
+      const source =
+        "before\n\n| h1 | h2 |\n| --- | --- |\n| alpha | beta |\n| gamma | delta |\n\nafter";
+      const parsed = sourceTable(source);
+      const first = parsed.rows[0]?.cells[0];
+      const last = parsed.rows[2]?.cells[1];
+      if (first === undefined || last === undefined) throw new Error("Expected rectangle cells.");
+      const view = createView(source, first.contentFrom);
+      view.dispatch({ selection: { anchor: first.contentFrom, head: last.contentTo } });
+
+      const event = dispatchKey(view, key);
+      expect(event.defaultPrevented).toBe(true);
+      expect(view.state.doc.toString()).toBe(
+        "before\n\n|  |  |\n| --- | --- |\n|  |  |\n|  |  |\n\nafter",
+      );
+      expect(undo(view)).toBe(true);
+      expect(view.state.doc.toString()).toBe(source);
+      expect(redo(view)).toBe(true);
+      expect(view.state.doc.toString()).toContain("|  |  |\n| --- | --- |\n|  |  |");
+    },
+  );
+
+  it("clears a reverse-selected rectangle without touching outside text or clipboard data", () => {
+    const source =
+      "before\n\n| h1 | h2 |\n| --- | --- |\n| alpha | beta |\n| gamma | delta |\n\nafter";
+    const parsed = sourceTable(source);
+    const first = parsed.rows[0]?.cells[0];
+    const last = parsed.rows[2]?.cells[1];
+    if (first === undefined || last === undefined) throw new Error("Expected rectangle cells.");
+    const view = createView(source, last.contentTo);
+    view.dispatch({ selection: { anchor: last.contentTo, head: first.contentFrom } });
+
+    const event = dispatchKey(view, "Backspace");
+    expect(event.defaultPrevented).toBe(true);
+    expect(view.state.doc.toString()).toBe(
+      "before\n\n|  |  |\n| --- | --- |\n|  |  |\n|  |  |\n\nafter",
+    );
+    expect(undo(view)).toBe(true);
+    expect(view.state.doc.toString()).toBe(source);
+  });
+
+  it("consumes an already-empty rectangle without creating an undo transaction", () => {
+    const source = "|  |  |\n| --- | --- |\n|  |  |";
+    const parsed = sourceTable(source);
+    const first = parsed.rows[0]?.cells[0];
+    const last = parsed.rows[1]?.cells[1];
+    if (first === undefined || last === undefined) throw new Error("Expected empty cells.");
+    const view = createView(source, first.contentFrom);
+    view.dispatch({ selection: { anchor: first.contentFrom, head: last.contentTo } });
+
+    const event = dispatchKey(view, "Delete");
+    expect(event.defaultPrevented).toBe(true);
+    expect(view.state.doc.toString()).toBe(source);
+    expect(undo(view)).toBe(false);
+  });
+
+  it("keeps partial cell selections and carets on native paths", () => {
+    const source = "| h1 | h2 |\n| --- | --- |\n| alpha | beta |";
+    const parsed = sourceTable(source);
+    const cell = parsed.rows[1]?.cells[0];
+    if (cell === undefined) throw new Error("Expected a cell.");
+    const partial = createView(source, cell.contentFrom);
+    partial.dispatch({ selection: { anchor: cell.contentFrom, head: cell.contentFrom + 2 } });
+    expect(dispatchKey(partial, "Delete").defaultPrevented).toBe(false);
+    expect(partial.state.doc.toString()).toBe(source);
+
+    const caret = createView(source, cell.contentFrom + 2);
+    expect(dispatchKey(caret, "Backspace").defaultPrevented).toBe(false);
+    expect(caret.state.doc.toString()).toBe(source);
+  });
+
   it("cuts a fully selected single cell through the table route as one undo unit", () => {
     const source = "| h1 | h2 |\n| --- | --- |\n| alpha | beta |";
     const parsed = sourceTable(source);

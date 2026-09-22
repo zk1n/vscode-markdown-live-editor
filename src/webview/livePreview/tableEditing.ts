@@ -483,6 +483,36 @@ function handleTableCut(
   if (changes.length > 0) view.dispatch({ changes, userEvent: "delete.cut", scrollIntoView: true });
   return true;
 }
+/** Clear only the logical contents of a rendered table rectangle. */
+function clearTableRectangle(view: EditorView, rectangle: TableSelectionRectangle): boolean {
+  const rows = rectangleCells(rectangle);
+  if (rows === undefined) return false;
+  const changes = rows.flatMap((cells) =>
+    cells
+      .filter((cell) => cell.contentFrom !== cell.contentTo)
+      .map((cell) => ({ from: cell.contentFrom, to: cell.contentTo, insert: "" })),
+  );
+  if (changes.length > 0)
+    view.dispatch({ changes, userEvent: "delete.selection", scrollIntoView: true });
+  // A valid, already-empty rectangle is still an explicit table operation. It
+  // must consume the key without manufacturing an empty history transaction.
+  return true;
+}
+
+function handleTableDelete(
+  event: KeyboardEvent,
+  view: EditorView,
+  isEditable: () => boolean,
+): boolean {
+  if (event.key !== "Backspace" && event.key !== "Delete") return false;
+  if (view.composing || view.compositionStarted || !isEditable() || view.state.readOnly)
+    return false;
+  const rectangle = tableSelectionRectangle(view.state);
+  if (rectangle === undefined) return false;
+  const handled = clearTableRectangle(view, rectangle);
+  if (handled) event.preventDefault();
+  return handled;
+}
 
 function handleTablePaste(
   event: ClipboardEvent,
@@ -976,6 +1006,7 @@ export function tableEditing(isEditable: () => boolean): Extension {
       EditorView.domEventHandlers({
         copy: (event, view) => handleTableCopy(event, view),
         cut: (event, view) => handleTableCut(event, view, isEditable),
+        keydown: (event, view) => handleTableDelete(event, view, isEditable),
         paste: (event, view) => handleTablePaste(event, view, isEditable),
       }),
     ),

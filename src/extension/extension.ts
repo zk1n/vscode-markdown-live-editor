@@ -219,10 +219,12 @@ export function activate(context: vscode.ExtensionContext): void {
       ),
     ),
     vscode.commands.registerCommand("vscodeMarkdownLiveEditor.openKeyboardShortcuts", () =>
-      vscode.commands.executeCommand(
-        "workbench.action.openGlobalKeybindings",
-        "@ext:zcw.vscode-markdown-live-editor",
-      ),
+      // Do not constrain the native list to the extension source. Once a user
+      // assigns a key, VS Code may classify the row as User and an extension
+      // source filter can hide the very command the user needs to edit/reset.
+      // The standard list remains the authority; users can search the stable
+      // command id (or its title) before and after assigning a key.
+      vscode.commands.executeCommand("workbench.action.openGlobalKeybindings"),
     ),
     disposable,
     copyDiagnostics,

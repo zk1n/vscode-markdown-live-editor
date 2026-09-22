@@ -290,7 +290,7 @@ export function linkPreview(actions: LinkActions): Extension {
       // CodeMirror adds the generic tooltip border to the transit wrapper.
       // The card owns the themed preview border; keeping the wrapper border
       // would render an unbalanced double/white line around the preview.
-      ".cm-tooltip.cm-link-preview-tooltip": { border: "0" },
+      ".cm-tooltip.cm-link-preview-tooltip": { border: "0", backgroundColor: "transparent" },
       ".cm-link-preview": {
         boxSizing: "border-box",
         width: "fit-content",
