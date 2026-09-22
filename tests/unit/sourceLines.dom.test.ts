@@ -2,7 +2,7 @@
 
 import { EditorState } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { sourceLineNumbers, sourceLineSelection } from "../../src/webview/sourceLines.js";
 
 const views: EditorView[] = [];
@@ -49,6 +49,43 @@ describe("source line selection display and clipboard ranges", () => {
     expect(event.defaultPrevented).toBe(true);
     expect(clipboard.getData("text/plain")).toBe("first\nsecond\n");
     expect(view.state.doc.toString()).toBe(source);
+  });
+
+  it("biases an exact gutter boundary upward without changing the logical range", () => {
+    const view = createView("first\nsecond\nthird");
+    const gutter = view.dom.querySelector<HTMLElement>(".cm-lineNumbers .cm-gutterElement");
+    if (gutter === null) throw new Error("Expected line-number gutter.");
+    const boundary = 24;
+    const expectedBlock = view.lineBlockAt(view.state.doc.line(2).from);
+    const heights: number[] = [];
+    const blockAtHeight = vi.spyOn(view, "lineBlockAtHeight").mockImplementation((height) => {
+      heights.push(height);
+      return expectedBlock;
+    });
+    gutter.dispatchEvent(
+      new PointerEvent("pointerdown", {
+        bubbles: true,
+        cancelable: true,
+        button: 0,
+        buttons: 1,
+        pointerId: 7,
+        clientY: 0,
+      }),
+    );
+    document.dispatchEvent(
+      new PointerEvent("pointermove", {
+        bubbles: true,
+        buttons: 1,
+        pointerId: 7,
+        clientY: boundary,
+      }),
+    );
+    expect(blockAtHeight).toHaveBeenCalled();
+    expect(heights.at(-1)).toBe(Math.max(0, boundary - view.documentTop - 1));
+    expect(view.state.selection.main.to).toBe(view.state.doc.line(2).to);
+    document.dispatchEvent(
+      new PointerEvent("pointerup", { bubbles: true, pointerId: 7, clientY: boundary }),
+    );
   });
 
   it("keeps normalized line-break and EOF semantics for cut without selecting the next line's first character", () => {

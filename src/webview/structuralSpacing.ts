@@ -66,12 +66,24 @@ export const structuralProvenance = StateField.define<Provenance>({
   },
 });
 
+function changesTouchSeparator(changes: Transaction["changes"], blank: number): boolean {
+  let touched = false;
+  changes.iterChangedRanges((from, to) => {
+    // Inserting immediately after a generated blank creates a user-owned
+    // empty paragraph while the generated separator remains identifiable;
+    // editing at the separator itself transfers ownership to the user.
+    if (from === to && from === blank + 1) return;
+    if ((from === to && from === blank) || (from <= blank && to >= blank + 1)) touched = true;
+  });
+  return touched;
+}
+
 function mapOwned(
   owned: readonly ManagedSeparator[],
   tr: Transaction,
 ): readonly ManagedSeparator[] {
   return owned
-    .filter((item) => !tr.changes.touchesRange(item.blank, item.blank + 1))
+    .filter((item) => !changesTouchSeparator(tr.changes, item.blank))
     .map((item) => ({
       heading: tr.changes.mapPos(item.heading, -1),
       blank: tr.changes.mapPos(item.blank, 1),

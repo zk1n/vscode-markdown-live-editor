@@ -26,6 +26,17 @@ describe("M10 package contributions", () => {
     const commands = manifest.contributes?.commands?.map(({ command }) => command);
     expect(commands).toContain("vscodeMarkdownLiveEditor.undo");
     expect(commands).toContain("vscodeMarkdownLiveEditor.redo");
+    for (const command of [
+      "table-row-add",
+      "table-row-delete",
+      "table-column-add",
+      "table-column-delete",
+      "table-align-left",
+      "table-align-center",
+      "table-align-right",
+      "table-source",
+    ])
+      expect(commands).toContain(`vscodeMarkdownLiveEditor.${command}`);
     expect(manifest.contributes?.keybindings).toEqual(
       expect.arrayContaining([
         expect.objectContaining({

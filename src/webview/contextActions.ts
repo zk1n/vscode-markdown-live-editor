@@ -4,7 +4,13 @@ import { ViewPlugin, type EditorView, type ViewUpdate } from "@codemirror/view";
 import { findMarkdownLinks } from "../core/markdown/markdownLinks.js";
 import { findTables, tableCellAt } from "../core/markdown/tableSource.js";
 import type { RichCommand, RichIdentity } from "../protocol/richMessages.js";
-import { editTable, returnTableToLive, type TableAction } from "./livePreview/tableEditing.js";
+import {
+  editTable,
+  returnTableToLive,
+  tableSourceActive,
+  tableSourceRange,
+  type TableAction,
+} from "./livePreview/tableEditing.js";
 
 export interface ContextActionIdentity extends RichIdentity {
   readonly documentVersion: number;
@@ -29,6 +35,13 @@ interface TableTarget {
   readonly canDeleteColumn: boolean;
 }
 
+interface TableSourceTarget {
+  readonly kind: "table-source";
+  readonly source: string;
+  readonly from: number;
+  readonly to: number;
+}
+
 interface ImageTarget {
   readonly kind: "image";
   readonly source: string;
@@ -37,7 +50,7 @@ interface ImageTarget {
   readonly target: string;
 }
 
-type ContextTarget = TableTarget | ImageTarget;
+type ContextTarget = TableTarget | TableSourceTarget | ImageTarget;
 
 interface CapturedContext {
   readonly token: string;
@@ -61,6 +74,10 @@ const tableCommands: Readonly<Partial<Record<RichCommand, TableAction>>> = {
   "table-align-right": "align-right",
   "table-source": "source",
 };
+
+export function isTableContextCommand(command: RichCommand): boolean {
+  return command === "table-source" || tableCommands[command] !== undefined;
+}
 
 function integer(value: string | undefined): number | undefined {
   if (value === undefined || !/^\d+$/u.test(value)) return undefined;
@@ -119,6 +136,18 @@ function targetFromElement(
   return imageTarget(source, from, to, target);
 }
 
+function tableSourceTarget(
+  view: EditorView,
+  eventTarget: EventTarget | null,
+): TableSourceTarget | undefined {
+  if (!tableSourceActive(view.state) || !(eventTarget instanceof Node)) return undefined;
+  if (!view.contentDOM.contains(eventTarget)) return undefined;
+  const range = tableSourceRange(view.state);
+  return range === undefined
+    ? undefined
+    : { kind: "table-source", source: view.state.doc.toString(), ...range };
+}
+
 function targetAtCaret(view: EditorView): ContextTarget | undefined {
   const source = view.state.doc.toString();
   const position = view.state.selection.main.head;
@@ -143,6 +172,10 @@ function sameIdentity(left: ContextActionIdentity, right: ContextActionIdentity)
 function validTarget(view: EditorView, target: ContextTarget): ContextTarget | undefined {
   const source = view.state.doc.toString();
   if (source !== target.source) return undefined;
+  if (target.kind === "table-source") {
+    const current = tableSourceRange(view.state);
+    return current?.from === target.from && current.to === target.to ? target : undefined;
+  }
   if (target.kind === "table") {
     const current = tableTarget(source, target.position);
     return current?.from === target.from &&
@@ -162,7 +195,10 @@ function nativeContext(
   editable: boolean,
 ): string {
   return JSON.stringify({
-    webviewSection: target.kind === "table" ? "markdown-table" : "markdown-image",
+    webviewSection:
+      target.kind === "table" || target.kind === "table-source"
+        ? "markdown-table"
+        : "markdown-image",
     markdownContextToken: token,
     markdownDocumentUri: identity.documentUri,
     markdownSessionId: identity.sessionId,
@@ -193,6 +229,7 @@ class ContextActionPlugin {
     // ordinary Copy/Cut/Paste on surrounding prose.
     const target =
       targetFromElement(this.view.state.doc.toString(), element) ??
+      tableSourceTarget(this.view, event.target) ??
       (this.keyboardMenu || (event.clientX === 0 && event.clientY === 0)
         ? targetAtCaret(this.view)
         : undefined);

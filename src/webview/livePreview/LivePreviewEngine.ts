@@ -98,7 +98,9 @@ const livePreviewTheme = EditorView.baseTheme({
     paddingRight: "0",
   },
   ".cm-line.cm-live-preview-heading-line": {
-    lineHeight: "1.25",
+    // Keep H4-H6 on the body line rhythm; the heading mark still owns its
+    // font weight/size and H1-H3 may grow their line box naturally.
+    lineHeight: "var(--markdown-line-height, 1.6)",
   },
   ".cm-line.cm-live-preview-heading-line-1, .cm-line.cm-live-preview-heading-line-2": {
     borderBottom:

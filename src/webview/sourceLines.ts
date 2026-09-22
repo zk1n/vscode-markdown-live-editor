@@ -107,7 +107,11 @@ class LineDrag {
     const rect = this.view.scrollDOM.getBoundingClientRect();
     if (event.clientY < rect.top || event.clientY > rect.bottom)
       this.view.scrollDOM.scrollTop += event.clientY < rect.top ? -24 : 24;
-    const block = this.view.lineBlockAtHeight(event.clientY - this.view.documentTop);
+    // Bias an exact line boundary upward. This changes only the pointer hit
+    // target; the selected source range and clipboard separator rules remain
+    // unchanged, so the next line cannot receive a stray selection rectangle.
+    const height = Math.max(0, event.clientY - this.view.documentTop - 1);
+    const block = this.view.lineBlockAtHeight(height);
     selectLines(this.view, this.anchor, block.from);
   };
   private readonly end = (event: PointerEvent): void => {

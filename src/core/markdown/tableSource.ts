@@ -45,11 +45,14 @@ export function parseTableRow(text: string, from: number): TableRow {
     const right = boundaries[i];
     if (left === undefined || right === undefined) continue;
     const value = text.slice(left + 1, right);
-    const contentLength = value.trim().length;
-    // A blank cell's insertion point belongs between its padding, not at
-    // the following pipe (which may be hidden in preview mode).
-    const leading =
-      contentLength === 0 ? Math.floor(value.length / 2) : value.length - value.trimStart().length;
+    // One ASCII space at either edge is Markdown table padding. Preserve any
+    // additional ASCII space, as well as full-width/other whitespace, as part
+    // of the logical cell value instead of trimming it away.
+    const leading = value.startsWith(" ") ? 1 : 0;
+    const trailing = value.length > leading && value.endsWith(" ") ? 1 : 0;
+    const contentLength = Math.max(0, value.length - leading - trailing);
+    // A blank cell's insertion point belongs between its padding, not at the
+    // following pipe (which may be hidden in preview mode).
     cells.push({
       from: from + left + 1,
       to: from + right,

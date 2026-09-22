@@ -97,6 +97,16 @@ export function returnTableToLive(view: EditorView): boolean {
 export function tableSourceActive(state: EditorState): boolean {
   return state.field(rawTableField, false) !== undefined;
 }
+/**
+ * Returns the source range captured when a table entered raw-source mode.
+ * The range intentionally outlives parser recognition so the presentation can
+ * still be exited after the user breaks the delimiter line.
+ */
+export function tableSourceRange(
+  state: EditorState,
+): { readonly from: number; readonly to: number } | undefined {
+  return state.field(rawTableField, false);
+}
 const tableDecorations = StateField.define<DecorationSet>({
   create: build,
   update(value, transaction) {
@@ -326,6 +336,15 @@ function tableSelectionRectangle(state: EditorState): TableSelectionRectangle | 
   const start = tableCellAt(table, selection.from);
   const end = tableCellAt(table, Math.max(selection.from, selection.to - 1));
   if (start === undefined || end === undefined) return undefined;
+  // A single-cell selection is a table operation only when it covers the
+  // cell's logical content. Partial text selections remain native text
+  // selection/cut; multi-cell rectangles retain their existing behavior.
+  if (
+    start.row === end.row &&
+    start.column === end.column &&
+    (selection.from > start.cell.contentFrom || selection.to < start.cell.contentTo)
+  )
+    return undefined;
   return {
     table,
     topRow: Math.min(start.row, end.row),
@@ -355,7 +374,7 @@ function tableClipboardText(
   rectangle: TableSelectionRectangle,
 ): string | undefined {
   const rows = rectangleCells(rectangle);
-  if (rows === undefined || (rows.length === 1 && rows[0]?.length === 1)) return undefined;
+  if (rows === undefined) return undefined;
   return rows
     .map((cells) =>
       cells.map((cell) => state.sliceDoc(cell.contentFrom, cell.contentTo)).join("\t"),

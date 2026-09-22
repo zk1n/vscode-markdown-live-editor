@@ -81,7 +81,11 @@ import type { NativeSearchRequest } from "../protocol/nativeSearchMessages.js";
 import { decodeSaveAsImage, type SaveAsImageRequest } from "../protocol/saveAsImageMessages.js";
 import { isRichIdentity } from "../protocol/richMessages.js";
 import { RichClient } from "./richClient.js";
-import { createContextActions, type ContextActions } from "./contextActions.js";
+import {
+  createContextActions,
+  isTableContextCommand,
+  type ContextActions,
+} from "./contextActions.js";
 import {
   decodeRichCommand,
   decodeRichResponse,
@@ -938,6 +942,7 @@ class MarkdownWebviewController {
     contextToken?: string,
     documentVersion?: number,
   ): void {
+    const contextualTableCommand = isTableContextCommand(command);
     if (
       this.bootstrap.canEdit === false &&
       command !== "find" &&
@@ -946,6 +951,7 @@ class MarkdownWebviewController {
       command !== "return-to-live" &&
       command !== "table-source"
     ) {
+      if (contextualTableCommand && contextToken === undefined) return;
       this.showRichNotice(this.bootstrap.readOnlyReason ?? "この文書は読み取り専用です。");
       return;
     }
@@ -978,10 +984,16 @@ class MarkdownWebviewController {
         return;
       }
       void insertImage(this.view, this.imageActions);
-    } else if (!this.contextActions.run(command, contextToken, documentVersion))
-      this.showRichNotice(
-        "対象のセル・画像を選び直してください。文書や対象が変わった場合は操作を取り消します。",
-      );
+    } else if (!this.contextActions.run(command, contextToken, documentVersion)) {
+      // A user-assigned table keybinding is allowed to fire while focus is in
+      // ordinary prose. The runtime guard must be a quiet no-op there; a
+      // context token proves that a menu target existed and deserves the
+      // existing stale-target notice.
+      if (!(contextualTableCommand && contextToken === undefined))
+        this.showRichNotice(
+          "対象のセル・画像を選び直してください。文書や対象が変わった場合は操作を取り消します。",
+        );
+    }
   }
 
   private showRichNotice(note: string): void {

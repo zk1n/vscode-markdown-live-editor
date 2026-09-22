@@ -2,7 +2,7 @@
 import { EditorState } from "@codemirror/state";
 import { history, undo, redo } from "@codemirror/commands";
 import { EditorView } from "@codemirror/view";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createFloatingSearch } from "../../src/webview/search/floatingSearch.js";
 import {
   planSearch,
@@ -166,10 +166,35 @@ describe("floating full-source search", () => {
     );
     open();
     input("query", "missing");
-    expect(document.querySelector('[role="status"]')?.textContent).toBe("検索中…");
+    expect(document.querySelector('[role="status"]')?.textContent).toBe("");
     resolve?.({ matches: [] });
     await settle();
     expect(document.querySelector('[role="status"]')?.textContent).toBe("一致なし");
+  });
+  it("defers the busy label while cancelling stale generation timers", async () => {
+    vi.useFakeTimers();
+    try {
+      const completions: { resolve(result: SearchResult): void }[] = [];
+      const { open } = create(
+        "needle",
+        () => new Promise((resolve) => completions.push({ resolve })),
+      );
+      open();
+      input("query", "first");
+      expect(document.querySelector('[role="status"]')?.textContent).toBe("");
+      vi.advanceTimersByTime(199);
+      expect(document.querySelector('[role="status"]')?.textContent).toBe("");
+      input("query", "second");
+      vi.advanceTimersByTime(199);
+      expect(document.querySelector('[role="status"]')?.textContent).toBe("");
+      vi.advanceTimersByTime(1);
+      expect(document.querySelector('[role="status"]')?.textContent).toBe("検索中…");
+      completions.at(-1)?.resolve({ matches: [] });
+      await settle();
+      expect(document.querySelector('[role="status"]')?.textContent).toBe("一致なし");
+    } finally {
+      vi.useRealTimers();
+    }
   });
   it("maps selection scope through replacement and discards asynchronous stale results", async () => {
     const completions: { request: SearchRequest; resolve(value: SearchResult): void }[] = [];

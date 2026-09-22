@@ -597,6 +597,12 @@ describe("LivePreviewEngine", () => {
     expect(h4).not.toBeNull();
     expect(h5).not.toBeNull();
     expect(h6).not.toBeNull();
+    const h4Line = h4?.closest<HTMLElement>(".cm-line");
+    const h5Line = h5?.closest<HTMLElement>(".cm-line");
+    expect(h4Line).not.toBeNull();
+    expect(h5Line).not.toBeNull();
+    expect(getComputedStyle(h4Line as HTMLElement).lineHeight).toContain("1.6");
+    expect(getComputedStyle(h5Line as HTMLElement).lineHeight).toContain("1.6");
     expect(unordered).not.toBeNull();
     expect(ordered).not.toBeNull();
     expect(horizontalRule?.textContent).toBe("---");
