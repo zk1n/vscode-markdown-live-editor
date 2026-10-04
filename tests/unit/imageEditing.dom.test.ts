@@ -2,7 +2,7 @@
 
 import { EditorState } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { RichClient } from "../../src/webview/richClient.js";
 import {
@@ -115,14 +115,18 @@ describe("image paste and drop", () => {
       });
       view.focus();
       view.contentDOM.dispatchEvent(eventWithTransfer("paste", dataTransfer(imageFile())));
-      await settle();
+      await vi.waitFor(() => {
+        expect(reply).toBeTypeOf("function");
+      });
       const outside = document.createElement("button");
       document.body.append(outside);
       if (departure === "window") window.dispatchEvent(new Event("blur"));
       if (departure === "blur") view.contentDOM.blur();
       else outside.focus();
       reply?.();
-      await settle();
+      await vi.waitFor(() => {
+        expect(view.state.doc.toString()).toContain("![image]");
+      });
       if (departure !== "blur") expect(document.activeElement).toBe(outside);
       expect(view.hasFocus).toBe(false);
       expect(view.state.doc.toString()).toContain("![image]");
@@ -131,19 +135,25 @@ describe("image paste and drop", () => {
   it("cancels pending insertion after a selection move or disposal", async () => {
     for (const disposal of [false, true]) {
       let reply: (() => void) | undefined;
-      const { view } = createView("before", 3, (next) => {
+      const { view, notices } = createView("before", 3, (next) => {
         reply = next;
       });
       view.focus();
       view.contentDOM.dispatchEvent(eventWithTransfer("paste", dataTransfer(imageFile())));
-      await settle();
+      await vi.waitFor(() => {
+        expect(reply).toBeTypeOf("function");
+      });
       if (disposal) {
         view.destroy();
         view.dom.remove();
         views.splice(views.indexOf(view), 1);
       } else view.dispatch({ selection: { anchor: 0 } });
       reply?.();
-      await settle();
+      await vi.waitFor(() => {
+        expect(notices).toContain(
+          "文書または選択位置が変わったため挿入を取り消しました。取り込んだ添付ファイルは保持しています。",
+        );
+      });
       expect(view.state.doc.toString()).toBe("before");
     }
   });
