@@ -12,3 +12,6 @@ tests/fixtures/v02-ux-interaction-review/*.md
 tests/fixtures/v02-ux-fourth-review/*.md
 tests/fixtures/v02-ux-fifth-review/*.md
 tests/fixtures/v02-ux-sixth-review/*.md
+
+# Project-owned delivery data
+delivery/

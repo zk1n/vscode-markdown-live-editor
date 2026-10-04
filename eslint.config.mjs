@@ -4,7 +4,14 @@ import tseslint from "typescript-eslint";
 
 export default tseslint.config(
   {
-    ignores: [".tmp/**", "dist/**", "node_modules/**", ".vscode-test/**", "coverage/**"],
+    ignores: [
+      "delivery/**",
+      ".tmp/**",
+      "dist/**",
+      "node_modules/**",
+      ".vscode-test/**",
+      "coverage/**",
+    ],
   },
   js.configs.recommended,
   {
