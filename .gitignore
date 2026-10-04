@@ -10,3 +10,6 @@ coverage/
 Thumbs.db
 .tmp/
 tmp/
+
+# Local delivery repositories and generated work data
+/delivery/
