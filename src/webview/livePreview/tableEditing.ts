@@ -144,6 +144,7 @@ const tableDecorations = StateField.define<DecorationSet>({
 
 function build(state: EditorState): DecorationSet {
   const ranges: Range<Decoration>[] = [];
+  const selected = tableTextSelection(state);
   for (const table of findTables(state.doc.toString())) {
     if (state.field(rawTableField)?.from === table.from) continue;
     ranges.push(
@@ -170,7 +171,10 @@ function build(state: EditorState): DecorationSet {
         }).range(row.from),
       );
       for (const [column, cell] of row.cells.entries()) {
-        const css = `cm-table-cell${rowIndex === 0 ? " cm-table-header" : ""}`;
+        const selection = selected?.cells.find(
+          (item) => item.cell.contentFrom === cell.contentFrom,
+        );
+        const css = `cm-table-cell${rowIndex === 0 ? " cm-table-header" : ""}${selection?.full === true ? " cm-table-cell-selected" : ""}`;
         const attrs = {
           style: `text-align:${table.alignments[column] ?? "left"};${(widths[column] ?? 0) > 0 ? `width:${String(widths[column])}px;min-width:${String(widths[column])}px` : ""}`,
           "data-table-cell": String(cell.contentFrom),
@@ -179,15 +183,23 @@ function build(state: EditorState): DecorationSet {
           ranges.push(Decoration.mark({ class: css, attributes: attrs }).range(cell.from, cell.to));
         else
           ranges.push(
-            Decoration.widget({ widget: new EmptyCell(cell.from, widths[column]), side: 1 }).range(
-              cell.from,
+            Decoration.widget({
+              widget: new EmptyCell(cell.from, widths[column], selection?.full === true),
+              side: 1,
+            }).range(cell.from),
+          );
+        if (selection !== undefined && !selection.full)
+          ranges.push(
+            Decoration.mark({ class: "cm-table-selected-text" }).range(
+              selection.from,
+              selection.to,
             ),
           );
       }
       for (const pipe of row.pipes) ranges.push(Decoration.replace({}).range(pipe, pipe + 1));
     }
-    const selected = sourceRows(state).includes(table.delimiter.from);
-    if (!selected) {
+    const delimiterSelected = sourceRows(state).includes(table.delimiter.from);
+    if (!delimiterSelected) {
       ranges.push(Decoration.line({ class: "cm-table-delimiter" }).range(table.delimiter.from));
       ranges.push(Decoration.replace({}).range(table.delimiter.from, table.delimiter.to));
     }
@@ -238,36 +250,26 @@ class EmptyCell extends WidgetType {
   public constructor(
     private readonly position: number,
     private readonly width?: number,
+    private readonly selected = false,
   ) {
     super();
   }
   public override eq(other: EmptyCell): boolean {
-    return other.position === this.position && other.width === this.width;
+    return (
+      other.position === this.position &&
+      other.width === this.width &&
+      other.selected === this.selected
+    );
   }
-  public override toDOM(view: EditorView): HTMLElement {
+  public override toDOM(): HTMLElement {
     const cell = document.createElement("span");
-    cell.className = "cm-table-cell";
+    cell.className = `cm-table-cell${this.selected ? " cm-table-cell-selected" : ""}`;
     if (this.width !== undefined) {
       cell.style.width = `${String(this.width)}px`;
       cell.style.minWidth = cell.style.width;
     }
     cell.textContent = "\u200b";
     cell.dataset["tableCell"] = String(this.position);
-    cell.addEventListener("mousedown", (event) => {
-      event.preventDefault();
-      // A widget mousedown can be observed while CodeMirror is reconciling
-      // its native selection. Queue the presentation selection so it remains
-      // on the same EditorView without recursively dispatching mid-update.
-      queueMicrotask((): void => {
-        view.dispatch({ selection: { anchor: this.position } });
-      });
-    });
-    cell.addEventListener("click", (): void => {
-      // Focus after the mouse event's selection reconciliation has completed.
-      queueMicrotask((): void => {
-        view.focus();
-      });
-    });
     return cell;
   }
   public override coordsAt(dom: HTMLElement): {
@@ -285,7 +287,7 @@ class EmptyCell extends WidgetType {
     };
   }
   public override ignoreEvent(): boolean {
-    return true;
+    return false;
   }
 }
 
@@ -302,19 +304,19 @@ export type TableAction =
   | "align-right"
   | "source";
 
-interface TableSelectionRectangle {
-  readonly table: SourceTable;
-  readonly topRow: number;
-  readonly bottomRow: number;
-  readonly leftColumn: number;
-  readonly rightColumn: number;
+interface SelectedCell {
+  readonly cell: TableCell;
+  readonly row: number;
+  readonly from: number;
+  readonly to: number;
+  readonly full: boolean;
+}
+interface TableTextSelection {
+  readonly cells: readonly SelectedCell[];
 }
 
-function isMultiCellRectangle(rectangle: TableSelectionRectangle): boolean {
-  return rectangle.topRow !== rectangle.bottomRow || rectangle.leftColumn !== rectangle.rightColumn;
-}
-
-function tableSelectionRectangle(state: EditorState): TableSelectionRectangle | undefined {
+/** One source range, read in row order; pipes and the delimiter are never cell text. */
+function tableTextSelection(state: EditorState): TableTextSelection | undefined {
   if (
     state.selection.ranges.length !== 1 ||
     state.selection.main.empty ||
@@ -322,67 +324,80 @@ function tableSelectionRectangle(state: EditorState): TableSelectionRectangle | 
   )
     return undefined;
   const selection = state.selection.main;
-  const tables = findTables(state.doc.toString());
-  const table = tables.find(
-    (candidate) =>
-      candidate.from < selection.to &&
-      candidate.to > selection.from &&
-      selection.from >= candidate.from &&
-      selection.to <= candidate.to,
+  const table = findTables(state.doc.toString()).find(
+    (candidate) => selection.from >= candidate.from && selection.to <= candidate.to,
   );
-  if (table === undefined || isTableSourceActive(state, table)) return undefined;
-  // An explicit source selection keeps CodeMirror's native clipboard behavior.
-  if (selection.from <= table.from && selection.to >= table.to) return undefined;
-  const start = tableCellAt(table, selection.from);
-  const end = tableCellAt(table, Math.max(selection.from, selection.to - 1));
-  if (start === undefined || end === undefined) return undefined;
-  // A single-cell selection is a table operation only when it covers the
-  // cell's logical content. Partial text selections remain native text
-  // selection/cut; multi-cell rectangles retain their existing behavior.
   if (
-    start.row === end.row &&
-    start.column === end.column &&
-    (selection.from > start.cell.contentFrom || selection.to < start.cell.contentTo)
+    table === undefined ||
+    isTableSourceActive(state, table) ||
+    (selection.from <= table.from && selection.to >= table.to)
   )
     return undefined;
-  return {
-    table,
-    topRow: Math.min(start.row, end.row),
-    bottomRow: Math.max(start.row, end.row),
-    leftColumn: Math.min(start.column, end.column),
-    rightColumn: Math.max(start.column, end.column),
-  };
+  const start = tableCellAt(table, selection.from)?.cell;
+  const end = tableCellAt(table, selection.to)?.cell;
+  if (
+    start === undefined ||
+    end === undefined ||
+    selection.from < start.contentFrom ||
+    selection.from > start.contentTo ||
+    selection.to < end.contentFrom ||
+    selection.to > end.contentTo
+  )
+    return undefined;
+  const cells: SelectedCell[] = [];
+  for (const [row, sourceRow] of table.rows.entries()) {
+    for (const cell of sourceRow.cells) {
+      const from = Math.max(selection.from, cell.contentFrom);
+      const to = Math.min(selection.to, cell.contentTo);
+      // An empty cell is selected only when its insertion point is strictly
+      // crossed. A caret or a range ending at that point is not a full cell.
+      const crossedEmpty =
+        cell.contentFrom === cell.contentTo &&
+        selection.from < cell.contentFrom &&
+        selection.to > cell.contentTo;
+      if (from < to || crossedEmpty)
+        cells.push({
+          cell,
+          row,
+          from,
+          to,
+          full: from === cell.contentFrom && to === cell.contentTo,
+        });
+    }
+  }
+  return cells.length === 0 ? undefined : { cells };
 }
 
-function rectangleCells(
-  rectangle: TableSelectionRectangle,
-): readonly (readonly TableCell[])[] | undefined {
-  const rows: (readonly TableCell[])[] = [];
-  for (let row = rectangle.topRow; row <= rectangle.bottomRow; row += 1) {
-    const cells = rectangle.table.rows[row]?.cells.slice(
-      rectangle.leftColumn,
-      rectangle.rightColumn + 1,
-    );
-    if (cells?.length !== rectangle.rightColumn - rectangle.leftColumn + 1) return undefined;
-    rows.push(cells);
+/** Keep ordinary partial single-cell copy/cut on CM's native path. */
+function tableOperationSelection(state: EditorState): TableTextSelection | undefined {
+  const selection = tableTextSelection(state);
+  return selection?.cells.length === 1 && !selection.cells[0]?.full ? undefined : selection;
+}
+
+function selectionRows(selection: TableTextSelection): readonly (readonly SelectedCell[])[] {
+  const rows: SelectedCell[][] = [];
+  for (const cell of selection.cells) {
+    const last = rows.at(-1);
+    if (last?.[0]?.row === cell.row) last.push(cell);
+    else rows.push([cell]);
   }
   return rows;
 }
-
-function tableClipboardText(
-  state: EditorState,
-  rectangle: TableSelectionRectangle,
-): string | undefined {
-  const rows = rectangleCells(rectangle);
-  if (rows === undefined) return undefined;
-  return rows
-    .map((cells) =>
-      cells.map((cell) => state.sliceDoc(cell.contentFrom, cell.contentTo)).join("\t"),
-    )
+function tableClipboardText(state: EditorState, selection: TableTextSelection): string {
+  return selectionRows(selection)
+    .map((cells) => cells.map((cell) => state.sliceDoc(cell.from, cell.to)).join("\t"))
     .join("\n");
 }
+function selectionIsTsv(selection: TableTextSelection): boolean {
+  const rows = selectionRows(selection);
+  return selection.cells.length > 1 && rows.every((row) => row.length === rows[0]?.length);
+}
 
-function setClipboardText(clipboard: DataTransfer | null, text: string): boolean {
+function setClipboardText(
+  clipboard: DataTransfer | null,
+  text: string,
+  explicitTsv: boolean,
+): boolean {
   if (clipboard === null) return false;
   try {
     clipboard.clearData();
@@ -394,7 +409,7 @@ function setClipboardText(clipboard: DataTransfer | null, text: string): boolean
   // Keep an explicit TSV flavor when the browser permits custom clipboard
   // types so one-column multi-row copies remain distinguishable from prose.
   try {
-    clipboard.setData("text/tab-separated-values", text);
+    if (explicitTsv) clipboard.setData("text/tab-separated-values", text);
   } catch {
     // Some hosts expose only text/plain. It is still a successful clipboard
     // write for cut safety; paste falls back to tab-containing text.
@@ -445,17 +460,16 @@ function clipboardPasteTarget(
 
 function handleTableCopy(event: ClipboardEvent, view: EditorView): boolean {
   if (view.composing || view.compositionStarted) return false;
-  const rectangle = tableSelectionRectangle(view.state);
-  if (rectangle === undefined) return false;
-  const text = tableClipboardText(view.state, rectangle);
-  if (text === undefined) return false;
-  // A rectangle is an explicit table operation. When a ClipboardEvent carries
+  const selection = tableOperationSelection(view.state);
+  if (selection === undefined) return false;
+  const text = tableClipboardText(view.state, selection);
+  // A cell selection is an explicit table operation. When a ClipboardEvent carries
   // a DataTransfer, do not let CM fall back to a source-range copy if writing
   // that transfer fails. A null transfer is the old capture-copy path, which
   // remains owned by CM.
   if (event.clipboardData === null) return false;
   event.preventDefault();
-  setClipboardText(event.clipboardData, text);
+  setClipboardText(event.clipboardData, text, selectionIsTsv(selection));
   return true;
 }
 
@@ -466,36 +480,25 @@ function handleTableCut(
 ): boolean {
   if (view.composing || view.compositionStarted || !isEditable() || view.state.readOnly)
     return false;
-  const rectangle = tableSelectionRectangle(view.state);
-  if (rectangle === undefined) return false;
-  const text = tableClipboardText(view.state, rectangle);
-  if (text === undefined) return false;
+  const selection = tableOperationSelection(view.state);
+  if (selection === undefined) return false;
+  const text = tableClipboardText(view.state, selection);
   event.preventDefault();
   // Never clear source until the clipboard write has been confirmed.
-  if (!setClipboardText(event.clipboardData, text)) return true;
-  const rows = rectangleCells(rectangle);
-  if (rows === undefined) return true;
-  const changes = rows.flatMap((cells) =>
-    cells
-      .filter((cell) => cell.contentFrom !== cell.contentTo)
-      .map((cell) => ({ from: cell.contentFrom, to: cell.contentTo, insert: "" })),
-  );
-  if (changes.length > 0) view.dispatch({ changes, userEvent: "delete.cut", scrollIntoView: true });
+  if (!setClipboardText(event.clipboardData, text, selectionIsTsv(selection))) return true;
+  clearTableSelection(view, selection, "delete.cut");
   return true;
 }
-/** Clear only the logical contents of a rendered table rectangle. */
-function clearTableRectangle(view: EditorView, rectangle: TableSelectionRectangle): boolean {
-  const rows = rectangleCells(rectangle);
-  if (rows === undefined) return false;
-  const changes = rows.flatMap((cells) =>
-    cells
-      .filter((cell) => cell.contentFrom !== cell.contentTo)
-      .map((cell) => ({ from: cell.contentFrom, to: cell.contentTo, insert: "" })),
-  );
-  if (changes.length > 0)
-    view.dispatch({ changes, userEvent: "delete.selection", scrollIntoView: true });
-  // A valid, already-empty rectangle is still an explicit table operation. It
-  // must consume the key without manufacturing an empty history transaction.
+/** Only selected logical text changes; each cell's padding and pipes remain literal. */
+function clearTableSelection(
+  view: EditorView,
+  selection: TableTextSelection,
+  userEvent = "delete.selection",
+): boolean {
+  const changes = selection.cells
+    .filter((cell) => cell.from !== cell.to)
+    .map((cell) => ({ from: cell.from, to: cell.to, insert: "" }));
+  if (changes.length > 0) view.dispatch({ changes, userEvent, scrollIntoView: true });
   return true;
 }
 
@@ -507,9 +510,9 @@ function handleTableDelete(
   if (event.key !== "Backspace" && event.key !== "Delete") return false;
   if (view.composing || view.compositionStarted || !isEditable() || view.state.readOnly)
     return false;
-  const rectangle = tableSelectionRectangle(view.state);
-  if (rectangle === undefined) return false;
-  const handled = clearTableRectangle(view, rectangle);
+  const selection = tableOperationSelection(view.state);
+  if (selection === undefined) return false;
+  const handled = clearTableSelection(view, selection);
   if (handled) event.preventDefault();
   return handled;
 }
@@ -528,7 +531,7 @@ function handleTablePaste(
   )
     return false;
   // File/image transfers remain owned by imageEditing and the browser's native
-  // route. Only text-only TSV is a table matrix operation.
+  // route. Cell text and text-only TSV use the table editing contract.
   if ([...event.clipboardData.items].some((item) => item.kind === "file")) return false;
   const explicitTsv = [...event.clipboardData.types].some(
     (type) => type.toLowerCase() === "text/tab-separated-values",
@@ -542,10 +545,63 @@ function handleTablePaste(
   }
   const target = clipboardPasteTarget(view.state);
   if (target === undefined) return false;
-  const selectionRectangle = tableSelectionRectangle(view.state);
+  const selected = tableOperationSelection(view.state);
+  if (selected !== undefined && selected.cells.length > 1) {
+    const selectedRows = selectionRows(selected);
+    const values = text
+      .replace(/\r\n?/g, "\n")
+      .split("\n")
+      .map((row) => row.split("\t"));
+    if (
+      values.length === selectedRows.length &&
+      values.every((row, index) => row.length === selectedRows[index]?.length)
+    ) {
+      const changes = selectedRows.flatMap((row, rowIndex) =>
+        row.map((cell, column) => ({
+          from: cell.from,
+          to: cell.to,
+          // protectCells normalizes the whole resulting cell, including
+          // retained text at partially selected endpoints.
+          insert: values[rowIndex]?.[column] ?? "",
+        })),
+      );
+      const changeSet = view.state.changes(changes);
+      const first = selected.cells[0];
+      if (first === undefined) return false;
+      event.preventDefault();
+      view.dispatch({
+        changes: changeSet,
+        selection: { anchor: changeSet.mapPos(first.from, -1) },
+        userEvent: "input.paste",
+        scrollIntoView: true,
+      });
+      return true;
+    }
+    // Plain prose replaces the selected text at the first endpoint and clears
+    // the remaining selected slices, just like one continuous text selection.
+    if (!explicitTsv && !text.includes("\t")) {
+      const first = selected.cells[0];
+      if (first === undefined) return false;
+      const insert = text.replace(/\r\n?/g, "\n");
+      const changes = selected.cells.map((cell, index) => ({
+        from: cell.from,
+        to: cell.to,
+        insert: index === 0 ? insert : "",
+      }));
+      const changeSet = view.state.changes(changes);
+      event.preventDefault();
+      view.dispatch({
+        changes: changeSet,
+        selection: { anchor: changeSet.mapPos(first.from, -1) + insert.length },
+        userEvent: "input.paste",
+        scrollIntoView: true,
+      });
+      return true;
+    }
+  }
   const matrix = clipboardMatrix(
     text,
-    explicitTsv || (selectionRectangle !== undefined && isMultiCellRectangle(selectionRectangle)),
+    explicitTsv || (selected !== undefined && selected.cells.length > 1),
   );
   if (matrix === undefined) return false;
   event.preventDefault();
@@ -723,12 +779,12 @@ function moveCell(view: EditorView, backwards: boolean, vertical = false): boole
   return true;
 }
 
-/** Arrow motion never adds source or selects whole cells. Geometry is measured only on a key. */
-function arrowCell(view: EditorView, forward: boolean, vertical: boolean): boolean {
+/** Arrow motion never adds source. Shift retains one continuous source anchor. */
+function arrowCell(view: EditorView, forward: boolean, vertical: boolean, extend = false): boolean {
   if (view.composing || view.compositionStarted || view.state.selection.ranges.length !== 1)
     return false;
   const selection = view.state.selection.main;
-  if (!selection.empty) return false;
+  if (!selection.empty && !extend) return false;
   const table = findTables(view.state.doc.toString()).find((item) =>
     tableCellAt(item, selection.head),
   );
@@ -740,8 +796,19 @@ function arrowCell(view: EditorView, forward: boolean, vertical: boolean): boole
   if (!vertical) {
     if (
       forward ? selection.head < current.cell.contentTo : selection.head > current.cell.contentFrom
-    )
-      return false; // CM's grapheme/bidi motion inside the content.
+    ) {
+      if (!extend) return false; // CM's grapheme/bidi motion inside the content.
+      const moved = view.moveByChar(EditorSelection.cursor(selection.head), forward).head;
+      view.dispatch({
+        selection: {
+          anchor: selection.anchor,
+          head: Math.max(current.cell.contentFrom, Math.min(current.cell.contentTo, moved)),
+        },
+        userEvent: "select",
+        scrollIntoView: true,
+      });
+      return true;
+    }
     const index = current.row * table.columns + current.column + (forward ? 1 : -1);
     const target =
       table.rows[Math.floor(index / table.columns)]?.cells[(index + table.columns) % table.columns];
@@ -769,7 +836,9 @@ function arrowCell(view: EditorView, forward: boolean, vertical: boolean): boole
       ) {
         view.dispatch({
           selection: EditorSelection.create([
-            EditorSelection.cursor(moved, 0, undefined, goalColumn),
+            extend
+              ? EditorSelection.range(selection.anchor, moved, goalColumn)
+              : EditorSelection.cursor(moved, 0, undefined, goalColumn),
           ]),
           scrollIntoView: true,
           userEvent: "select",
@@ -798,7 +867,9 @@ function arrowCell(view: EditorView, forward: boolean, vertical: boolean): boole
   if (anchor === undefined) return false;
   view.dispatch({
     selection: EditorSelection.create([
-      EditorSelection.cursor(anchor, 0, undefined, vertical ? goalColumn : undefined),
+      extend
+        ? EditorSelection.range(selection.anchor, anchor, vertical ? goalColumn : undefined)
+        : EditorSelection.cursor(anchor, 0, undefined, vertical ? goalColumn : undefined),
     ]),
     scrollIntoView: true,
     userEvent: "select",
@@ -871,13 +942,26 @@ function tablePointerSelection(view: EditorView, event: MouseEvent): MouseSelect
   )
     return null;
   const hit = (event: MouseEvent): number => {
-    const element = view.dom.ownerDocument.elementFromPoint(event.clientX, event.clientY);
+    const element =
+      view.dom.ownerDocument.elementFromPoint(event.clientX, event.clientY) ??
+      (event.target instanceof Element ? event.target : null);
+    const cellElement = element?.closest<HTMLElement>("[data-table-cell]");
     // CSS table-cell fragments do not have inline source order. Use the browser's
     // text hit test for those fragments, through CM's own mouse-selection lifecycle.
-    if (element?.closest("[data-table-cell]") && view.contentDOM.contains(element))
-      return (
-        cellPositionAtCoords(view, event.clientX, event.clientY) ?? view.state.selection.main.head
-      );
+    if (cellElement && view.contentDOM.contains(cellElement)) {
+      const position = Number(cellElement.dataset["tableCell"]);
+      const cell = findTables(view.state.doc.toString())
+        .flatMap((table) => table.rows)
+        .flatMap((row) => row.cells)
+        .find((cell) => cell.contentFrom === position);
+      if (cell !== undefined) {
+        const hit =
+          cell.contentFrom === cell.contentTo
+            ? cell.contentFrom
+            : (cellPositionAtCoords(view, event.clientX, event.clientY) ?? position);
+        return Math.max(cell.contentFrom, Math.min(cell.contentTo, hit));
+      }
+    }
     return view.posAtCoords({ x: event.clientX, y: event.clientY }, false);
   };
   let start = hit(event);
@@ -939,6 +1023,44 @@ function protectCells(transaction: Transaction): Transaction | readonly Transact
     // operations. Do not turn a paste or cut into a no-op merely because it
     // crosses cell delimiters; partial/multiple-cell edits remain protected.
     if (replacesExplicitWholeTableSelection(transaction, tables)) return transaction;
+    const selected = tableTextSelection(state);
+    if (selected !== undefined && selected.cells.length > 1) {
+      // A native typed replacement is still one selection and one history
+      // event. Project it onto cell text so hidden structure stays untouched.
+      const changes: { from: number; to: number; insert: string }[] = [];
+      transaction.changes.iterChanges((from, to, _newFrom, _newTo, inserted) => {
+        changes.push({ from, to, insert: inserted.toString() });
+      });
+      const replacement = changes[0];
+      const first = selected.cells[0];
+      if (
+        changes.length === 1 &&
+        replacement !== undefined &&
+        first !== undefined &&
+        replacement.from === state.selection.main.from &&
+        replacement.to === state.selection.main.to
+      ) {
+        const insert = replacement.insert;
+        // Continue through the normal whole-cell correction below. Escaping
+        // only the insert misses retained suffix pipes whose slash was deleted,
+        // and cannot see a retained backslash immediately before the insert.
+        transaction = state.update({
+          changes: selected.cells.map((cell, index) => ({
+            from: cell.from,
+            to: cell.to,
+            insert: index === 0 ? insert : "",
+          })),
+          selection: { anchor: first.from + insert.length },
+          effects: transaction.effects,
+          annotations: [
+            Transaction.userEvent.of(transaction.annotation(Transaction.userEvent) ?? "input"),
+            Transaction.addToHistory.of(transaction.annotation(Transaction.addToHistory) ?? true),
+          ],
+          scrollIntoView: transaction.scrollIntoView,
+          filter: false,
+        });
+      }
+    }
     const cells = new Map<number, { from: number; to: number }>();
     const safety = { unsafe: false };
     transaction.changes.iterChanges((from, to) => {
@@ -1013,12 +1135,19 @@ export function tableEditing(isEditable: () => boolean): Extension {
     tableControls(isEditable, isTableSourceActive, editTable),
     EditorView.mouseSelectionStyle.of(tablePointerSelection),
     tableDecorations,
+    EditorView.editorAttributes.of((view) =>
+      tableTextSelection(view.state) === undefined ? {} : { class: "cm-table-selection-active" },
+    ),
     Prec.highest(
       keymap.of([
         { key: "ArrowLeft", run: (view) => arrowCell(view, false, false) },
         { key: "ArrowRight", run: (view) => arrowCell(view, true, false) },
         { key: "ArrowUp", run: (view) => arrowCell(view, false, true) },
         { key: "ArrowDown", run: (view) => arrowCell(view, true, true) },
+        { key: "Shift-ArrowLeft", run: (view) => arrowCell(view, false, false, true) },
+        { key: "Shift-ArrowRight", run: (view) => arrowCell(view, true, false, true) },
+        { key: "Shift-ArrowUp", run: (view) => arrowCell(view, false, true, true) },
+        { key: "Shift-ArrowDown", run: (view) => arrowCell(view, true, true, true) },
         { key: "Tab", stopPropagation: true, run: (view) => isEditable() && moveCell(view, false) },
         {
           key: "Shift-Tab",
@@ -1095,6 +1224,17 @@ export function tableEditing(isEditable: () => boolean): Extension {
           "color-mix(in srgb, var(--vscode-editor-foreground, #888) 8%, transparent)",
       },
       ".cm-line.cm-table-delimiter": { fontSize: "0", lineHeight: "1px", minHeight: "1px" },
+      // Each CSS cell wraps separately within one source line. Paint selected
+      // logical text in the cell instead of connecting CM's row rectangles.
+      "&.cm-table-selection-active > .cm-scroller > .cm-selectionLayer .cm-selectionBackground": {
+        display: "none",
+      },
+      ".cm-table-cell-selected, .cm-table-selected-text": {
+        backgroundColor: "var(--vscode-editor-inactiveSelectionBackground, #80808055)",
+      },
+      "&.cm-focused .cm-table-cell-selected, &.cm-focused .cm-table-selected-text": {
+        backgroundColor: "var(--vscode-editor-selectionBackground, #2677b877)",
+      },
       ".cm-table-cell:focus-within": { outline: "1px solid var(--vscode-focusBorder)" },
     }),
   ];

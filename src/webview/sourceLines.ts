@@ -156,6 +156,25 @@ export function sourceLineNumbers(
     drag,
     Prec.highest(
       EditorView.domEventHandlers({
+        keydown(event, view) {
+          if (
+            (event.key !== "Backspace" && event.key !== "Delete") ||
+            view.state.readOnly ||
+            view.composing ||
+            view.compositionStarted
+          )
+            return false;
+          const range = sourceLineClipboardRange(view.state);
+          if (range === undefined) return false;
+          event.preventDefault();
+          if (range.from !== range.to)
+            view.dispatch({
+              changes: { from: range.from, to: range.to },
+              selection: { anchor: range.from },
+              userEvent: "delete.selection",
+            });
+          return true;
+        },
         copy(event, view) {
           const range = sourceLineClipboardRange(view.state);
           const clipboard = event.clipboardData;
@@ -169,6 +188,7 @@ export function sourceLineNumbers(
           return true;
         },
         cut(event, view) {
+          if (view.state.readOnly || view.composing || view.compositionStarted) return false;
           const range = sourceLineClipboardRange(view.state);
           const clipboard = event.clipboardData;
           if (range === undefined || clipboard === null) return false;

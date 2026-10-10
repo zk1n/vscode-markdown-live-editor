@@ -36,23 +36,34 @@ export interface LinkPreviewOptions {
 }
 export function linkPreview(actions: LinkActions): Extension {
   let cachedDocument: EditorState["doc"] | undefined;
+  let hoverGeneration = 0;
   const cache = new Map<
     string,
     { readonly response: RichResponse; readonly targetVersion: string }
   >();
   return [
-    ViewPlugin.define(() => ({
-      update(update) {
-        if (update.docChanged) {
+    ViewPlugin.define((view) => {
+      // CM cancels its dwell timer on leave, but not an already pending async
+      // source. Invalidate that source while it waits for our display delay.
+      const cancelPendingHover = (): void => {
+        hoverGeneration++;
+      };
+      view.dom.addEventListener("mouseleave", cancelPendingHover);
+      return {
+        update(update) {
+          if (update.docChanged) {
+            cache.clear();
+            cachedDocument = update.state.doc;
+          }
+        },
+        destroy() {
+          cancelPendingHover();
+          view.dom.removeEventListener("mouseleave", cancelPendingHover);
           cache.clear();
-          cachedDocument = update.state.doc;
-        }
-      },
-      destroy() {
-        cache.clear();
-        cachedDocument = undefined;
-      },
-    })),
+          cachedDocument = undefined;
+        },
+      };
+    }),
     hoverTooltip(
       async (view, position) => {
         if (view.composing || view.compositionStarted) return null;
@@ -61,6 +72,7 @@ export function linkPreview(actions: LinkActions): Extension {
           (candidate) => !candidate.image && candidate.from <= position && candidate.to >= position,
         );
         if (link === undefined) return null;
+        const generation = hoverGeneration;
         if (cachedDocument !== snapshot) {
           cachedDocument = snapshot;
           cache.clear();
@@ -102,11 +114,12 @@ export function linkPreview(actions: LinkActions): Extension {
           ),
         );
         actions.onPreviewEvent?.("timer");
-        if (view.state.doc !== snapshot || !view.dom.isConnected) return null;
         const response = await Promise.race([
           request,
           new Promise<undefined>((resolve) => window.setTimeout(resolve, 0)),
         ]);
+        if (generation !== hoverGeneration || view.state.doc !== snapshot || !view.dom.isConnected)
+          return null;
         // Resolve the first size before CM chooses a side. Its chosen side is
         // retained until it no longer fits, even when content later shrinks.
         const heightFor = (anchor: { top: number; bottom: number }): number => {
@@ -248,7 +261,9 @@ export function linkPreview(actions: LinkActions): Extension {
           },
         };
       },
-      { hoverTime: 0, hideOnChange: true },
+      // CM treats zero as its default 300ms dwell. Start the request promptly;
+      // the source above owns the configured display delay and loading state.
+      { hoverTime: 1, hideOnChange: true },
     ),
     Prec.highest(
       EditorView.domEventHandlers({

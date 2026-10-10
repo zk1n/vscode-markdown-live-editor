@@ -335,7 +335,13 @@ describe("table editing in the main CodeMirror content DOM", () => {
       `[data-table-cell="${String(emptyCell.from)}"]`,
     );
     expect(widget).not.toBeNull();
-    widget?.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true }));
+    // Exercise the CM mouse-selection style directly: happy-dom dispatches
+    // selectionchange synchronously during CM focus, unlike browser delivery.
+    const event = new MouseEvent("mousedown", { button: 0, detail: 1 });
+    Object.defineProperty(event, "target", { value: widget });
+    const style = view.state.facet(EditorView.mouseSelectionStyle)[0]?.(view, event);
+    if (!style) throw new Error("Expected the table mouse-selection style.");
+    view.dispatch({ selection: style.get(event, false, false) });
     await Promise.resolve();
     expect(view.state.selection.main.head).toBe(emptyCell.from);
     expect(view.state.doc.toString()).toBe(source);
