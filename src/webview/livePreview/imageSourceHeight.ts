@@ -17,8 +17,22 @@ interface Height {
   readonly target: string;
   readonly pending?: boolean;
 }
+export interface ImageDimensions {
+  readonly width: number;
+  readonly height: number;
+}
+interface DecodedImageDimensions extends ImageDimensions {
+  readonly from: number;
+  readonly to: number;
+  readonly target: string;
+}
 const measured = StateEffect.define<readonly Height[]>();
 const textHeight = StateEffect.define<ReadonlyMap<number, number>>();
+const decodedDimensions = StateEffect.define<{
+  readonly from: number;
+  readonly target: string;
+  readonly dimensions?: ImageDimensions;
+}>();
 /** Remove a temporary source-edit reservation after the replacement settles. */
 export const imageHeightSettled = StateEffect.define<readonly number[]>();
 /** Mark visible images as pending before their resource widgets are rebuilt. */
@@ -39,11 +53,66 @@ const geometry = StateField.define<readonly Height[]>({
     return next;
   },
 });
+const imageDimensions = StateField.define<readonly DecodedImageDimensions[]>({
+  create: () => [],
+  update(value, tr) {
+    if (tr.effects.some((effect) => effect.is(imageHeightRefresh))) return [];
+    const links = findMarkdownLinks(tr.state.doc.toString()).filter((link) => link.image);
+    let next = value.flatMap((item) => {
+      const from = tr.changes.mapPos(item.from, -1);
+      const sameImage = links.find((link) => link.from === from && link.target === item.target);
+      return sameImage === undefined ? [] : [{ ...item, from: sameImage.from, to: sameImage.to }];
+    });
+    for (const effect of tr.effects) {
+      if (!effect.is(decodedDimensions)) continue;
+      const link = findMarkdownLinks(tr.state.doc.toString()).find(
+        (candidate) => candidate.image && candidate.from === effect.value.from,
+      );
+      if (link?.target !== effect.value.target) continue;
+      next = next.filter((item) => item.from !== effect.value.from);
+      const dimensions = effect.value.dimensions;
+      if (
+        dimensions !== undefined &&
+        Number.isSafeInteger(dimensions.width) &&
+        dimensions.width > 0 &&
+        Number.isSafeInteger(dimensions.height) &&
+        dimensions.height > 0
+      )
+        next.push({ ...link, width: dimensions.width, height: dimensions.height });
+    }
+    return next;
+  },
+});
+export function cachedImageDimensions(
+  state: EditorState,
+  from: number,
+  target: string,
+): ImageDimensions | undefined {
+  return state
+    .field(imageDimensions, false)
+    ?.find((item) => item.from === from && item.target === target);
+}
+export function setImageDimensions(
+  from: number,
+  target: string,
+  dimensions?: ImageDimensions,
+): StateEffect<{
+  readonly from: number;
+  readonly target: string;
+  readonly dimensions?: ImageDimensions;
+}> {
+  return decodedDimensions.of({
+    from,
+    target,
+    ...(dimensions === undefined ? {} : { dimensions }),
+  });
+}
 const session = StateField.define<readonly Height[]>({
   create: () => [],
   update(value, tr) {
     if (!tr.state.facet(editorPreferences).imageKeepHeight) return [];
     const images = findMarkdownLinks(tr.state.doc.toString()).filter((link) => link.image);
+    const decoded = tr.state.field(imageDimensions);
     const refresh = tr.effects.some((effect) => effect.is(imageHeightRefresh));
     const selected = (from: number, to: number): boolean =>
       tr.newSelection.ranges.some((range) => range.from <= to && range.to >= from);
@@ -95,7 +164,12 @@ const session = StateField.define<readonly Height[]>({
         pending: true,
       });
     }
-    next = next.filter((item) => item.pending === true || selected(item.from, item.to));
+    next = next.filter(
+      (item) =>
+        selected(item.from, item.to) ||
+        (item.pending === true &&
+          !decoded.some((size) => size.from === item.from && size.target === item.target)),
+    );
     for (const effect of tr.effects)
       if (effect.is(textHeight))
         next = next.map((item) => ({
@@ -151,6 +225,7 @@ function decorations(state: EditorState): DecorationSet {
 }
 export const imageSourceHeight: Extension = [
   geometry,
+  imageDimensions,
   session,
   EditorView.decorations.compute([session], decorations),
   ViewPlugin.fromClass(

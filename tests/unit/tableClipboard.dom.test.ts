@@ -77,7 +77,7 @@ function sourceTable(source: string): NonNullable<ReturnType<typeof findTables>[
   return table;
 }
 
-describe("rectangular table clipboard editing", () => {
+describe("continuous table clipboard editing", () => {
   it.each(["Delete", "Backspace"] as const)(
     "%s clears a whole rendered rectangle, including header cells, atomically",
     (key) => {
@@ -194,7 +194,7 @@ describe("rectangular table clipboard editing", () => {
     expect(view.state.doc.toString()).toBe(source);
   });
 
-  it("keeps logical spaces and inline values stable across repeated rectangle copy/paste", () => {
+  it("keeps logical spaces and inline values stable across repeated continuous copy/paste", () => {
     const source =
       "| h1 | h2 | h3 |\n| --- | --- | --- |\n|  前  | \x60コード\x60 |  |\n|　日本　| escaped\\|pipe |  |";
     const parsed = sourceTable(source);
@@ -209,14 +209,14 @@ describe("rectangular table clipboard editing", () => {
       const data = clipboard();
       const copy = dispatchClipboard(view, "copy", data);
       expect(copy.defaultPrevented).toBe(true);
-      expect(data.getData("text/plain")).toBe(" 前 \t\x60コード\x60\t\n　日本　\tescaped\\|pipe\t");
+      expect(data.getData("text/plain")).toBe(" 前 \t\x60コード\x60\t\n　日本　\tescaped\\|pipe");
       const paste = dispatchClipboard(view, "paste", data);
       expect(paste.defaultPrevented).toBe(true);
       expect(view.state.doc.toString()).toBe(source);
     }
   });
 
-  it("copies and cuts a cell rectangle as TSV, with one undo unit", () => {
+  it("copies and cuts continuous row-major cell text with one undo unit", () => {
     const source = "| h1 | h2 | h3 |\n| --- | --- | --- |\n| a | b | c |\n| d | e | f |";
     const parsed = sourceTable(source);
     const first = parsed.rows[1]?.cells[0];
@@ -228,12 +228,12 @@ describe("rectangular table clipboard editing", () => {
     const data = clipboard();
     const copied = dispatchClipboard(view, "copy", data);
     expect(copied.defaultPrevented).toBe(true);
-    expect(data.getData("text/plain")).toBe("a\tb\nd\te");
+    expect(data.getData("text/plain")).toBe("a\tb\tc\nd\te");
 
     const cutData = clipboard();
     const cut = dispatchClipboard(view, "cut", cutData);
     expect(cut.defaultPrevented).toBe(true);
-    expect(cutData.getData("text/plain")).toBe("a\tb\nd\te");
+    expect(cutData.getData("text/plain")).toBe("a\tb\tc\nd\te");
     expect(view.state.doc.toString()).not.toContain("| a | b |");
     expect(view.state.doc.toString()).not.toContain("| d | e |");
     expect(undo(view)).toBe(true);

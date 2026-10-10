@@ -1,7 +1,8 @@
 // @vitest-environment happy-dom
 
-import { EditorState } from "@codemirror/state";
+import { EditorState, StateEffect } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
+import { history, redo, undo } from "@codemirror/commands";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { sourceLineNumbers, sourceLineSelection } from "../../src/webview/sourceLines.js";
 
@@ -17,7 +18,7 @@ function createView(doc: string): EditorView {
     parent: document.body,
     state: EditorState.create({
       doc,
-      extensions: [sourceLineSelection, sourceLineNumbers(() => [])],
+      extensions: [sourceLineSelection, sourceLineNumbers(() => []), history()],
     }),
   });
   views.push(view);
@@ -31,6 +32,92 @@ function clipboardEvent(type: "copy" | "cut", data: DataTransfer): Event {
 }
 
 describe("source line selection display and clipboard ranges", () => {
+  it("keeps gutter-selected cut and deletion behind read-only and composition gates", () => {
+    const view = createView("left\n\nright");
+    const line = view.state.doc.line(2);
+    view.dispatch({ selection: { anchor: line.from }, userEvent: "select.line" });
+    const composing = vi.spyOn(view, "composing", "get").mockReturnValue(true);
+    view.contentDOM.dispatchEvent(clipboardEvent("cut", new DataTransfer()));
+    view.contentDOM.dispatchEvent(new KeyboardEvent("keydown", { key: "Delete", bubbles: true }));
+    expect(view.state.doc.toString()).toBe("left\n\nright");
+    composing.mockRestore();
+    view.dispatch({ effects: StateEffect.appendConfig.of(EditorState.readOnly.of(true)) });
+    view.contentDOM.dispatchEvent(clipboardEvent("cut", new DataTransfer()));
+    view.contentDOM.dispatchEvent(new KeyboardEvent("keydown", { key: "Delete", bubbles: true }));
+    expect(view.state.doc.toString()).toBe("left\n\nright");
+  });
+  it.each(["\n", "\r\n"])(
+    "keeps heading/blank/body ranges exact for %j, both directions and origins",
+    (eol) => {
+      for (const reverse of [false, true])
+        for (const emptyEnd of [false, true]) {
+          const view = createView(["neighbor", "### Heading", "", "body", "after"].join(eol));
+          const original = view.state.doc.toString();
+          const first = view.state.doc.line(2);
+          const last = view.state.doc.line(emptyEnd ? 3 : 4);
+          view.dispatch({
+            selection: {
+              anchor: reverse ? last.to : first.from,
+              head: reverse ? first.from : last.to,
+            },
+            userEvent: "select.line",
+          });
+          expect(view.state.selection.main).toMatchObject({ from: first.from, to: last.to });
+          expect(view.state.sliceDoc(first.from, last.to)).toBe(
+            emptyEnd ? "### Heading\n" : "### Heading\n\nbody",
+          );
+          const data = new DataTransfer();
+          view.contentDOM.dispatchEvent(clipboardEvent("copy", data));
+          expect(data.getData("text/plain")).toBe(
+            emptyEnd ? "### Heading\n\n" : "### Heading\n\nbody\n",
+          );
+          view.contentDOM.dispatchEvent(
+            new KeyboardEvent("keydown", {
+              key: reverse ? "Backspace" : "Delete",
+              bubbles: true,
+              cancelable: true,
+            }),
+          );
+          expect(view.state.doc.toString()).toBe(
+            emptyEnd ? "neighbor\nbody\nafter" : "neighbor\nafter",
+          );
+          expect(undo(view)).toBe(true);
+          expect(view.state.doc.toString()).toBe(original);
+          expect(redo(view)).toBe(true);
+          undo(view);
+          // Body-origin text selection has literal boundaries, without the
+          // gutter's whole-line separator contract.
+          view.dispatch({
+            selection: {
+              anchor: reverse ? last.to : first.from,
+              head: reverse ? first.from : last.to,
+            },
+            userEvent: "select.pointer",
+          });
+          expect(view.state.field(sourceLineSelection)).toBe(false);
+          view.dispatch({ ...view.state.replaceSelection(""), userEvent: "delete.selection" });
+          expect(view.state.doc.toString()).toBe(
+            emptyEnd ? "neighbor\n\nbody\nafter" : "neighbor\n\nafter",
+          );
+          expect(undo(view)).toBe(true);
+          expect(view.state.doc.toString()).toBe(original);
+        }
+    },
+  );
+
+  it.each(["Backspace", "Delete"])("%s deletes only a gutter-selected empty line", (key) => {
+    const view = createView("left\n\nright");
+    const line = view.state.doc.line(2);
+    view.dispatch({ selection: { anchor: line.from }, userEvent: "select.line" });
+    const event = new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true });
+    view.contentDOM.dispatchEvent(event);
+    expect(event.defaultPrevented).toBe(true);
+    expect(view.state.doc.toString()).toBe("left\nright");
+    expect(undo(view)).toBe(true);
+    expect(view.state.doc.toString()).toBe("left\n\nright");
+    view.dispatch({ selection: { anchor: 1 }, userEvent: "select" });
+    expect(view.state.field(sourceLineSelection)).toBe(false);
+  });
   it("ends the visible selection at line content while copying the exact LF separator", () => {
     const source = "first\nsecond\nthird";
     const view = createView(source);

@@ -1,9 +1,22 @@
-import { StateField, type EditorState, type Extension, type Range } from "@codemirror/state";
+import {
+  StateField,
+  type EditorState,
+  type Extension,
+  type Range,
+  type StateEffect,
+} from "@codemirror/state";
 import { Decoration, EditorView, WidgetType, type DecorationSet } from "@codemirror/view";
 import { findMarkdownLinks, type MarkdownLink } from "../../core/markdown/markdownLinks.js";
 import { MAX_IMAGE_BYTES } from "../../protocol/richMessages.js";
 import type { RichClient } from "../richClient.js";
-import { imageHeightRefresh, imageHeightSettled, imageSourceHeight } from "./imageSourceHeight.js";
+import {
+  cachedImageDimensions,
+  imageHeightRefresh,
+  imageHeightSettled,
+  imageSourceHeight,
+  setImageDimensions,
+  type ImageDimensions,
+} from "./imageSourceHeight.js";
 import {
   searchReveal,
   searchPresentation,
@@ -26,6 +39,7 @@ export interface ImageActions {
 }
 
 export const refreshImages = imageHeightRefresh;
+const IMAGE_MAX_HEIGHT_VH = 60;
 const imageRevision = StateField.define<number>({
   create: () => 0,
   update: (value, transaction) =>
@@ -92,7 +106,12 @@ export function imageEditing(actions: ImageActions): Extension {
         continue;
       ranges.push(
         Decoration.replace({
-          widget: new ImageWidget(link, actions, state.field(imageRevision)),
+          widget: new ImageWidget(
+            link,
+            actions,
+            state.field(imageRevision),
+            cachedImageDimensions(state, link.from, link.target),
+          ),
           inclusive: false,
         }).range(link.from, link.to),
       );
@@ -139,16 +158,32 @@ export function imageEditing(actions: ImageActions): Extension {
         display: "inline-flex",
         flexDirection: "column",
         alignItems: "flex-start",
+        boxSizing: "border-box",
         maxWidth: "100%",
         verticalAlign: "middle",
         padding: "4px",
         border: "1px solid var(--vscode-editorWidget-border, transparent)",
       },
-      ".cm-image-preview img": { maxWidth: "100%", maxHeight: "60vh", objectFit: "contain" },
+      ".cm-image-preview img": {
+        maxWidth: "100%",
+        maxHeight: `${String(IMAGE_MAX_HEIGHT_VH)}vh`,
+        objectFit: "contain",
+      },
       ".cm-image-preview span": {
         font: "12px var(--vscode-font-family)",
         color: "var(--vscode-descriptionForeground)",
         background: "transparent",
+        border: "0",
+      },
+      ".cm-image-preview .cm-image-status-sr-only": {
+        position: "absolute",
+        width: "1px",
+        height: "1px",
+        padding: "0",
+        margin: "-1px",
+        overflow: "hidden",
+        clip: "rect(0, 0, 0, 0)",
+        whiteSpace: "nowrap",
         border: "0",
       },
     }),
@@ -159,7 +194,7 @@ interface ImageBinding {
   link: MarkdownLink;
   readonly client: RichClient;
   readonly revision: number;
-  readonly update: (link: MarkdownLink) => void;
+  readonly update: (link: MarkdownLink, dimensions?: ImageDimensions) => void;
   dispose(): void;
 }
 // DOM lifetime only: no URL cache shared by documents, sessions or duplicate images.
@@ -177,6 +212,7 @@ class ImageWidget extends WidgetType {
     private readonly link: MarkdownLink,
     private readonly actions: ImageActions,
     private readonly revision: number,
+    private readonly dimensions?: ImageDimensions,
   ) {
     super();
   }
@@ -197,7 +233,7 @@ class ImageWidget extends WidgetType {
   public override updateDOM(container: HTMLElement): boolean {
     const binding = imageBindings.get(container);
     if (binding?.client !== this.actions.client || binding.revision !== this.revision) return false;
-    binding.update(this.link);
+    binding.update(this.link, this.dimensions);
     setImagePosition(container, this.link);
     this.actions.onImageEvent?.("dom-reused");
     return true;
@@ -212,13 +248,18 @@ class ImageWidget extends WidgetType {
     const image = document.createElement("img");
     image.alt = this.link.label;
     image.title = this.link.title ?? this.link.label;
+    setImageSize(image, this.dimensions);
     const status = document.createElement("span");
     status.textContent = "画像を読み込み中…";
+    status.setAttribute("role", "status");
+    if (this.dimensions !== undefined) status.classList.add("cm-image-status-sr-only");
     container.dataset["imageState"] = "loading";
     this.actions.onImageEvent?.("loading");
     let abort = new AbortController();
     let timer: ReturnType<typeof setTimeout> | undefined;
     let generation = 0;
+    let imageLoadGeneration: number | undefined;
+    let imageLoadTarget: string | undefined;
     const active = (token: number): boolean => token === generation && !abort.signal.aborted;
     const clearRequest = (): void => {
       abort.abort();
@@ -229,12 +270,16 @@ class ImageWidget extends WidgetType {
       link: this.link,
       client: this.actions.client,
       revision: this.revision,
-      update: (link) => {
+      update: (link, dimensions) => {
         const targetChanged = binding.link.target !== link.target;
         binding.link = link;
         image.alt = link.label;
         image.title = link.title ?? link.label;
-        if (targetChanged) startResolve(link);
+        if (targetChanged) {
+          setImageSize(image, dimensions);
+          status.classList.toggle("cm-image-status-sr-only", dimensions !== undefined);
+          startResolve(link);
+        } else if (dimensions !== undefined) setImageSize(image, dimensions);
       },
       dispose: () => {
         clearRequest();
@@ -260,25 +305,53 @@ class ImageWidget extends WidgetType {
     };
     image.addEventListener("mousedown", reveal);
     const loaded = (): void => {
-      if (!active(generation)) return;
+      if (
+        container.dataset["imageState"] !== "loading" ||
+        imageLoadGeneration === undefined ||
+        imageLoadTarget === undefined ||
+        !active(imageLoadGeneration) ||
+        binding.link.target !== imageLoadTarget
+      )
+        return;
       clearTimeout(timer);
+      const dimensions = decodedImageDimensions(image);
+      const effects: StateEffect<unknown>[] = [imageHeightSettled.of([binding.link.from])];
+      if (dimensions !== undefined) {
+        setImageSize(image, dimensions);
+        effects.push(setImageDimensions(binding.link.from, imageLoadTarget, dimensions));
+      }
       status.textContent = "";
       container.dataset["imageState"] = "loaded";
       this.actions.onImageEvent?.("load");
-      view.dispatch({ effects: imageHeightSettled.of([binding.link.from]) });
+      view.dispatch({ effects });
       view.requestMeasure();
     };
     const fail = (note: string): void => {
       if (!active(generation)) return;
       clearTimeout(timer);
+      setImageSize(image);
+      status.classList.remove("cm-image-status-sr-only");
       status.textContent = note;
       container.dataset["imageState"] = "error";
       image.hidden = true;
       this.actions.onImageEvent?.("error");
-      view.dispatch({ effects: imageHeightSettled.of([binding.link.from]) });
+      view.dispatch({
+        effects: [
+          imageHeightSettled.of([binding.link.from]),
+          setImageDimensions(binding.link.from, binding.link.target),
+        ],
+      });
       view.requestMeasure();
     };
     const failed = (): void => {
+      if (
+        container.dataset["imageState"] !== "loading" ||
+        imageLoadGeneration === undefined ||
+        imageLoadTarget === undefined ||
+        !active(imageLoadGeneration) ||
+        binding.link.target !== imageLoadTarget
+      )
+        return;
       fail("画像を読み込めません。Markdownのパスを確認してください。");
     };
     image.addEventListener("load", loaded);
@@ -312,6 +385,8 @@ class ImageWidget extends WidgetType {
                 "画像の読み込みが時間内に完了しませんでした。Markdownのパスを確認してください。",
               );
             }, 15000);
+            imageLoadGeneration = token;
+            imageLoadTarget = link.target;
             image.src = response.url;
           } else
             fail(
@@ -329,6 +404,27 @@ class ImageWidget extends WidgetType {
   }
   public override ignoreEvent(): boolean {
     return true;
+  }
+}
+
+function decodedImageDimensions(image: HTMLImageElement): ImageDimensions | undefined {
+  const { naturalWidth: width, naturalHeight: height } = image;
+  return Number.isSafeInteger(width) && width > 0 && Number.isSafeInteger(height) && height > 0
+    ? { width, height }
+    : undefined;
+}
+
+function setImageSize(image: HTMLImageElement, dimensions?: ImageDimensions): void {
+  if (dimensions !== undefined) {
+    image.width = dimensions.width;
+    image.height = dimensions.height;
+    image.style.height = "auto";
+    image.style.maxWidth = `min(100%, ${String((dimensions.width / dimensions.height) * IMAGE_MAX_HEIGHT_VH)}vh)`;
+  } else {
+    image.removeAttribute("width");
+    image.removeAttribute("height");
+    image.style.removeProperty("height");
+    image.style.removeProperty("max-width");
   }
 }
 

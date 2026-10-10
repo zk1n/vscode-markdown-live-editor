@@ -86,10 +86,11 @@ const livePreviewTheme = EditorView.baseTheme({
   ".cm-content": {
     boxSizing: "border-box",
     minHeight: "100%",
-    // VS Code 1.136.1 markdown.css uses a 26px reading gutter and 1em top
-    // inset. Keeping the inset on CodeMirror's measured content preserves its
-    // documentTop/coordinate model.
-    padding: "1em 26px 2rem",
+    // CM measures vertical padding but draws open selection edges from the
+    // content box. Horizontal reading space must therefore sit outside that
+    // box, otherwise a multi-line selection paints 26px left of the text.
+    padding: "1em 0 2rem",
+    margin: "0 26px",
   },
   ".cm-line": {
     lineHeight: "var(--markdown-line-height, 1.6)",

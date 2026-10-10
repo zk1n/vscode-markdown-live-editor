@@ -174,6 +174,14 @@ describe("image paste and drop", () => {
       "before\n![alt](assets/image.png)\n\n![alt](assets/image.png)\n\nafter",
     );
     await settle();
+    for (const image of view.dom.querySelectorAll<HTMLImageElement>(".cm-image-preview img")) {
+      Object.defineProperties(image, {
+        naturalWidth: { configurable: true, value: 960 },
+        naturalHeight: { configurable: true, value: 540 },
+      });
+      image.dispatchEvent(new Event("load"));
+    }
+    await settle();
     const originals = [...view.dom.querySelectorAll(".cm-image-preview img")];
     for (let index = 0; index < 5; index += 1)
       view.dispatch({ changes: { from: 0, insert: "x" }, selection: { anchor: 1 } });
@@ -241,6 +249,140 @@ describe("image paste and drop", () => {
     await settle();
     image?.dispatchEvent(new Event("load"));
     expect(preview?.dataset["imageState"]).toBe("loaded");
+  });
+
+  it("restores decoded dimensions before resolve and invalidates them across resource generations", async () => {
+    const replies = new Map<string, (() => void)[]>();
+    const source = "before\n![alt](first.png)\nafter";
+    const { view } = createView(source, 0, undefined, (target, reply) => {
+      const pending = replies.get(target) ?? [];
+      pending.push(reply);
+      replies.set(target, pending);
+    });
+    const load = (image: HTMLImageElement, width: number, height: number): void => {
+      Object.defineProperties(image, {
+        naturalWidth: { configurable: true, value: width },
+        naturalHeight: { configurable: true, value: height },
+      });
+      image.dispatchEvent(new Event("load"));
+    };
+
+    await settle();
+    replies.get("first.png")?.[0]?.();
+    await settle();
+    const preview = view.dom.querySelector<HTMLElement>(".cm-image-preview");
+    const image = preview?.querySelector("img");
+    expect(preview).not.toBeNull();
+    expect(image).not.toBeNull();
+    if (preview === null || image === null || image === undefined)
+      throw new Error("image preview missing");
+    load(image, 960, 540);
+    await settle();
+    expect(image.getAttribute("width")).toBe("960");
+    expect(image.getAttribute("height")).toBe("540");
+
+    const firstTarget = view.state.doc.toString().indexOf("first.png");
+    view.dispatch({
+      changes: {
+        from: firstTarget,
+        to: firstTarget + "first.png".length,
+        insert: "second.png",
+      },
+      selection: { anchor: 0 },
+      userEvent: "input.type",
+    });
+    await settle();
+    expect(preview.dataset["imageTarget"]).toBe("second.png");
+    expect(image.getAttribute("width")).toBeNull();
+    expect(image.getAttribute("height")).toBeNull();
+    expect(image.style.height).toBe("");
+    expect(image.style.maxWidth).toBe("");
+    expect(preview.querySelector("span")?.classList.contains("cm-image-status-sr-only")).toBe(
+      false,
+    );
+    image.dispatchEvent(new Event("load"));
+    expect(preview.dataset["imageState"]).toBe("loading");
+
+    replies.get("second.png")?.[0]?.();
+    await settle();
+    load(image, 320, 240);
+    await settle();
+    expect(image.getAttribute("width")).toBe("320");
+    expect(image.getAttribute("height")).toBe("240");
+    expect(image.style.height).toBe("auto");
+
+    const current = view.state.doc.toString();
+    const label = current.indexOf("alt");
+    view.dispatch({
+      changes: { from: label, to: label + "alt".length, insert: "updated" },
+      selection: { anchor: 0 },
+      userEvent: "input.type",
+    });
+    await settle();
+    expect(view.dom.querySelector(".cm-image-preview img")).toBe(image);
+    expect(image.getAttribute("width")).toBe("320");
+
+    const currentAfterLabelEdit = view.state.doc.toString();
+    const from = currentAfterLabelEdit.indexOf("![updated]");
+    const to = currentAfterLabelEdit.indexOf("\n", from);
+    view.dispatch({ selection: { anchor: from, head: to } });
+    await settle();
+    expect(view.dom.querySelector(".cm-image-preview")).toBeNull();
+    view.dispatch({ selection: { anchor: 0 } });
+    await settle();
+    const restored = view.dom.querySelector<HTMLElement>(".cm-image-preview");
+    const restoredImage = restored?.querySelector("img");
+    expect(restored).not.toBeNull();
+    expect(restoredImage?.getAttribute("width")).toBe("320");
+    expect(restoredImage?.getAttribute("height")).toBe("240");
+    expect(restored?.querySelector("span")?.getAttribute("role")).toBe("status");
+    expect(restored?.querySelector("span")?.classList.contains("cm-image-status-sr-only")).toBe(
+      true,
+    );
+    expect(restored?.dataset["imageState"]).toBe("loading");
+    expect(view.dom.querySelector(".cm-image-source-height")).toBeNull();
+
+    view.dispatch({ effects: refreshImages.of(null) });
+    await settle();
+    const refreshedImage = view.dom.querySelector<HTMLImageElement>(".cm-image-preview img");
+    expect(refreshedImage).not.toBe(restoredImage);
+    expect(refreshedImage?.getAttribute("width")).toBeNull();
+    expect(refreshedImage?.getAttribute("height")).toBeNull();
+    expect(refreshedImage?.style.height).toBe("");
+    expect(refreshedImage?.style.maxWidth).toBe("");
+    expect(
+      view.dom
+        .querySelector(".cm-image-preview span")
+        ?.classList.contains("cm-image-status-sr-only"),
+    ).toBe(false);
+
+    const refreshedSource = view.state.doc.toString();
+    const secondTarget = refreshedSource.indexOf("second.png");
+    view.dispatch({
+      changes: {
+        from: secondTarget,
+        to: secondTarget + "second.png".length,
+        insert: "failed.png",
+      },
+      selection: { anchor: 0 },
+      userEvent: "input.type",
+    });
+    await settle();
+    const failedPreview = view.dom.querySelector<HTMLElement>(".cm-image-preview");
+    const failedImage = failedPreview?.querySelector<HTMLImageElement>("img");
+    replies.get("failed.png")?.[0]?.();
+    await settle();
+    failedImage?.dispatchEvent(new Event("error"));
+    await settle();
+    expect(failedPreview?.dataset["imageState"]).toBe("error");
+    expect(failedImage?.hidden).toBe(true);
+    expect(failedImage?.getAttribute("width")).toBeNull();
+    expect(failedImage?.getAttribute("height")).toBeNull();
+    expect(failedImage?.style.height).toBe("");
+    expect(failedImage?.style.maxWidth).toBe("");
+    expect(
+      failedPreview?.querySelector("span")?.classList.contains("cm-image-status-sr-only"),
+    ).toBe(false);
   });
 
   it("creates a fresh frame after remove and recreate instead of reusing the old request", async () => {
